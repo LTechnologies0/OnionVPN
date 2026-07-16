@@ -1,0 +1,163 @@
+name: Release
+
+# Publishes signed per-ABI release APKs (arm64-v8a, x86_64) to GitHub Releases.
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v0.1.0)"
+        required: false
+        default: ""
+      run_scorecard:
+        description: "Run OpenSSF Scorecard analysis"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    if: >
+      startsWith(github.ref, 'refs/tags/v') ||
+      (github.event_name == 'workflow_dispatch' && inputs.tag != '')
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+      RELEASE_KEYSTORE_PASSWORD: ${{ secrets.RELEASE_KEYSTORE_PASSWORD }}
+      RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+      RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+          cache: gradle
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Create local.properties
+        run: echo "sdk.dir=${ANDROID_SDK_ROOT}" >> local.properties
+
+      - name: Ensure native binaries
+        run: |
+          chmod +x scripts/fetch-native-binaries.sh
+          if [ ! -f app/src/main/jniLibs/arm64-v8a/libtor.so ]; then
+            ./scripts/fetch-native-binaries.sh
+          fi
+
+      - name: Verify signing secrets
+        run: |
+          missing=0
+          for var in RELEASE_KEYSTORE_BASE64 RELEASE_KEYSTORE_PASSWORD RELEASE_KEY_ALIAS; do
+            if [ -z "${!var}" ]; then
+              echo "::error::$var is not set. See README → CI signing."
+              missing=1
+            fi
+          done
+          exit "$missing"
+
+      - name: Resolve release tag
+        id: meta
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG="${GITHUB_REF#refs/tags/}"
+          fi
+          VERSION="${TAG#v}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Assemble signed release APKs (all ABIs)
+        run: ./gradlew :app:assembleRelease --stacktrace --no-daemon
+
+      - name: Verify APK signatures
+        run: |
+          APKSIGNER=$(find "${ANDROID_SDK_ROOT}/build-tools" -name apksigner -type f | sort -V | tail -1)
+          found=0
+          for apk in app/build/outputs/apk/release/*-release.apk; do
+            [ -f "$apk" ] || continue
+            found=1
+            echo "Verifying $apk"
+            "$APKSIGNER" verify --verbose "$apk"
+          done
+          if [ "$found" -eq 0 ]; then
+            echo "::error::No release APKs found after assembleRelease"
+            exit 1
+          fi
+
+      - name: Package APKs with checksums
+        run: |
+          VERSION="${{ steps.meta.outputs.version }}"
+          mkdir -p dist/release
+          shopt -s nullglob
+          for apk in app/build/outputs/apk/release/*-release.apk; do
+            abi=$(basename "$apk" | sed -E 's/^app-|-release\.apk$//g')
+            out="dist/release/onionvpn-${VERSION}-${abi}.apk"
+            cp "$apk" "$out"
+            sha256sum "$out" >> dist/release/SHA256SUMS.txt
+            echo "- \`onionvpn-${VERSION}-${abi}.apk\` — **${abi}**" >> dist/release/ABI_LIST.md
+          done
+          {
+            echo "## OnionVPN ${VERSION}"
+            echo
+            echo "Per-ABI release APKs (Tor + DNSCrypt + hev-socks5-tunnel)."
+            echo
+            echo "### Assets"
+            cat dist/release/ABI_LIST.md
+            echo
+            echo "Verify: \`sha256sum -c SHA256SUMS.txt\`"
+          } > dist/release/RELEASE_NOTES.md
+          ls -lh dist/release/
+          cat dist/release/SHA256SUMS.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: OnionVPN ${{ steps.meta.outputs.version }}
+          generate_release_notes: true
+          prerelease: ${{ contains(steps.meta.outputs.version, 'alpha') || contains(steps.meta.outputs.version, 'beta') }}
+          latest: true
+          body_path: dist/release/RELEASE_NOTES.md
+          files: |
+            dist/release/onionvpn-*.apk
+            dist/release/SHA256SUMS.txt
+          fail_on_unmatched_files: true
+
+  scorecard:
+    if: >
+      github.event_name == 'schedule' ||
+      (github.event_name == 'workflow_dispatch' && inputs.run_scorecard)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+      id-token: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: ossf/scorecard-action@v2.4.2
+        with:
+          results_file: results.sarif
+          results_format: sarif
+          publish_results: true
+
+      - uses: github/codeql-action/upload-sarif@v4
+        if: always()
+        with:
+          sarif_file: results.sarif

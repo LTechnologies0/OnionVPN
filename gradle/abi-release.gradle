@@ -1,0 +1,21 @@
+def ONIONPHONE_ABIS = ["arm64-v8a", "x86_64"] as String[]
+def devAbi = (findProperty("onionphone.devAbi") ?: "arm64-v8a").toString()
+def isDebugBuild = gradle.startParameter.taskNames.any { it.toString().toLowerCase().contains("debug") }
+
+android {
+    defaultConfig {
+        if (isDebugBuild) {
+            ndk {
+                abiFilters.add(devAbi)
+            }
+        }
+    }
+    splits {
+        abi {
+            enable !isDebugBuild
+            reset()
+            include(*ONIONPHONE_ABIS)
+            universalApk false
+        }
+    }
+}

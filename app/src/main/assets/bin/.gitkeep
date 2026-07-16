@@ -1,0 +1,5 @@
+# Place Tor binaries per ABI before running on device:
+# assets/bin/tor/arm64-v8a/tor
+# assets/bin/tor/armeabi-v7a/tor
+# assets/bin/dnscrypt-proxy/arm64-v8a/dnscrypt-proxy
+# assets/bin/dnscrypt-proxy/armeabi-v7a/dnscrypt-proxy

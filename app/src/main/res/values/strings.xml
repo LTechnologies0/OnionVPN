@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">OnionVPN</string>
+    <string name="notification_channel_name">VPN tunnel</string>
+    <string name="notification_channel_desc">OnionVPN tunnel status</string>
+    <string name="notification_starting">Starting Tor, DNSCrypt and VPN…</string>
+    <string name="notification_connected">Tunnel active — traffic routed via Tor</string>
+    <string name="notification_blocking">Kill switch active — traffic blocked</string>
+    <string name="notification_error">Tunnel error — traffic blocked</string>
+    <string name="notification_stopping">Stopping tunnel…</string>
+    <string name="action_stop">Stop</string>
+</resources>
