@@ -260,7 +260,7 @@ class DnsCryptProcessManager(
                 configDirectory = configDirectory.absolutePath,
                 serverName = serverName,
                 listenPort = ports.dnsCryptListenPort,
-                torSocksPort = ports.torSocksPort,
+                torSocksPort = ports.torDnsCryptSocksPort,
                 torDnsPort = ports.torDnsPort,
                 preferences = preferences,
             ),

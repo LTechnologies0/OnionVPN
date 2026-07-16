@@ -12,6 +12,7 @@ import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
 import ltechnologies.onionphone.onionvpn.core.model.ValidationCheck
 import ltechnologies.onionphone.onionvpn.core.model.ValidationStatus
 import ltechnologies.onionphone.onionvpn.core.vpn.VpnProfileBuilder
+import timber.log.Timber
 
 /**
  * VPN routing and leak checks using official Android APIs.
@@ -64,10 +65,55 @@ object AndroidVpnInspector {
             add(checkOwnVpnRegistered(connectivity, ours, ownUid))
             add(checkCompetingVpns(connectivity, others, ownUid))
             addAll(checkVpnLinkProperties(connectivity, ours))
+            add(checkUnderlyingNonVpnNetwork(connectivity))
             if (killSwitchExpected) {
                 add(checkNoParallelValidatedClearnet(connectivity))
             }
+        }.also { checks ->
+            checks.filter { it.status == ValidationStatus.Fail }.forEach { check ->
+                Timber.e(
+                    "Request FAIL [%s] %s: %s",
+                    check.id,
+                    check.label,
+                    check.detail,
+                )
+            }
         }
+    }
+
+    /**
+     * Tor upstream must ride a real Wi‑Fi/cellular network (VpnService.setUnderlyingNetworks).
+     */
+    private fun checkUnderlyingNonVpnNetwork(cm: ConnectivityManager): ValidationCheck {
+        val underlying = cm.allNetworks.filter { network ->
+            val caps = cm.getNetworkCapabilities(network) ?: return@filter false
+            !caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN) &&
+                caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN) &&
+                caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+        }
+        val best = underlying.firstOrNull { network ->
+            cm.getNetworkCapabilities(network)
+                ?.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) == true
+        } ?: underlying.firstOrNull()
+        val caps = best?.let { cm.getNetworkCapabilities(it) }
+        return ValidationCheck(
+            id = "android.vpn.underlying",
+            label = "Underlying network for Tor upstream",
+            status = if (best != null) ValidationStatus.Pass else ValidationStatus.Fail,
+            detail = if (best != null) {
+                buildString {
+                    append("net=$best")
+                    if (caps?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true) append(" WIFI")
+                    if (caps?.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) == true) append(" CELL")
+                    if (caps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) == true) {
+                        append(" VALIDATED")
+                    }
+                }
+            } else {
+                "No INTERNET+NOT_VPN upstream — Tor cannot reach guards"
+            },
+            tripsKillSwitch = true,
+        )
     }
 
     private fun checkOwnVpnRegistered(
@@ -174,6 +220,17 @@ object AndroidVpnInspector {
                     },
             ),
             ValidationCheck(
+                id = "android.vpn.route.ipv6",
+                label = "VPN captures default IPv6 route (::/0)",
+                status = if (hasIpv6DefaultRoute(link)) ValidationStatus.Pass else ValidationStatus.Fail,
+                detail = "Orbot/InviZible pattern — without ::/0, IPv6 can leak clearnet. " +
+                    "routes=" + link.routes.filter {
+                        it.destination?.address?.hostAddress?.contains(':') == true
+                    }.joinToString { r ->
+                        "${r.destination?.address?.hostAddress}/${r.destination?.prefixLength}"
+                    },
+            ),
+            ValidationCheck(
                 id = "android.vpn.dns.servers",
                 label = "VPN DNS locked to tunnel resolver",
                 status = if (dnsOk) ValidationStatus.Pass else ValidationStatus.Fail,
@@ -197,6 +254,14 @@ object AndroidVpnInspector {
                 detail = "interface=${link.interfaceName}",
             ),
         )
+    }
+
+    private fun hasIpv6DefaultRoute(link: LinkProperties): Boolean {
+        return link.routes.any { route ->
+            val dest = route.destination ?: return@any false
+            val host = dest.address?.hostAddress ?: return@any false
+            (host == "::" || host == "0:0:0:0:0:0:0:0") && dest.prefixLength == 0
+        }
     }
 
     private fun hasIpv4DefaultRoute(link: LinkProperties): Boolean {

@@ -10,6 +10,7 @@ import kotlinx.coroutines.withContext
 import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
 import ltechnologies.onionphone.onionvpn.core.model.ValidationCheck
 import ltechnologies.onionphone.onionvpn.core.model.ValidationStatus
+import timber.log.Timber
 
 object TorPathValidator {
     suspend fun validate(
@@ -21,7 +22,11 @@ object TorPathValidator {
             checkTcp("tor.socks", "Tor SOCKS reachable", socksHost, socksPort),
             checkDnsPort("tor.dnsport", "Tor DNSPort reachable (UDP)", socksHost, dnsPort),
             checkRemoteDns(socksHost, socksPort),
-        )
+        ).also { checks ->
+            checks.filter { it.status == ValidationStatus.Fail }.forEach { check ->
+                Timber.e("Request FAIL [%s] %s: %s", check.id, check.label, check.detail)
+            }
+        }
     }
 
     fun validateTorrcContent(
@@ -43,12 +48,22 @@ object TorPathValidator {
         }
         val safeSocksSet = config.contains("SafeSocks 0") || config.contains("SafeSocks 1")
         val clientOnly = config.contains("ClientOnly 1")
-        val ok = hasSocks && hasDns && safeSocksSet && clientOnly
+        val entryGuards = config.contains("UseEntryGuards 1")
+        val socksIsolation = config.contains("IsolateDestAddr") &&
+            config.contains("IsolateDestPort") &&
+            config.contains("IsolateSOCKSAuth")
+        val socksPolicy = config.contains("SocksPolicy accept 127.0.0.1") &&
+            config.contains("SocksPolicy reject *")
+        // Whonix: two SOCKSPort lines (app + DNSCrypt).
+        val dualSocks = config.lineSequence().count { it.startsWith("SOCKSPort ") } >= 2
+        val ok = hasSocks && hasDns && safeSocksSet && clientOnly &&
+            entryGuards && socksIsolation && socksPolicy && dualSocks
         return ValidationCheck(
             id = "tor.config.content",
             label = "Tor torrc (runtime)",
             status = if (ok) ValidationStatus.Pass else ValidationStatus.Fail,
-            detail = "$source: socks=$hasSocks dns=$hasDns SafeSocksSet=$safeSocksSet ClientOnly=$clientOnly" +
+            detail = "$source: socks=$hasSocks dns=$hasDns dualSocks=$dualSocks " +
+                "SocksPolicy=$socksPolicy EntryGuards=$entryGuards Isolation=$socksIsolation" +
                 (if (socksPort != null) " ports=$socksPort/$dnsPort" else ""),
         )
     }

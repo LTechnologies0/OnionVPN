@@ -10,8 +10,9 @@ import java.net.ServerSocket
  * Picks ephemeral loopback ports at tunnel start to avoid clashes with Tor Browser,
  * InviZible, Orbot, or stale processes still bound to well-known defaults.
  *
- * Uses OS-assigned ephemeral ports (port 0) instead of probing random ports — the
- * manual bind probe fails on Android even when the port is actually free.
+ * Whonix stream isolation: [torSocksPort] (hev/apps) and [torDnsCryptSocksPort]
+ * (DNSCrypt upstream) are **distinct** Tor SocksPorts so DNS metadata cannot be
+ * circuit-correlated with application TCP.
  */
 object TunnelPortAllocator {
     private const val MIN_PORT = 10240
@@ -22,6 +23,7 @@ object TunnelPortAllocator {
         val used = mutableSetOf<Int>()
         return TunnelRuntimePorts(
             torSocksPort = allocateTcpPort(used),
+            torDnsCryptSocksPort = allocateTcpPort(used),
             torDnsPort = allocateUdpPort(used),
             dnsCryptListenPort = allocateTcpUdpPort(used),
         )
@@ -73,7 +75,10 @@ object TunnelPortAllocator {
 }
 
 data class TunnelRuntimePorts(
+    /** Tor SocksPort for hev / application traffic (IsolateDest*). */
     val torSocksPort: Int,
+    /** Tor SocksPort for DNSCrypt upstream only (Whonix: separate circuit family). */
+    val torDnsCryptSocksPort: Int,
     val torDnsPort: Int,
     val dnsCryptListenPort: Int,
 )

@@ -21,6 +21,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import java.text.SimpleDateFormat
@@ -94,6 +95,11 @@ private fun LogList(lines: List<LogLine>) {
             Text(
                 text = "${formatter.format(Date(line.timestampMs))}  ${line.text}",
                 style = MaterialTheme.typography.bodySmall,
+                color = if (line.isError) {
+                    MaterialTheme.colorScheme.error
+                } else {
+                    Color.Unspecified
+                },
                 modifier = Modifier.fillMaxWidth(),
             )
         }

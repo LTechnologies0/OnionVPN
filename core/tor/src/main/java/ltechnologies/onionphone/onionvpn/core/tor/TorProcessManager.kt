@@ -48,7 +48,10 @@ class TorProcessManager(
                 .start()
             startLogPump(process!!)
             waitForBootstrap(ports)
-            Timber.i("Tor listening socks=${ports.torSocksPort} dns=${ports.torDnsPort}")
+            Timber.i(
+                "Tor listening socks=${ports.torSocksPort} " +
+                    "dnscryptSocks=${ports.torDnsCryptSocksPort} dns=${ports.torDnsPort}",
+            )
             Result.success(Unit)
         } catch (error: Exception) {
             Timber.e(error, "Tor failed to start")
@@ -98,7 +101,11 @@ class TorProcessManager(
                 throw IOException("Tor process exited before bootstrap")
             }
             try {
-                if (isSocksReady(ports.torSocksPort) && isDnsPortReady(ports.torDnsPort)) {
+                if (
+                    isSocksReady(ports.torSocksPort) &&
+                    isSocksReady(ports.torDnsCryptSocksPort) &&
+                    isDnsPortReady(ports.torDnsPort)
+                ) {
                     Timber.i("Tor bootstrap complete")
                     return
                 }
@@ -165,6 +172,7 @@ class TorProcessManager(
             TorConfigWriter.write(
                 dataDirectory = configDirectory.absolutePath,
                 socksPort = ports.torSocksPort,
+                dnsCryptSocksPort = ports.torDnsCryptSocksPort,
                 dnsPort = ports.torDnsPort,
                 preferences = preferences,
             ),

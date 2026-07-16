@@ -77,16 +77,22 @@ fun SettingsScreen(
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Text("DNS mode", style = MaterialTheme.typography.titleMedium)
+        Text(
+            text = "FakeDNS (Orbot): apps see fake 100.64.x IPs; hostname resolved at Tor exit.\n" +
+                "DNSCrypt mux: apps see real dest IPs (looked up over Tor); TCP still via Tor exit.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FilterChip(
+                selected = local.dnsResolverMode == DnsResolverMode.FAKE_IP_SOCKS5A,
+                onClick = { local = local.copy(dnsResolverMode = DnsResolverMode.FAKE_IP_SOCKS5A) },
+                label = { Text("FakeDNS (Orbot)") },
+            )
             FilterChip(
                 selected = local.dnsResolverMode == DnsResolverMode.DNSCRYPT_MUX,
                 onClick = { local = local.copy(dnsResolverMode = DnsResolverMode.DNSCRYPT_MUX) },
                 label = { Text("DNSCrypt mux") },
-            )
-            FilterChip(
-                selected = local.dnsResolverMode == DnsResolverMode.FAKE_IP_SOCKS5A,
-                onClick = { local = local.copy(dnsResolverMode = DnsResolverMode.FAKE_IP_SOCKS5A) },
-                label = { Text("FakeDNS") },
             )
         }
 
@@ -99,6 +105,18 @@ fun SettingsScreen(
             label = "Kill switch",
             checked = local.killSwitchEnabled,
             onChecked = { local = local.copy(killSwitchEnabled = it) },
+        )
+
+        Text("System leak checklist", style = MaterialTheme.typography.titleMedium)
+        Text(
+            text = "TUN alone is not enough on Android:\n" +
+                "1. Settings → Network → VPN → OnionVPN → Always-on ON\n" +
+                "2. Block connections without VPN ON\n" +
+                "3. Private DNS → Off (DoT can bypass tunnel DNS)\n" +
+                "4. Stop other VPNs (InviZible/Orbot)\n" +
+                "5. WebRTC/STUN is browser-side — Vanadium/Mull, not the VPN",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
 
         Text("Tor", style = MaterialTheme.typography.titleMedium)

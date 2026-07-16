@@ -2,6 +2,7 @@ package ltechnologies.onionphone.onionvpn.core.vpn
 
 import android.content.Intent
 import android.net.VpnService
+import android.os.Build
 import android.os.ParcelFileDescriptor
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
@@ -18,12 +19,23 @@ import timber.log.Timber
 class OnionVpnService : VpnService() {
     private var tunForwarder: TunForwarder? = null
     private var tunInterface: ParcelFileDescriptor? = null
+    private var underlyingTracker: UnderlyingNetworkTracker? = null
     private val executor = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "onionvpn-vpn").apply { isDaemon = true }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        val action = intent?.action ?: return START_NOT_STICKY
+        // Always-on / sticky restart: OS may deliver null action — fail-closed Blocking TUN
+        // then ask the coordinator to bring Tor up (Orbot/Mullvad pattern).
+        if (intent?.action.isNullOrEmpty()) {
+            executor.execute {
+                Timber.i("VPN started with empty action — establishing Blocking profile (always-on/sticky)")
+                applyBlockingDefaults()
+                notifyCoordinator(ACTION_ALWAYS_ON)
+            }
+            return START_STICKY
+        }
+        val action = intent!!.action!!
         executor.execute {
             when (action) {
                 ACTION_START -> applyProfile(intent, startForwarder = true)
@@ -43,11 +55,18 @@ class OnionVpnService : VpnService() {
     }
 
     override fun onRevoke() {
-        Timber.w("VPN permission revoked")
-        stopTunnel()
+        Timber.w("VPN permission revoked — tearing down and notifying coordinator")
+        executor.execute {
+            stopTunnel(destroyService = false)
+            notifyCoordinator(ACTION_REVOKED)
+        }
         super.onRevoke()
     }
 
+    /**
+     * Seamless profile swap (Mullvad/Orbot): establish the new TUN **before** closing the old
+     * one so Android never has a window with no VPN routes (clearnet leak).
+     */
     private fun applyProfile(intent: Intent, startForwarder: Boolean) {
         val preferences = TunnelPreferences(
             routeAllTrafficThroughTor = intent.getBooleanExtra(EXTRA_ROUTE_ALL, true),
@@ -63,36 +82,88 @@ class OnionVpnService : VpnService() {
             ?.let { runCatching { DnsResolverMode.valueOf(it) }.getOrNull() }
             ?: DnsResolverMode.DNSCRYPT_MUX
 
-        // Drop any stale "established" flag before re-bind so waiters cannot race.
+        // Signal waiters that a rebind is in progress without dropping routes yet.
         isEstablished.value = false
         activeGeneration.value = -1
         forwarderSocksPort.value = -1
         forwarderDnsCryptPort.value = -1
 
-        stopForwarder()
-        tunInterface?.close()
-        tunInterface = null
+        val previousTun = tunInterface
+        val previousForwarder = tunForwarder
+        tunForwarder = null
+
+        // Stop draining the old TUN first — packets blackhole (fail-closed) while we swap.
+        previousForwarder?.stop()
 
         val result = establish(preferences, mode)
         when (result) {
             is VpnEstablishResult.Success -> {
+                // New TUN owns routes — safe to close the previous fd.
+                if (previousTun != null && previousTun !== tunInterface) {
+                    previousTun.close()
+                }
                 if (startForwarder && mode == VpnProfileMode.Connected) {
                     startForwarder(torSocksPort, dnsCryptPort, dnsMode)
+                    startUnderlyingTracking()
+                } else {
+                    stopUnderlyingTracking()
                 }
                 profileMode.value = mode
                 if (generation >= 0) {
                     activeGeneration.value = generation
                 }
                 isEstablished.value = true
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    alwaysOnActive.value = isAlwaysOn
+                    lockdownActive.value = isLockdownEnabled
+                }
                 Timber.i(
                     "VPN established mode=$mode killSwitch=${preferences.killSwitchEnabled} " +
-                        "socks=$torSocksPort dnscrypt=$dnsCryptPort gen=$generation",
+                        "socks=$torSocksPort dnscrypt=$dnsCryptPort gen=$generation " +
+                        "alwaysOn=${alwaysOnActive.value} lockdown=${lockdownActive.value}",
                 )
             }
             is VpnEstablishResult.Failure -> {
                 Timber.e("VPN establish failed: ${result.reason}")
-                isEstablished.value = false
-                profileMode.value = null
+                // Keep previous TUN if still open so we do not open a clearnet window.
+                if (previousTun != null && tunInterface == null) {
+                    tunInterface = previousTun
+                    isEstablished.value = true
+                    Timber.w("Restored previous TUN after failed rebind")
+                } else {
+                    previousTun?.close()
+                    isEstablished.value = false
+                    profileMode.value = null
+                }
+            }
+        }
+    }
+
+    private fun applyBlockingDefaults() {
+        val preferences = TunnelPreferences(killSwitchEnabled = true)
+        isEstablished.value = false
+        forwarderSocksPort.value = -1
+        forwarderDnsCryptPort.value = -1
+        stopForwarder()
+        val previousTun = tunInterface
+        val result = establish(preferences, VpnProfileMode.Blocking)
+        when (result) {
+            is VpnEstablishResult.Success -> {
+                previousTun?.close()
+                profileMode.value = VpnProfileMode.Blocking
+                stopUnderlyingTracking()
+                val gen = generationSeq.incrementAndGet()
+                activeGeneration.value = gen
+                isEstablished.value = true
+            }
+            is VpnEstablishResult.Failure -> {
+                Timber.e("Always-on Blocking establish failed: ${result.reason}")
+                if (previousTun != null && tunInterface == null) {
+                    tunInterface = previousTun
+                    isEstablished.value = true
+                } else {
+                    previousTun?.close()
+                }
             }
         }
     }
@@ -101,19 +172,32 @@ class OnionVpnService : VpnService() {
         preferences: TunnelPreferences,
         mode: VpnProfileMode,
     ): VpnEstablishResult {
-        val builder = VpnProfileBuilder.configure(this, preferences, mode)
-        val tun = builder.establish()
-            ?: return VpnEstablishResult.Failure("VpnService.Builder.establish() returned null")
-        tunInterface = tun
-        return VpnEstablishResult.Success(mode)
+        return try {
+            val builder = VpnProfileBuilder.configure(this, preferences, mode)
+            val tun = builder.establish()
+                ?: return VpnEstablishResult.Failure("VpnService.Builder.establish() returned null")
+            tunInterface = tun
+            VpnEstablishResult.Success(mode)
+        } catch (error: Exception) {
+            Timber.e(error, "VPN establish threw")
+            VpnEstablishResult.Failure(error.message ?: "establish failed")
+        }
     }
 
     private fun startForwarder(torSocksPort: Int, dnsCryptPort: Int, dnsMode: DnsResolverMode) {
         val tun = tunInterface ?: return
-        val forwarder = HevSocks5TunForwarder(applicationContext, dnsMode)
+        val forwarder = HevSocks5TunForwarder(
+            context = applicationContext,
+            dnsMode = dnsMode,
+            onFatal = { error ->
+                Timber.e(error, "TUN forwarder died — signalling fail-closed")
+                forwarderAlive.value = false
+            },
+        )
         tunForwarder = forwarder
         forwarderSocksPort.value = torSocksPort
         forwarderDnsCryptPort.value = dnsCryptPort
+        forwarderAlive.value = true
         forwarder.start(
             tunFd = tun,
             socksHost = TunnelEndpoints.LOOPBACK,
@@ -122,22 +206,60 @@ class OnionVpnService : VpnService() {
         )
     }
 
+    private fun startUnderlyingTracking() {
+        if (underlyingTracker == null) {
+            underlyingTracker = UnderlyingNetworkTracker(applicationContext, this)
+        }
+        underlyingTracker?.start()
+    }
+
+    private fun stopUnderlyingTracking() {
+        underlyingTracker?.stop()
+        underlyingTracker = null
+    }
+
     private fun stopForwarder() {
         tunForwarder?.stop()
         tunForwarder = null
         forwarderSocksPort.value = -1
         forwarderDnsCryptPort.value = -1
+        forwarderAlive.value = false
     }
 
     private fun stopTunnel(destroyService: Boolean = true) {
+        stopUnderlyingTracking()
         stopForwarder()
         tunInterface?.close()
         tunInterface = null
         isEstablished.value = false
         activeGeneration.value = -1
         profileMode.value = null
+        alwaysOnActive.value = false
+        lockdownActive.value = false
         if (destroyService) {
             stopSelf()
+        }
+    }
+
+    /**
+     * Notify [TunnelForegroundService] without a hard module dependency — uses the
+     * public action strings mirrored in the app module.
+     */
+    private fun notifyCoordinator(action: String) {
+        val coordinatorAction = when (action) {
+            ACTION_REVOKED -> "ltechnologies.onionphone.onionvpn.tunnel.REVOKED"
+            ACTION_ALWAYS_ON -> "ltechnologies.onionphone.onionvpn.tunnel.ALWAYS_ON"
+            else -> return
+        }
+        runCatching {
+            startService(
+                Intent().setClassName(
+                    packageName,
+                    "ltechnologies.onionphone.onionvpn.service.TunnelForegroundService",
+                ).setAction(coordinatorAction),
+            )
+        }.onFailure { error ->
+            Timber.w(error, "Could not notify tunnel coordinator ($coordinatorAction)")
         }
     }
 
@@ -146,6 +268,8 @@ class OnionVpnService : VpnService() {
         const val ACTION_BLOCK = "ltechnologies.onionphone.onionvpn.BLOCK"
         const val ACTION_STOP = "ltechnologies.onionphone.onionvpn.STOP"
         const val ACTION_DESTROY = "ltechnologies.onionphone.onionvpn.DESTROY"
+        private const val ACTION_REVOKED = "revoked"
+        private const val ACTION_ALWAYS_ON = "always_on"
         const val EXTRA_ROUTE_ALL = "route_all"
         const val EXTRA_KILL_SWITCH = "kill_switch"
         const val EXTRA_PROFILE_MODE = "profile_mode"
@@ -176,5 +300,14 @@ class OnionVpnService : VpnService() {
 
         private val profileMode = MutableStateFlow<VpnProfileMode?>(null)
         val vpnProfileMode: StateFlow<VpnProfileMode?> = profileMode.asStateFlow()
+
+        private val forwarderAlive = MutableStateFlow(true)
+        val tunForwarderAlive: StateFlow<Boolean> = forwarderAlive.asStateFlow()
+
+        private val alwaysOnActive = MutableStateFlow(false)
+        val vpnAlwaysOn: StateFlow<Boolean> = alwaysOnActive.asStateFlow()
+
+        private val lockdownActive = MutableStateFlow(false)
+        val vpnLockdown: StateFlow<Boolean> = lockdownActive.asStateFlow()
     }
 }

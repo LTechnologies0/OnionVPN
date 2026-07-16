@@ -21,6 +21,13 @@ object TunnelEndpoints {
     const val VPN_CLIENT_ADDRESS = "10.8.0.2"
     const val VPN_DNS_ADDRESS = "10.8.0.1"
 
+    /**
+     * ULA IPv6 TUN address (Orbot/InviZible pattern).
+     * Captures IPv6 into the TUN so it cannot leak clearnet; hev blackholes or
+     * forwards over Tor SOCKS — never leaves via Wi‑Fi/cellular.
+     */
+    const val VPN_CLIENT_ADDRESS_V6 = "fd00:8:8:8::2"
+
     /** Fake-IP pool for hev mapdns (must not overlap VPN 10.8.0.0/24). */
     const val FAKE_DNS_NETWORK = "100.64.0.0"
     const val FAKE_DNS_NETMASK = "255.192.0.0"
@@ -29,7 +36,20 @@ object TunnelEndpoints {
     /** Mullvad-style dummy DNS when no resolver is available (RFC 5737 TEST-NET-1). */
     const val FALLBACK_BLOCKING_DNS = "192.0.2.1"
 
-    const val VPN_MTU = 1500
+    const val VPN_MTU = 1280
+
+    /**
+     * SOCKS5 credentials for hev → Tor IsolateSOCKSAuth (app traffic circuits).
+     */
+    const val SOCKS_ISOLATION_USER = "onionvpn"
+    const val SOCKS_ISOLATION_PASS = "stream"
+
+    /**
+     * SOCKS5 credentials for DNSCrypt → separate SocksPort + IsolateSOCKSAuth
+     * (Whonix: DNS resolver traffic must not share circuits with apps).
+     */
+    const val SOCKS_DNSCRYPT_USER = "dnscrypt"
+    const val SOCKS_DNSCRYPT_PASS = "resolver"
 }
 
 /**
@@ -78,6 +98,8 @@ data class ValidationCheck(
     val label: String,
     val status: ValidationStatus,
     val detail: String,
+    /** If false, shown in UI but must not tear down the tunnel (e.g. OS Settings the app cannot force). */
+    val tripsKillSwitch: Boolean = true,
 )
 
 data class TunnelSnapshot(
@@ -88,6 +110,8 @@ data class TunnelSnapshot(
     val vpnEstablished: Boolean = false,
     val validations: List<ValidationCheck> = emptyList(),
     val lastError: String? = null,
+    /** Live Tor clearnet bandwidth (UID TrafficStats), e.g. "Tor ▼ 12 KB/s  ▲ 3 KB/s". */
+    val throughputText: String = "",
 ) {
     val isBusy: Boolean
         get() = when (phase) {

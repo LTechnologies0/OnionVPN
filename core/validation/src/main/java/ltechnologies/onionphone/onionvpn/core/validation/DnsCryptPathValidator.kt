@@ -10,12 +10,17 @@ import kotlinx.coroutines.withContext
 import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
 import ltechnologies.onionphone.onionvpn.core.model.ValidationCheck
 import ltechnologies.onionphone.onionvpn.core.model.ValidationStatus
+import timber.log.Timber
 
 object DnsCryptPathValidator {
     suspend fun validate(
         listenPort: Int = TunnelEndpoints.DNSCRYPT_LISTEN_PORT,
     ): List<ValidationCheck> = withContext(Dispatchers.IO) {
-        listOf(probeListener(listenPort))
+        listOf(probeListener(listenPort)).also { checks ->
+            checks.filter { it.status == ValidationStatus.Fail }.forEach { check ->
+                Timber.e("Request FAIL [%s] %s: %s", check.id, check.label, check.detail)
+            }
+        }
     }
 
     fun validateConfigContent(
@@ -38,9 +43,9 @@ object DnsCryptPathValidator {
         }
         val ignoresSystemDns = config.contains("ignore_system_dns = true")
         val usesProxy = if (torSocksPort != null) {
-            config.contains("proxy = 'socks5://$loopback:$torSocksPort'")
+            config.contains("proxy = 'socks5://") && config.contains("@$loopback:$torSocksPort'")
         } else {
-            config.contains("proxy = 'socks5://$loopback:")
+            config.contains("proxy = 'socks5://")
         }
         val hasListen = if (listenPort != null) {
             config.contains("listen_addresses = ['$loopback:$listenPort']")

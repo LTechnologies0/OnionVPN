@@ -10,7 +10,10 @@ class DnsCryptConfigWriterTest {
     fun forcesUpstreamThroughTorAndBootstrapThroughDnsPort() {
         val config = DnsCryptConfigWriter.write(configDirectory = "/tmp")
 
-        assertTrue(config.contains("proxy = 'socks5://${TunnelEndpoints.LOOPBACK}:${TunnelEndpoints.TOR_SOCKS_PORT}'"))
+        val proxy =
+            "socks5://${TunnelEndpoints.SOCKS_DNSCRYPT_USER}:${TunnelEndpoints.SOCKS_DNSCRYPT_PASS}" +
+                "@${TunnelEndpoints.LOOPBACK}:${TunnelEndpoints.TOR_SOCKS_PORT}"
+        assertTrue(config.contains("proxy = '$proxy'"))
         assertTrue(
             config.contains(
                 "bootstrap_resolvers = ['${TunnelEndpoints.LOOPBACK}:${TunnelEndpoints.TOR_DNS_PORT}']",

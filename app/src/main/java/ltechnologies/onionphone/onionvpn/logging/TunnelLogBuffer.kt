@@ -14,6 +14,7 @@ enum class LogSource {
 data class LogLine(
     val timestampMs: Long,
     val text: String,
+    val isError: Boolean = false,
 )
 
 /**
@@ -35,8 +36,8 @@ object TunnelLogBuffer {
     val dnsCryptLogs: StateFlow<List<LogLine>> = _dnscrypt.asStateFlow()
     val torLogs: StateFlow<List<LogLine>> = _tor.asStateFlow()
 
-    fun append(source: LogSource, text: String) {
-        val line = LogLine(System.currentTimeMillis(), text)
+    fun append(source: LogSource, text: String, isError: Boolean = false) {
+        val line = LogLine(System.currentTimeMillis(), text, isError = isError)
         synchronized(lock) {
             when (source) {
                 LogSource.APP -> {

@@ -7,14 +7,12 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
 import android.content.pm.ServiceInfo
-import android.net.TrafficStats
 import android.net.VpnService
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 import dagger.hilt.android.AndroidEntryPoint
-import hev.sockstun.TProxyService
 import javax.inject.Inject
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -25,6 +23,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -46,22 +45,24 @@ import ltechnologies.onionphone.onionvpn.core.model.VpnProfileMode
 import ltechnologies.onionphone.onionvpn.core.tor.TorProcessManager
 import ltechnologies.onionphone.onionvpn.core.validation.TunnelValidator
 import ltechnologies.onionphone.onionvpn.core.vpn.OnionVpnService
+import ltechnologies.onionphone.onionvpn.core.vpn.TorBandwidthSampler
+import ltechnologies.onionphone.onionvpn.prefs.TunnelPreferencesStore
 import timber.log.Timber
-import java.util.Locale
-import kotlin.math.max
 
 /**
  * Foreground coordinator — InviZible control/data-plane split:
  *
- * 1. Tor bootstrap (SOCKS + DNSPort on loopback)
- * 2. DNSCrypt (upstream via Tor SOCKS, bootstrap via Tor DNSPort)
- * 3. VPN TUN (hev-socks5 → Tor SOCKS; DNS via TunDnsMux or FakeDNS)
- * 4. Validation (Android APIs + runtime probes, Mullvad-style)
+ * 1. Blocking TUN first when kill-switch is on (Mullvad: never clearnet during bootstrap)
+ * 2. Tor bootstrap (SOCKS + DNSPort on loopback)
+ * 3. DNSCrypt (upstream via Tor SOCKS, bootstrap via Tor DNSPort)
+ * 4. VPN TUN Connected (hev-socks5 → Tor SOCKS; DNS via TunDnsMux or FakeDNS)
+ * 5. Validation (Android APIs + runtime probes)
  */
 @AndroidEntryPoint
 class TunnelForegroundService : Service() {
     @Inject lateinit var tor: TorProcessManager
     @Inject lateinit var dnsCrypt: DnsCryptProcessManager
+    @Inject lateinit var preferencesStore: TunnelPreferencesStore
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val lifecycleMutex = Mutex()
@@ -71,10 +72,8 @@ class TunnelForegroundService : Service() {
     private var throughputJob: Job? = null
     private var preferences = TunnelPreferences()
     private var runtimePorts: TunnelRuntimePorts? = null
-    private var lastRxBytes = 0L
-    private var lastTxBytes = 0L
-    private var lastStatsAtMs = 0L
     private var throughputText = ""
+    private val bandwidthSampler by lazy { TorBandwidthSampler(applicationInfo.uid) }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -99,6 +98,43 @@ class TunnelForegroundService : Service() {
                 scope.launch { runStopSequence(userInitiated = true) }
                 return START_NOT_STICKY
             }
+            ACTION_REVOKED -> {
+                Timber.w("VPN revoked by system — fail-closed teardown")
+                scope.launch {
+                    lifecycleMutex.withLock {
+                        tunnelJob?.cancel()
+                        tunnelJob = null
+                        validationJob?.cancel()
+                        validationJob = null
+                        stopThroughputUpdates()
+                        dnsCrypt.stop()
+                        tor.stop()
+                        releaseBootstrapWakeLock()
+                        updateSnapshot(
+                            phase = TunnelPhase.Error,
+                            torRunning = false,
+                            dnsCryptRunning = false,
+                            vpnEstablished = false,
+                            lastError = "VPN permission revoked — traffic unprotected until reconnect",
+                        )
+                        stopForeground(STOP_FOREGROUND_REMOVE)
+                        stopSelf()
+                    }
+                }
+                return START_NOT_STICKY
+            }
+            ACTION_ALWAYS_ON -> {
+                if (tunnelJob?.isActive == true) {
+                    return START_STICKY
+                }
+                // Blocking TUN already up from OnionVpnService; bring Tor path online.
+                startForegroundImmediately(TunnelPhase.StartingTor)
+                tunnelJob = scope.launch {
+                    preferences = preferencesStore.preferences.first()
+                    runStartSequence()
+                }
+                return START_STICKY
+            }
         }
         return START_NOT_STICKY
     }
@@ -122,13 +158,28 @@ class TunnelForegroundService : Service() {
     }
 
     private suspend fun startTunnel() {
-        updateSnapshot(TunnelPhase.StartingTor)
         acquireBootstrapWakeLock()
+
+        // Mullvad/Orbot: if kill-switch is on, own the default route BEFORE Tor bootstrap
+        // so no app can clearnet while we wait for circuits.
+        if (preferences.killSwitchEnabled && VpnService.prepare(this) == null) {
+            updateSnapshot(TunnelPhase.StartingVpn)
+            val blockingGen = OnionVpnService.nextGeneration()
+            startVpnBlocking(blockingGen)
+            if (!waitForBlockingEstablishment(blockingGen)) {
+                handleFailure("Kill-switch Blocking TUN failed to establish", fromValidation = false)
+                return
+            }
+            Timber.i("Kill-switch Blocking TUN up before Tor bootstrap")
+        }
+
+        updateSnapshot(TunnelPhase.StartingTor)
 
         val ports = TunnelPortAllocator.allocate()
         runtimePorts = ports
         Timber.i(
-            "Allocated tunnel ports socks=${ports.torSocksPort} dns=${ports.torDnsPort} " +
+            "Allocated tunnel ports socks=${ports.torSocksPort} " +
+                "dnscryptSocks=${ports.torDnsCryptSocksPort} dns=${ports.torDnsPort} " +
                 "dnscrypt=${ports.dnsCryptListenPort} dnsMode=${preferences.dnsResolverMode}",
         )
 
@@ -151,7 +202,7 @@ class TunnelForegroundService : Service() {
             return
         }
 
-        stopVpnAndWait()
+        // Seamless rebind: do NOT tear down Blocking/previous TUN first (clearnet window).
         val vpnGeneration = OnionVpnService.nextGeneration()
         startVpn(VpnProfileMode.Connected, ports, vpnGeneration)
 
@@ -174,7 +225,7 @@ class TunnelForegroundService : Service() {
 
         updateSnapshot(TunnelPhase.Validating, vpnEstablished = true)
         val validations = runValidation(ports)
-        val failedChecks = validations.filter { it.status == ValidationStatus.Fail }
+        val failedChecks = validations.filter { TunnelValidator.isKillSwitchFailure(it) }
 
         releaseBootstrapWakeLock()
 
@@ -199,6 +250,7 @@ class TunnelForegroundService : Service() {
             vpnEstablished = true,
         )
         startPeriodicValidation()
+        startForwarderWatchdog()
         startThroughputUpdates()
     }
 
@@ -235,7 +287,8 @@ class TunnelForegroundService : Service() {
         releaseBootstrapWakeLock()
         stopThroughputUpdates()
 
-        if (preferences.killSwitchEnabled && OnionVpnService.vpnEstablished.value) {
+        val canBlock = preferences.killSwitchEnabled && VpnService.prepare(this) == null
+        if (canBlock) {
             enterBlockingMode(message, validations)
             return
         }
@@ -250,7 +303,9 @@ class TunnelForegroundService : Service() {
         validations: List<ValidationCheck>,
     ) {
         updateSnapshot(TunnelPhase.Blocking, lastError = message, validations = validations)
-        startVpnBlocking()
+        val gen = OnionVpnService.nextGeneration()
+        startVpnBlocking(gen)
+        waitForBlockingEstablishment(gen)
         dnsCrypt.stop()
         tor.stop()
         updateSnapshot(
@@ -271,6 +326,8 @@ class TunnelForegroundService : Service() {
             validationJob?.cancel()
             validationJob = null
             stopThroughputUpdates()
+            forwarderWatchJob?.cancel()
+            forwarderWatchJob = null
             teardownModules(
                 resetSnapshot = userInitiated,
                 phase = TunnelPhase.Stopping,
@@ -319,16 +376,50 @@ class TunnelForegroundService : Service() {
         )
     }
 
-    private fun startVpnBlocking() {
+    private fun startVpnBlocking(generation: Int = OnionVpnService.nextGeneration()) {
         startService(
             Intent(this, OnionVpnService::class.java).apply {
                 action = OnionVpnService.ACTION_BLOCK
                 putExtra(OnionVpnService.EXTRA_ROUTE_ALL, preferences.routeAllTrafficThroughTor)
                 putExtra(OnionVpnService.EXTRA_KILL_SWITCH, true)
                 putExtra(OnionVpnService.EXTRA_PROFILE_MODE, VpnProfileMode.Blocking.name)
-                putExtra(OnionVpnService.EXTRA_GENERATION, OnionVpnService.nextGeneration())
+                putExtra(OnionVpnService.EXTRA_GENERATION, generation)
             },
         )
+    }
+
+    private suspend fun waitForBlockingEstablishment(generation: Int): Boolean {
+        repeat(VPN_READY_POLLS) {
+            val established = OnionVpnService.vpnEstablished.value
+            val genOk = OnionVpnService.vpnGeneration.value == generation
+            val modeOk = OnionVpnService.vpnProfileMode.value == VpnProfileMode.Blocking
+            val noForwarder = OnionVpnService.hevSocksPort.value < 0
+            if (established && genOk && modeOk && noForwarder) return true
+            delay(VPN_READY_POLL_MS)
+        }
+        Timber.e(
+            "Blocking VPN wait timeout gen=$generation established=${OnionVpnService.vpnEstablished.value} " +
+                "mode=${OnionVpnService.vpnProfileMode.value}",
+        )
+        return false
+    }
+
+    private var forwarderWatchJob: Job? = null
+
+    private fun startForwarderWatchdog() {
+        forwarderWatchJob?.cancel()
+        forwarderWatchJob = scope.launch {
+            OnionVpnService.tunForwarderAlive.collect { alive ->
+                if (!alive && _snapshot.value.phase == TunnelPhase.Connected) {
+                    Timber.e("TUN forwarder died while Connected — entering kill-switch")
+                    lifecycleMutex.withLock {
+                        if (_snapshot.value.phase == TunnelPhase.Connected) {
+                            handleFailure("TUN forwarder died", fromValidation = true)
+                        }
+                    }
+                }
+            }
+        }
     }
 
     private suspend fun stopVpnAndWait() {
@@ -377,11 +468,11 @@ class TunnelForegroundService : Service() {
                     runtimePorts = ports,
                     dnsResolverMode = preferences.dnsResolverMode,
                 )
-                val failedChecks = checks.filter { it.status == ValidationStatus.Fail }
+                val failedChecks = checks.filter { TunnelValidator.isKillSwitchFailure(it) }
                 _snapshot.update { it.copy(validations = checks) }
                 if (failedChecks.isNotEmpty()) {
                     failedChecks.forEach { check ->
-                        Timber.w("Periodic FAIL [${check.id}] ${check.label}: ${check.detail}")
+                        Timber.e("Periodic FAIL [${check.id}] ${check.label}: ${check.detail}")
                     }
                     val summary = failedChecks.joinToString("; ") { it.label }
                     handleFailure(
@@ -397,14 +488,15 @@ class TunnelForegroundService : Service() {
 
     private fun startThroughputUpdates() {
         throughputJob?.cancel()
-        lastRxBytes = 0L
-        lastTxBytes = 0L
-        lastStatsAtMs = System.currentTimeMillis()
+        bandwidthSampler.reset()
+        throughputText = ""
         throughputJob = scope.launch {
             while (isActive) {
                 delay(THROUGHPUT_INTERVAL_MS)
                 if (_snapshot.value.phase != TunnelPhase.Connected) continue
-                throughputText = sampleThroughput()
+                val sample = bandwidthSampler.sample()
+                throughputText = sample.displayText
+                _snapshot.value = _snapshot.value.copy(throughputText = throughputText)
                 updateNotification(TunnelPhase.Connected)
             }
         }
@@ -414,40 +506,7 @@ class TunnelForegroundService : Service() {
         throughputJob?.cancel()
         throughputJob = null
         throughputText = ""
-    }
-
-    private fun sampleThroughput(): String {
-        val now = System.currentTimeMillis()
-        val elapsedSec = max(0.001, (now - lastStatsAtMs) / 1000.0)
-        lastStatsAtMs = now
-
-        val hevStats = runCatching { TProxyService.TProxyGetStats() }.getOrNull()
-        val (rx, tx) = if (hevStats != null && hevStats.size >= 2) {
-            hevStats[0] to hevStats[1]
-        } else {
-            // Fallback: device total minus our UID (approx tunnel traffic).
-            val uid = applicationInfo.uid
-            val totalRx = TrafficStats.getTotalRxBytes()
-            val totalTx = TrafficStats.getTotalTxBytes()
-            val uidRx = TrafficStats.getUidRxBytes(uid).coerceAtLeast(0)
-            val uidTx = TrafficStats.getUidTxBytes(uid).coerceAtLeast(0)
-            (totalRx - uidRx).coerceAtLeast(0) to (totalTx - uidTx).coerceAtLeast(0)
-        }
-
-        val down = if (lastRxBytes > 0) (rx - lastRxBytes) / elapsedSec else 0.0
-        val up = if (lastTxBytes > 0) (tx - lastTxBytes) / elapsedSec else 0.0
-        lastRxBytes = rx
-        lastTxBytes = tx
-        return String.format(Locale.US, "▼ %s  ▲ %s", formatRate(down), formatRate(up))
-    }
-
-    private fun formatRate(bytesPerSec: Double): String {
-        val abs = kotlin.math.abs(bytesPerSec)
-        return when {
-            abs >= 1_048_576 -> String.format(Locale.US, "%.1f MB/s", bytesPerSec / 1_048_576.0)
-            abs >= 1024 -> String.format(Locale.US, "%.1f KB/s", bytesPerSec / 1024.0)
-            else -> String.format(Locale.US, "%.0f B/s", bytesPerSec)
-        }
+        bandwidthSampler.reset()
     }
 
     private fun acquireBootstrapWakeLock() {
@@ -559,13 +618,16 @@ class TunnelForegroundService : Service() {
             vpnEstablished = vpnEstablished,
             validations = validations,
             lastError = lastError,
+            throughputText = if (phase == TunnelPhase.Connected) throughputText else "",
         )
         updateNotification(phase)
     }
 
-    companion object {
+        companion object {
         const val ACTION_START = "ltechnologies.onionphone.onionvpn.tunnel.START"
         const val ACTION_STOP = "ltechnologies.onionphone.onionvpn.tunnel.STOP"
+        const val ACTION_REVOKED = "ltechnologies.onionphone.onionvpn.tunnel.REVOKED"
+        const val ACTION_ALWAYS_ON = "ltechnologies.onionphone.onionvpn.tunnel.ALWAYS_ON"
         const val EXTRA_ROUTE_ALL = "route_all"
         const val EXTRA_KILL_SWITCH = "kill_switch"
         const val EXTRA_DNSCRYPT_SERVER = "dnscrypt_server"
@@ -583,8 +645,10 @@ class TunnelForegroundService : Service() {
         private const val CHANNEL_ID = "onionvpn_tunnel"
         private const val NOTIFICATION_ID = 42
         private const val BOOTSTRAP_WAKELOCK_TIMEOUT_MS = 3 * 60 * 1000L
-        private const val VALIDATION_INTERVAL_MS = 2 * 60 * 1000L
-        private const val VALIDATION_TIMEOUT_MS = 30_000L
+        /** Faster than 2 min — catch route hijacks / forwarder death sooner. */
+        private const val VALIDATION_INTERVAL_MS = 30_000L
+        /** Exit IP check via Tor SOCKS can take ~25s; keep headroom for full suite. */
+        private const val VALIDATION_TIMEOUT_MS = 60_000L
         private const val THROUGHPUT_INTERVAL_MS = 3_000L
         private const val VPN_READY_POLL_MS = 250L
         private const val VPN_READY_POLLS = 40

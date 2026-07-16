@@ -10,6 +10,7 @@ import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import ltechnologies.onionphone.onionvpn.core.model.DnsResolverMode
 import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
@@ -24,7 +25,9 @@ import timber.log.Timber
 class HevSocks5TunForwarder(
     private val context: Context,
     private val dnsMode: DnsResolverMode = DnsResolverMode.DNSCRYPT_MUX,
+    private val onFatal: ((Throwable) -> Unit)? = null,
 ) : TunForwarder {
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val worker = AtomicReference<Job?>(null)
     private var tunDup: ParcelFileDescriptor? = null
     private var dnsMux: TunDnsMux? = null
@@ -46,7 +49,7 @@ class HevSocks5TunForwarder(
         val dup = tunFd.dup()
         val fd = dup.fd
         tunDup = dup
-        val job = CoroutineScope(Dispatchers.IO).launch {
+        val job = scope.launch {
             val configFile = File(context.filesDir, "hev-socks5-tunnel.yaml")
             configFile.writeText(buildConfig(socksHost, socksPort, useMapDns = useMapDns))
             Timber.i(
@@ -56,6 +59,7 @@ class HevSocks5TunForwarder(
                 hev.sockstun.TProxyService.TProxyStartService(configFile.absolutePath, fd)
             } catch (error: Exception) {
                 Timber.e(error, "hev-socks5-tunnel exited")
+                onFatal?.invoke(error)
             }
         }
         worker.set(job)
@@ -73,7 +77,7 @@ class HevSocks5TunForwarder(
         val muxEnd = pair[1]
         tunDup = hevEnd
 
-        val job = CoroutineScope(Dispatchers.IO).launch {
+        val job = scope.launch {
             val configFile = File(context.filesDir, "hev-socks5-tunnel.yaml")
             configFile.writeText(buildConfig(socksHost, socksPort, useMapDns = false))
             Timber.i(
@@ -83,6 +87,7 @@ class HevSocks5TunForwarder(
                 hev.sockstun.TProxyService.TProxyStartService(configFile.absolutePath, hevEnd.fd)
             } catch (error: Exception) {
                 Timber.e(error, "hev-socks5-tunnel (mux) exited")
+                onFatal?.invoke(error)
             }
         }
         worker.set(job)
@@ -115,10 +120,19 @@ class HevSocks5TunForwarder(
         appendLine("tunnel:")
         appendLine("  mtu: ${TunnelEndpoints.VPN_MTU}")
         appendLine("  ipv4: ${TunnelEndpoints.VPN_CLIENT_ADDRESS}")
+        // Orbot: declare IPv6 on hev so ::/0 packets entering the TUN are handled
+        // (SOCKS or drop) instead of ignored / leaked.
+        appendLine("  ipv6: '${TunnelEndpoints.VPN_CLIENT_ADDRESS_V6}'")
+        // Tor VPN threat model: ICMP/ping is not useful over Tor and can fingerprint.
+        appendLine("  icmp: 'off'")
         appendLine("socks5:")
         appendLine("  port: $socksPort")
         appendLine("  address: '$socksHost'")
+        // Force UDP associate over TCP — no clearnet UDP side-channel.
         appendLine("  udp: 'tcp'")
+        // IsolateSOCKSAuth: dedicated Tor circuits for OnionVPN's SOCKS stream.
+        appendLine("  username: '${TunnelEndpoints.SOCKS_ISOLATION_USER}'")
+        appendLine("  password: '${TunnelEndpoints.SOCKS_ISOLATION_PASS}'")
         if (useMapDns) {
             appendLine("mapdns:")
             appendLine("  address: ${TunnelEndpoints.VPN_DNS_ADDRESS}")

@@ -17,6 +17,7 @@ import androidx.compose.ui.unit.dp
 import ltechnologies.onionphone.onionvpn.core.model.TunnelPhase
 import ltechnologies.onionphone.onionvpn.core.model.TunnelSnapshot
 import ltechnologies.onionphone.onionvpn.core.model.ValidationCheck
+import ltechnologies.onionphone.onionvpn.core.model.ValidationStatus
 
 @Composable
 fun StatusScreen(
@@ -37,6 +38,13 @@ fun StatusScreen(
         Text(text = "Tor: ${if (snapshot.torRunning) "up" else "down"}")
         Text(text = "DNSCrypt: ${if (snapshot.dnsCryptRunning) "up" else "down"}")
         Text(text = "VPN: ${if (snapshot.vpnEstablished) "up" else "down"}")
+        if (snapshot.phase == TunnelPhase.Connected && snapshot.throughputText.isNotBlank()) {
+            Text(
+                text = snapshot.throughputText,
+                style = MaterialTheme.typography.titleMedium,
+                color = MaterialTheme.colorScheme.primary,
+            )
+        }
         snapshot.lastError?.let { error ->
             Text(
                 text = "Error: $error",
@@ -77,7 +85,14 @@ private fun ValidationCard(check: ValidationCheck) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(12.dp)) {
             Text(text = check.label, style = MaterialTheme.typography.titleSmall)
-            Text(text = "${check.status}: ${check.detail}")
+            Text(
+                text = "${check.status}: ${check.detail}",
+                color = if (check.status == ValidationStatus.Fail) {
+                    MaterialTheme.colorScheme.error
+                } else {
+                    MaterialTheme.colorScheme.onSurface
+                },
+            )
         }
     }
 }

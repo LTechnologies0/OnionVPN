@@ -157,7 +157,7 @@ class TunDnsMux(
                 Timber.d("TunDnsMux DNS reply %d bytes", reply.size)
             }
         } catch (error: Exception) {
-            Timber.w(error, "DNSCrypt forward failed")
+            Timber.e(error, "DNSCrypt forward failed — query dropped")
         }
     }
 
