@@ -128,18 +128,49 @@ class TorControlClient {
     fun closeBuiltCircuits(): Result<Int> = ops.closeBuiltCircuits()
     fun getConf(vararg keys: String): Map<String, String> = ops.getConf(*keys)
     fun getInfo(key: String): String = ops.getInfo(key)
+    fun getInfoMany(vararg keys: String): Map<String, String> = ops.getInfoMany(*keys)
     fun rawCommand(cmd: String): Result<List<String>> = ops.rawCommand(cmd)
     fun setNodePrefs(entry: String, exit: String, exclude: String): Result<Unit> =
         ops.setNodePrefs(entry, exit, exclude)
 
     /**
-     * Polls [TorControlCatalog.HEALTH_GETINFO_KEYS]-relevant GETINFOs into [status].
+     * Cheap bootstrap / health poll — one batched GETINFO, no circuit/stream dumps.
      */
     fun refreshInfo() {
+        refreshHealth(includeTraffic = true, includeCircuits = false)
+    }
+
+    /**
+     * Cheap health poll for network recovery / periodic keep-alive.
+     */
+    fun refreshHealthLite() {
+        refreshHealth(includeTraffic = false, includeCircuits = false)
+    }
+
+    /**
+     * Full status including circuit/stream counts (UI / rare ticks only).
+     */
+    fun refreshCircuits() {
+        refreshHealth(includeTraffic = true, includeCircuits = true)
+    }
+
+    private fun refreshHealth(includeTraffic: Boolean, includeCircuits: Boolean) {
         if (!transport.isOpen) return
         runCatching {
-            val version = runCatching { ops.getInfo("version") }.getOrDefault("")
-            TorControlEventParser.parseBootstrapPhase(ops.getInfo("status/bootstrap-phase"))
+            val keys = buildList {
+                add("version")
+                add("status/bootstrap-phase")
+                add("status/circuit-established")
+                add("status/enough-dir-info")
+                add("dormant")
+                add("network-liveness")
+                if (includeTraffic) {
+                    add("traffic/read")
+                    add("traffic/written")
+                }
+            }
+            val info = ops.getInfoMany(*keys.toTypedArray())
+            TorControlEventParser.parseBootstrapPhase(info["status/bootstrap-phase"].orEmpty())
                 ?.let { b ->
                     _status.update {
                         it.copy(
@@ -149,26 +180,38 @@ class TorControlClient {
                         )
                     }
                 }
-            val circEst = ops.getInfo("status/circuit-established") == "1"
-            val dirOk = ops.getInfo("status/enough-dir-info") == "1"
-            val dormant = (ops.getInfo("dormant").toIntOrNull() ?: 0) != 0
-            val live = runCatching { ops.getInfo("network-liveness") }.getOrDefault("")
-                .equals("up", ignoreCase = true)
-            val read = ops.getInfo("traffic/read").toLongOrNull() ?: 0L
-            val write = ops.getInfo("traffic/written").toLongOrNull() ?: 0L
-            val circBody = ops.getInfo("circuit-status")
-            val built = circBody.lineSequence().count {
-                it.trim().split(' ').getOrNull(1) == "BUILT"
+            val circEst = info["status/circuit-established"] == "1"
+            val dirOk = info["status/enough-dir-info"] == "1"
+            val dormant = (info["dormant"]?.toIntOrNull() ?: 0) != 0
+            val live = info["network-liveness"].orEmpty().equals("up", ignoreCase = true)
+            val read = if (includeTraffic) {
+                info["traffic/read"]?.toLongOrNull() ?: 0L
+            } else {
+                _status.value.readBytes
             }
-            val streams = runCatching { ops.getInfo("stream-status") }.getOrDefault("")
-            val streamCount = streams.lineSequence().count { it.isNotBlank() }
-            val guards = runCatching { ops.getInfo("entry-guards") }.getOrDefault("")
-                .lineSequence()
-                .take(3)
-                .joinToString(" | ") { it.trim().take(48) }
+            val write = if (includeTraffic) {
+                info["traffic/written"]?.toLongOrNull() ?: 0L
+            } else {
+                _status.value.writeBytes
+            }
+            var built = _status.value.builtCircuits
+            var streamCount = _status.value.streamCount
+            var guards = _status.value.entryGuardsSummary
+            if (includeCircuits) {
+                val circBody = ops.getInfo("circuit-status")
+                built = circBody.lineSequence().count {
+                    it.trim().split(' ').getOrNull(1) == "BUILT"
+                }
+                val streams = runCatching { ops.getInfo("stream-status") }.getOrDefault("")
+                streamCount = streams.lineSequence().count { it.isNotBlank() }
+                guards = runCatching { ops.getInfo("entry-guards") }.getOrDefault("")
+                    .lineSequence()
+                    .take(3)
+                    .joinToString(" | ") { it.trim().take(48) }
+            }
             _status.update {
                 it.copy(
-                    torVersion = version.take(40),
+                    torVersion = info["version"].orEmpty().take(40),
                     circuitEstablished = circEst,
                     enoughDirInfo = dirOk,
                     networkLive = live,
@@ -183,29 +226,6 @@ class TorControlClient {
         }.onFailure { err ->
             Timber.w(err, "Tor GETINFO refresh failed")
             _status.update { it.copy(lastError = err.message) }
-        }
-    }
-
-    /**
-     * Cheap health poll for network recovery / periodic keep-alive.
-     * Avoids circuit-status / stream-status dumps that serialize the control channel.
-     */
-    fun refreshHealthLite() {
-        if (!transport.isOpen) return
-        runCatching {
-            val circEst = ops.getInfo("status/circuit-established") == "1"
-            val dormant = (ops.getInfo("dormant").toIntOrNull() ?: 0) != 0
-            val live = runCatching { ops.getInfo("network-liveness") }.getOrDefault("")
-                .equals("up", ignoreCase = true)
-            _status.update {
-                it.copy(
-                    circuitEstablished = circEst,
-                    networkLive = live,
-                    dormant = dormant,
-                )
-            }
-        }.onFailure { err ->
-            Timber.w(err, "Tor GETINFO health-lite failed")
         }
     }
 

@@ -80,20 +80,22 @@ internal class TorControlOperations(
     }
 
     /**
-     * Tor-side DNS (async ADDRMAP). Polls address-mappings/cache until hit or timeout.
+     * Tor-side DNS (async ADDRMAP). Polls address-mappings/all briefly until hit or timeout.
      */
     fun resolve(hostname: String, timeoutMs: Long = 15_000): Result<String> = runCatching {
         transport.command("RESOLVE $hostname")
         val deadline = System.currentTimeMillis() + timeoutMs
+        var sleepMs = 50L
         while (System.currentTimeMillis() < deadline) {
-            val maps = getInfo("address-mappings/cache")
+            val maps = getInfo("address-mappings/all")
             maps.lineSequence().forEach { line ->
                 val parts = line.trim().split(' ')
                 if (parts.size >= 2 && parts[0].equals(hostname, ignoreCase = true)) {
                     return@runCatching parts[1]
                 }
             }
-            Thread.sleep(200)
+            Thread.sleep(sleepMs)
+            sleepMs = (sleepMs * 2).coerceAtMost(400L)
         }
         throw IOException("RESOLVE timeout for $hostname")
     }
@@ -135,6 +137,17 @@ internal class TorControlOperations(
     fun getInfo(key: String): String {
         val lines = transport.command("GETINFO $key")
         return TorControlReplyParser.multilineValue(lines, key)
+    }
+
+    /** Single round-trip for multiple single-line GETINFO keys. */
+    fun getInfoMany(vararg keys: String): Map<String, String> {
+        if (keys.isEmpty()) return emptyMap()
+        val lines = transport.command("GETINFO ${keys.joinToString(" ")}")
+        val out = LinkedHashMap<String, String>(keys.size)
+        for (key in keys) {
+            out[key] = TorControlReplyParser.multilineValue(lines, key)
+        }
+        return out
     }
 
     fun rawCommand(cmd: String): Result<List<String>> = runCatching { transport.command(cmd) }

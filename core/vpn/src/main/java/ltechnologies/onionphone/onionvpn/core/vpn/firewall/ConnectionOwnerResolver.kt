@@ -6,6 +6,7 @@ import android.os.Build
 import android.os.Process
 import android.system.OsConstants
 import java.io.File
+import java.net.InetAddress
 import java.net.InetSocketAddress
 import timber.log.Timber
 
@@ -18,7 +19,7 @@ import timber.log.Timber
  * Hot path uses a **single** attempt — never parks the TUN reader thread. First SYN
  * races are acceptable as "unknown" and re-checked on the next SYN.
  *
- * Older: best-effort `/proc/net/tcp|udp` scan (blocked on API 29+ for normal apps).
+ * Addresses are built from int IPs (no dotted-string parse) with ThreadLocal scratch bytes.
  */
 class ConnectionOwnerResolver(context: Context) {
     private val appContext = context.applicationContext
@@ -39,8 +40,9 @@ class ConnectionOwnerResolver(context: Context) {
                 IpPacketParser.PROTO_UDP -> OsConstants.IPPROTO_UDP
                 else -> return Process.INVALID_UID
             }
-            val local = InetSocketAddress(info.srcIp, info.srcPort)
-            val remote = InetSocketAddress(info.dstIp, info.dstPort)
+            val scratch = addressScratch.get()
+            val local = socketAddress(info.srcIpInt, info.srcPort, scratch.localBytes)
+            val remote = socketAddress(info.dstIpInt, info.dstPort, scratch.remoteBytes)
             @Suppress("NewApi")
             connectivity.getConnectionOwnerUid(protocol, local, remote)
         } catch (error: SecurityException) {
@@ -52,6 +54,11 @@ class ConnectionOwnerResolver(context: Context) {
         }
     }
 
+    private fun socketAddress(ip: Int, port: Int, bytes: ByteArray): InetSocketAddress {
+        IpPacketParser.ipv4Bytes(ip, bytes)
+        return InetSocketAddress(InetAddress.getByAddress(bytes), port)
+    }
+
     private fun resolveProcNet(info: IpPacketInfo): Int {
         val file = when (info.protocol) {
             IpPacketParser.PROTO_TCP -> File("/proc/net/tcp")
@@ -59,8 +66,8 @@ class ConnectionOwnerResolver(context: Context) {
             else -> return Process.INVALID_UID
         }
         if (!file.canRead()) return Process.INVALID_UID
-        val remoteHex = ipv4PortHex(info.dstIp, info.dstPort)
-        val localHex = ipv4PortHex(info.srcIp, info.srcPort)
+        val remoteHex = ipv4PortHex(info.dstIpInt, info.dstPort)
+        val localHex = ipv4PortHex(info.srcIpInt, info.srcPort)
         return try {
             file.bufferedReader().useLines { lines ->
                 lines.drop(1).forEach { line ->
@@ -82,21 +89,26 @@ class ConnectionOwnerResolver(context: Context) {
         }
     }
 
-    private fun ipv4PortHex(ip: String, port: Int): String {
-        val octets = ip.split('.').mapNotNull { it.toIntOrNull() }
-        if (octets.size != 4) return ""
+    private fun ipv4PortHex(ip: Int, port: Int): String {
         val ipHex = String.format(
             "%02X%02X%02X%02X",
-            octets[3],
-            octets[2],
-            octets[1],
-            octets[0],
+            ip and 0xff,
+            (ip ushr 8) and 0xff,
+            (ip ushr 16) and 0xff,
+            (ip ushr 24) and 0xff,
         )
         val portHex = String.format("%04X", port)
         return "$ipHex:$portHex"
     }
 
+    private class AddressScratch {
+        val localBytes = ByteArray(4)
+        val remoteBytes = ByteArray(4)
+    }
+
     companion object {
+        private val addressScratch = ThreadLocal.withInitial { AddressScratch() }
+
         fun isValidUid(uid: Int): Boolean =
             uid != Process.INVALID_UID && uid >= 0
     }

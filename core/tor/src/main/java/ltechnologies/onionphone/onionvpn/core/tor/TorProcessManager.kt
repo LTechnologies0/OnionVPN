@@ -161,6 +161,9 @@ class TorProcessManager(
     /** Convenience: refresh GETINFO into [controlStatus]. */
     fun refreshControlInfo() = control.refreshInfo()
 
+    /** Circuit/stream dumps — rare UI ticks only. */
+    fun refreshControlCircuits() = control.refreshCircuits()
+
     /** Lightweight health poll (no circuit-status dump). */
     fun refreshControlHealthLite() = control.refreshHealthLite()
 
@@ -223,10 +226,12 @@ class TorProcessManager(
     private suspend fun waitForBootstrap(
         ports: TunnelRuntimePorts,
         timeoutMs: Long = 120_000,
-        pollMs: Long = 400,
+        pollMs: Long = 800,
     ) {
         val deadline = System.currentTimeMillis() + timeoutMs
         var lastError: Exception? = null
+        var polls = 0
+        var listenersReady = false
         while (System.currentTimeMillis() < deadline) {
             if (process?.isAlive != true) {
                 throw TunnelFailure.TorBinary("Tor process exited before bootstrap completed")
@@ -236,8 +241,12 @@ class TorProcessManager(
                 val st = control.status.value
                 val bootDone = st.bootstrapProgress >= 100 ||
                     (st.circuitEstablished && st.enoughDirInfo)
-                TorReadiness.assertAllListenersReady(ports)
-                if (bootDone) {
+                // Listener probes are relatively expensive — once after bootstrap, or every 5th poll.
+                if (bootDone || !listenersReady || polls % 5 == 0) {
+                    TorReadiness.assertAllListenersReady(ports)
+                    listenersReady = true
+                }
+                if (bootDone && listenersReady) {
                     Timber.i(
                         "Tor bootstrap complete progress=%d tag=%s circuits=%d",
                         st.bootstrapProgress,
@@ -256,12 +265,14 @@ class TorProcessManager(
                 }
             } catch (error: Exception) {
                 lastError = error
+                listenersReady = false
                 Timber.d(
                     error,
                     "Tor bootstrap poll: %s",
                     error.message ?: error.javaClass.simpleName,
                 )
             }
+            polls++
             delay(pollMs)
         }
         val progress = control.status.value.bootstrapProgress

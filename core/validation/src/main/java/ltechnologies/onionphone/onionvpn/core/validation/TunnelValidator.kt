@@ -31,6 +31,7 @@ object TunnelValidator {
         killSwitchEnabled: Boolean = true,
         runtimePorts: TunnelRuntimePorts? = null,
         dnsResolverMode: DnsResolverMode = DnsResolverMode.DNSCRYPT_MUX,
+        includeExitIp: Boolean = true,
     ): List<ValidationCheck> = withContext(Dispatchers.Default) {
         val hevConfigFile = File(context.applicationContext.filesDir, "hev-socks5-tunnel.yaml")
         buildList {
@@ -42,12 +43,14 @@ object TunnelValidator {
                         dnsPort = runtimePorts.torDnsPort,
                     ),
                 )
-                addAll(
-                    ExitIpValidator.validate(
-                        context = context.applicationContext,
-                        socksPort = runtimePorts.torProbeSocksPort,
-                    ),
-                )
+                if (includeExitIp) {
+                    addAll(
+                        ExitIpValidator.validate(
+                            context = context.applicationContext,
+                            socksPort = runtimePorts.torProbeSocksPort,
+                        ),
+                    )
+                }
                 addAll(DnsCryptPathValidator.validate(listenPort = runtimePorts.dnsCryptListenPort))
                 add(validateHevForwarderWiring(hevConfigFile, runtimePorts, dnsResolverMode))
                 add(validateDnsCryptTorWiring(dnsCryptConfigFile, runtimePorts))
@@ -82,6 +85,26 @@ object TunnelValidator {
             add(blockedDnsRoutesConfigured())
         }
     }
+
+    /** Periodic keep-alive: local path probes only (no OkHttp exit-IP). */
+    suspend fun validateLite(
+        context: Context,
+        torConfigFile: File? = null,
+        dnsCryptConfigFile: File? = null,
+        vpnEstablished: Boolean,
+        killSwitchEnabled: Boolean = true,
+        runtimePorts: TunnelRuntimePorts? = null,
+        dnsResolverMode: DnsResolverMode = DnsResolverMode.DNSCRYPT_MUX,
+    ): List<ValidationCheck> = validateAll(
+        context = context,
+        torConfigFile = torConfigFile,
+        dnsCryptConfigFile = dnsCryptConfigFile,
+        vpnEstablished = vpnEstablished,
+        killSwitchEnabled = killSwitchEnabled,
+        runtimePorts = runtimePorts,
+        dnsResolverMode = dnsResolverMode,
+        includeExitIp = false,
+    )
 
     /**
      * Failures that must trip the kill-switch. Checks with [ValidationCheck.tripsKillSwitch]

@@ -10,6 +10,7 @@ import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.locks.LockSupport
 import ltechnologies.onionphone.onionvpn.core.vpn.firewall.FirewallBridge
 import timber.log.Timber
 
@@ -19,11 +20,10 @@ import timber.log.Timber
  * - everything else → firewall check → hev socket (raw IP packet stream)
  *
  * DoS / ARM notes:
- * - DNS work uses a **bounded** pool + queue (never [Executors.newFixedThreadPool]'s
- *   unbounded LinkedBlockingQueue).
- * - No per-packet [FileOutputStream.flush] (fsync storm on mobile storage).
- * - Packet copies only for async DNS; SYN/TCP path reuses the read buffer under
- *   the single tun→hev thread (firewall must not retain the array).
+ * - DNS work uses a **bounded** pool + queue (never unbounded LinkedBlockingQueue).
+ * - Per-worker reused DatagramSocket + reply buffers (ThreadLocal) — no open/close per query.
+ * - Packet handoff uses a small free-list of MTU buffers.
+ * - No per-packet [FileOutputStream.flush].
  */
 class TunDnsMux(
     private val tunFd: ParcelFileDescriptor,
@@ -45,10 +45,9 @@ class TunDnsMux(
     private var hevIn: FileInputStream? = null
     private var hevOut: FileOutputStream? = null
 
-    /**
-     * DNSCrypt forwards: small fixed pool sized for big.LITTLE phones, bounded queue.
-     * DiscardOldest under flood — prefer fresh queries over backlog OOM.
-     */
+    private val dnsCryptAddress: InetAddress = InetAddress.getByName(dnsCryptHost)
+    private val packetPool = ArrayBlockingQueue<ByteArray>(DNS_QUEUE_CAP)
+
     private val dnsExecutor = ThreadPoolExecutor(
         DNS_CORE_THREADS,
         DNS_MAX_THREADS,
@@ -79,13 +78,18 @@ class TunDnsMux(
                     when {
                         n < 0 -> break
                         n == 0 -> {
-                            // Non-blocking quirk — brief yield, not a tight spin.
-                            Thread.yield()
+                            LockSupport.parkNanos(EMPTY_READ_PARK_NS)
                             continue
                         }
                         divertDnsToDnsCrypt && isDnsQueryToVpnDns(buf, n, vpnDns) -> {
-                            val packet = buf.copyOf(n)
-                            dnsExecutor.execute { handleDnsQuery(packet, localTunOut) }
+                            val packet = borrowPacket(buf, n)
+                            dnsExecutor.execute {
+                                try {
+                                    handleDnsQuery(packet, n, localTunOut)
+                                } finally {
+                                    recyclePacket(packet)
+                                }
+                            }
                         }
                         isDnsQueryToVpnDns(buf, n, vpnDns) -> {
                             writeHev(localHevOut, buf, n)
@@ -118,7 +122,7 @@ class TunDnsMux(
                     when {
                         n < 0 -> break
                         n == 0 -> {
-                            Thread.yield()
+                            LockSupport.parkNanos(EMPTY_READ_PARK_NS)
                             continue
                         }
                         else -> synchronized(tunWriteLock) {
@@ -162,10 +166,23 @@ class TunDnsMux(
         hevToTun?.interrupt()
         tunToHev = null
         hevToTun = null
+        packetPool.clear()
         runCatching {
             if (!dnsExecutor.awaitTermination(2, TimeUnit.SECONDS)) {
                 Timber.w("DNS executor did not terminate cleanly")
             }
+        }
+    }
+
+    private fun borrowPacket(src: ByteArray, n: Int): ByteArray {
+        val packet = packetPool.poll() ?: ByteArray(MTU)
+        System.arraycopy(src, 0, packet, 0, n)
+        return packet
+    }
+
+    private fun recyclePacket(packet: ByteArray) {
+        if (packet.size == MTU) {
+            packetPool.offer(packet)
         }
     }
 
@@ -190,33 +207,38 @@ class TunDnsMux(
         return destPort == 53
     }
 
-    private fun handleDnsQuery(packet: ByteArray, tunOut: FileOutputStream) {
+    private fun handleDnsQuery(packet: ByteArray, length: Int, tunOut: FileOutputStream) {
         if (!running.get()) return
         try {
             val ihl = (packet[0].toInt() and 0x0f) * 4
             val dnsOffset = ihl + 8
-            if (packet.size <= dnsOffset) return
+            if (length <= dnsOffset) return
 
-            val query = packet.copyOfRange(dnsOffset, packet.size)
-            DatagramSocket().use { socket ->
-                socket.soTimeout = DNS_TIMEOUT_MS
-                socket.send(
-                    DatagramPacket(
-                        query,
-                        query.size,
-                        InetAddress.getByName(dnsCryptHost),
-                        dnsCryptPort,
-                    ),
-                )
-                val responseBuf = ByteArray(DNS_RESPONSE_CAP)
-                val response = DatagramPacket(responseBuf, responseBuf.size)
-                socket.receive(response)
+            val scratch = dnsScratch.get()
+            val socket = scratch.socket()
+            val queryLen = length - dnsOffset
+            socket.send(
+                DatagramPacket(
+                    packet,
+                    dnsOffset,
+                    queryLen,
+                    dnsCryptAddress,
+                    dnsCryptPort,
+                ),
+            )
+            val response = DatagramPacket(scratch.responseBuf, scratch.responseBuf.size)
+            socket.receive(response)
 
-                val reply = buildDnsReply(packet, responseBuf, response.length) ?: return
-                synchronized(tunWriteLock) {
-                    if (!running.get()) return
-                    tunOut.write(reply)
-                }
+            val replyLen = buildDnsReplyInto(
+                request = packet,
+                requestLen = length,
+                dnsPayload = scratch.responseBuf,
+                dnsLen = response.length,
+                out = scratch.replyBuf,
+            ) ?: return
+            synchronized(tunWriteLock) {
+                if (!running.get()) return
+                tunOut.write(scratch.replyBuf, 0, replyLen)
             }
         } catch (error: Exception) {
             if (running.get()) {
@@ -234,15 +256,17 @@ class TunDnsMux(
         }
     }
 
-    private fun buildDnsReply(
+    /** @return reply length, or null if too large */
+    private fun buildDnsReplyInto(
         request: ByteArray,
+        requestLen: Int,
         dnsPayload: ByteArray,
         dnsLen: Int,
-    ): ByteArray? {
+        out: ByteArray,
+    ): Int? {
         val ihl = (request[0].toInt() and 0x0f) * 4
         val totalLen = ihl + 8 + dnsLen
-        if (totalLen > MTU || dnsLen < 0) return null
-        val out = ByteArray(totalLen)
+        if (totalLen > MTU || dnsLen < 0 || totalLen > out.size || requestLen < ihl + 8) return null
 
         System.arraycopy(request, 0, out, 0, ihl)
         for (i in 0 until 4) {
@@ -268,7 +292,7 @@ class TunDnsMux(
         out[ihl + 7] = 0
 
         System.arraycopy(dnsPayload, 0, out, ihl + 8, dnsLen)
-        return out
+        return totalLen
     }
 
     private fun checksum(buf: ByteArray, offset: Int, length: Int): Int {
@@ -284,14 +308,32 @@ class TunDnsMux(
         return sum.inv() and 0xffff
     }
 
+    private class DnsScratch {
+        val responseBuf = ByteArray(DNS_RESPONSE_CAP)
+        val replyBuf = ByteArray(MTU)
+        private var socket: DatagramSocket? = null
+
+        fun socket(): DatagramSocket {
+            val existing = socket
+            if (existing != null && !existing.isClosed) return existing
+            return DatagramSocket().also {
+                it.soTimeout = DNS_TIMEOUT_MS
+                socket = it
+            }
+        }
+    }
+
     companion object {
         private const val MTU = 1280
         private const val PROTO_UDP = 17
         private const val DNS_TIMEOUT_MS = 8_000
         private const val DNS_RESPONSE_CAP = 2048
+        private const val EMPTY_READ_PARK_NS = 200_000L // 0.2ms
         private val DNS_CORE_THREADS =
             Runtime.getRuntime().availableProcessors().coerceIn(2, 4)
         private val DNS_MAX_THREADS = (DNS_CORE_THREADS + 2).coerceAtMost(6)
         private const val DNS_QUEUE_CAP = 64
+
+        private val dnsScratch = ThreadLocal.withInitial { DnsScratch() }
     }
 }

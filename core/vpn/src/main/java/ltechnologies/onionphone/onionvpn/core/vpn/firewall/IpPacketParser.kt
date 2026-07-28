@@ -2,18 +2,22 @@ package ltechnologies.onionphone.onionvpn.core.vpn.firewall
 
 /**
  * Parsed IPv4 5-tuple from a raw TUN IP packet.
+ * IPs are kept as ints on the hot path; string forms are lazy (prompts / journal).
  * IPv6 is ignored for interactive firewall MVP (kill-switch still blackholes IPv6).
  */
 data class IpPacketInfo(
     val protocol: Int,
-    val srcIp: String,
+    val srcIpInt: Int,
+    val dstIpInt: Int,
     val srcPort: Int,
-    val dstIp: String,
     val dstPort: Int,
     val isTcpSyn: Boolean,
     val isTcp: Boolean,
     val isUdp: Boolean,
-)
+) {
+    val srcIp: String get() = IpPacketParser.formatIpv4(srcIpInt)
+    val dstIp: String get() = IpPacketParser.formatIpv4(dstIpInt)
+}
 
 object IpPacketParser {
     const val PROTO_TCP = 6
@@ -26,8 +30,8 @@ object IpPacketParser {
         val ihl = (packet[0].toInt() and 0x0f) * 4
         if (ihl < 20 || length < ihl + 4) return null
         val protocol = packet[9].toInt() and 0xff
-        val srcIp = ipv4(packet, 12)
-        val dstIp = ipv4(packet, 16)
+        val srcIpInt = ipv4Int(packet, 12)
+        val dstIpInt = ipv4Int(packet, 16)
         return when (protocol) {
             PROTO_TCP -> {
                 if (length < ihl + 14) return null
@@ -38,9 +42,9 @@ object IpPacketParser {
                 val ack = flags and 0x10 != 0
                 IpPacketInfo(
                     protocol = PROTO_TCP,
-                    srcIp = srcIp,
+                    srcIpInt = srcIpInt,
+                    dstIpInt = dstIpInt,
                     srcPort = srcPort,
-                    dstIp = dstIp,
                     dstPort = dstPort,
                     isTcpSyn = syn && !ack,
                     isTcp = true,
@@ -51,9 +55,9 @@ object IpPacketParser {
                 if (length < ihl + 8) return null
                 IpPacketInfo(
                     protocol = PROTO_UDP,
-                    srcIp = srcIp,
+                    srcIpInt = srcIpInt,
+                    dstIpInt = dstIpInt,
                     srcPort = u16(packet, ihl),
-                    dstIp = dstIp,
                     dstPort = u16(packet, ihl + 2),
                     isTcpSyn = false,
                     isTcp = false,
@@ -70,11 +74,23 @@ object IpPacketParser {
         else -> "IP/$protocol"
     }
 
-    private fun ipv4(packet: ByteArray, offset: Int): String =
-        "${packet[offset].toInt() and 0xff}." +
-            "${packet[offset + 1].toInt() and 0xff}." +
-            "${packet[offset + 2].toInt() and 0xff}." +
-            "${packet[offset + 3].toInt() and 0xff}"
+    fun formatIpv4(ip: Int): String =
+        "${(ip ushr 24) and 0xff}.${(ip ushr 16) and 0xff}." +
+            "${(ip ushr 8) and 0xff}.${ip and 0xff}"
+
+    fun ipv4Bytes(ip: Int, out: ByteArray = ByteArray(4)): ByteArray {
+        out[0] = (ip ushr 24).toByte()
+        out[1] = (ip ushr 16).toByte()
+        out[2] = (ip ushr 8).toByte()
+        out[3] = ip.toByte()
+        return out
+    }
+
+    private fun ipv4Int(packet: ByteArray, offset: Int): Int =
+        ((packet[offset].toInt() and 0xff) shl 24) or
+            ((packet[offset + 1].toInt() and 0xff) shl 16) or
+            ((packet[offset + 2].toInt() and 0xff) shl 8) or
+            (packet[offset + 3].toInt() and 0xff)
 
     private fun u16(packet: ByteArray, offset: Int): Int =
         ((packet[offset].toInt() and 0xff) shl 8) or (packet[offset + 1].toInt() and 0xff)

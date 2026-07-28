@@ -522,19 +522,35 @@ class TunnelForegroundService : Service() {
     private fun startPeriodicValidation() {
         validationJob?.cancel()
         validationJob = scope.launch {
+            var ticks = 0
             while (isActive) {
                 delay(VALIDATION_INTERVAL_MS)
                 if (_snapshot.value.phase != TunnelPhase.Connected) continue
                 val ports = runtimePorts ?: continue
-                val checks = TunnelValidator.validateAll(
-                    context = applicationContext,
-                    torConfigFile = tor.torrcFile,
-                    dnsCryptConfigFile = dnsCrypt.configFile,
-                    vpnEstablished = OnionVpnService.vpnEstablished.value,
-                    killSwitchEnabled = preferences.killSwitchEnabled,
-                    runtimePorts = ports,
-                    dnsResolverMode = preferences.dnsResolverMode,
-                )
+                ticks++
+                // Most ticks: local lite probes. Exit-IP OkHttp only every ~15 min.
+                val checks = if (ticks % FULL_VALIDATION_TICKS == 0) {
+                    TunnelValidator.validateAll(
+                        context = applicationContext,
+                        torConfigFile = tor.torrcFile,
+                        dnsCryptConfigFile = dnsCrypt.configFile,
+                        vpnEstablished = OnionVpnService.vpnEstablished.value,
+                        killSwitchEnabled = preferences.killSwitchEnabled,
+                        runtimePorts = ports,
+                        dnsResolverMode = preferences.dnsResolverMode,
+                        includeExitIp = true,
+                    )
+                } else {
+                    TunnelValidator.validateLite(
+                        context = applicationContext,
+                        torConfigFile = tor.torrcFile,
+                        dnsCryptConfigFile = dnsCrypt.configFile,
+                        vpnEstablished = OnionVpnService.vpnEstablished.value,
+                        killSwitchEnabled = preferences.killSwitchEnabled,
+                        runtimePorts = ports,
+                        dnsResolverMode = preferences.dnsResolverMode,
+                    )
+                }
                 val hardFails = checks.filter { TunnelValidator.isHardKillSwitchFailure(it) }
                 val softFails = checks.filter {
                     it.status == ValidationStatus.Fail && !TunnelValidator.isHardKillSwitchFailure(it)
@@ -572,11 +588,11 @@ class TunnelForegroundService : Service() {
                 val phase = _snapshot.value.phase
                 if (phase != TunnelPhase.Connected && phase != TunnelPhase.StartingTor) continue
                 // Prefer live BW events from ControlPort (zero GETINFO cost).
-                // Full refreshInfo only every ~30s for circuit/stream counters.
+                // Circuit dumps only every ~2 min; lite health every ~10s.
                 ticks++
-                if (ticks % FULL_CONTROL_REFRESH_TICKS == 0 || phase == TunnelPhase.StartingTor) {
-                    tor.refreshControlInfo()
-                } else if (ticks % LITE_CONTROL_REFRESH_TICKS == 0) {
+                if (ticks % FULL_CONTROL_REFRESH_TICKS == 0) {
+                    tor.refreshControlCircuits()
+                } else if (ticks % LITE_CONTROL_REFRESH_TICKS == 0 || phase == TunnelPhase.StartingTor) {
                     tor.refreshControlHealthLite()
                 }
                 val st = tor.controlStatus.value
@@ -666,12 +682,14 @@ class TunnelForegroundService : Service() {
         /** Leak checks — less aggressive once Connected to save battery/thermal. */
         private const val VALIDATION_INTERVAL_MS = 90_000L
         private const val VALIDATION_TIMEOUT_MS = 60_000L
+        /** Every N lite validations → one full (includes exit-IP). ~15 min at 90s. */
+        private const val FULL_VALIDATION_TICKS = 10
         /** UI throughput tick; BW events fill rates without GETINFO each tick. */
         private const val THROUGHPUT_INTERVAL_MS = 2_000L
-        /** Every N ticks → lite GETINFO (dormant / liveness). */
+        /** Every N ticks → lite GETINFO (dormant / liveness). ~10s */
         private const val LITE_CONTROL_REFRESH_TICKS = 5
-        /** Every N ticks → full GETINFO (circuits/streams). ~30s at 2s ticks. */
-        private const val FULL_CONTROL_REFRESH_TICKS = 15
+        /** Every N ticks → circuit/stream dump. ~2 min at 2s ticks. */
+        private const val FULL_CONTROL_REFRESH_TICKS = 60
 
         private val _snapshot = MutableStateFlow(TunnelSnapshot())
         val snapshot: StateFlow<TunnelSnapshot> = _snapshot.asStateFlow()

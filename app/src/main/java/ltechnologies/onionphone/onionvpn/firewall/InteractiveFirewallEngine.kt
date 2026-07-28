@@ -66,8 +66,8 @@ class InteractiveFirewallEngine @Inject constructor(
     private val preferences = AtomicReference(TunnelPreferences())
     private val rules = AtomicReference<List<FirewallRule>>(emptyList())
 
-    private val flowCache = ConcurrentHashMap<String, FirewallVerdict>()
-    private val decisionCache = ConcurrentHashMap<String, FirewallVerdict>()
+    private val flowCache = ConcurrentHashMap<Long, FirewallVerdict>()
+    private val decisionCache = ConcurrentHashMap<Long, FirewallVerdict>()
 
     /** ruleKey → queued or active prompt (dedupe). */
     private val pendingByKey = ConcurrentHashMap<String, QueuedPrompt>()
@@ -153,25 +153,26 @@ class InteractiveFirewallEngine @Inject constructor(
         // when the user wants least privilege. Unknown uid still goes through ASK/DENY/ALLOW.
 
         val effectiveUid = if (ConnectionOwnerResolver.isValidUid(uid)) uid else UNKNOWN_UID
-        val app = resolveApp(effectiveUid)
-
         val matching = findRule(effectiveUid, info)
         if (matching != null) {
             rememberFlow(flowKey, matching.verdict)
             return matching.verdict == FirewallVerdict.ALLOW
         }
 
-        val rk = ruleKey(effectiveUid, info.dstIp, info.dstPort, info.protocol)
+        val rk = decisionKey(effectiveUid, info)
         decisionCache[rk]?.let { v ->
             rememberFlow(flowKey, v)
             return v == FirewallVerdict.ALLOW
         }
 
+        val pendingKey = ruleKey(effectiveUid, info.dstIp, info.dstPort, info.protocol)
         // Already waiting on this key — keep dropping until answered.
-        if (pendingByKey.containsKey(rk)) {
+        if (pendingByKey.containsKey(pendingKey)) {
             return false
         }
 
+        // Resolve app label only on cold ASK/DENY paths (never on cache hits).
+        val app = resolveApp(effectiveUid)
         return when (prefs.firewallDefaultAction) {
             FirewallDefaultAction.ALLOW -> {
                 rememberDecision(rk, flowKey, FirewallVerdict.ALLOW)
@@ -189,7 +190,7 @@ class InteractiveFirewallEngine @Inject constructor(
                 )
                 false
             }
-            FirewallDefaultAction.ASK -> enqueuePrompt(effectiveUid, app, info, flowKey, rk)
+            FirewallDefaultAction.ASK -> enqueuePrompt(effectiveUid, app, info, flowKey, pendingKey, rk)
         }
     }
 
@@ -201,8 +202,9 @@ class InteractiveFirewallEngine @Inject constructor(
         uid: Int,
         app: AppIdentity,
         info: IpPacketInfo,
-        flowKey: String,
+        flowKey: Long,
         ruleKey: String,
+        decisionKey: Long,
     ): Boolean {
         val request = FirewallConnectionInfo(
             requestId = UUID.randomUUID().toString(),
@@ -214,7 +216,7 @@ class InteractiveFirewallEngine @Inject constructor(
             protocol = info.protocol,
             protocolLabel = IpPacketParser.protocolLabel(info.protocol),
         )
-        val queued = QueuedPrompt(request, flowKey, app, ruleKey)
+        val queued = QueuedPrompt(request, flowKey, app, ruleKey, decisionKey)
         synchronized(queueLock) {
             if (pendingByKey.putIfAbsent(ruleKey, queued) != null) {
                 return false
@@ -306,7 +308,7 @@ class InteractiveFirewallEngine @Inject constructor(
                     it.protocol == rule.protocol
             } + rule
         }
-        rememberDecision(answered.ruleKey, answered.flowKey, verdict)
+        rememberDecision(answered.decisionKey, answered.flowKey, verdict)
         val note = when (ruleScope) {
             FirewallRuleScope.TEMPORARY -> "temporary ${prefs.firewallTempMinutes}m"
             FirewallRuleScope.SESSION -> "until VPN stops"
@@ -336,31 +338,41 @@ class InteractiveFirewallEngine @Inject constructor(
 
     private fun findRule(uid: Int, info: IpPacketInfo): FirewallRule? {
         val now = System.currentTimeMillis()
-        return rules.get()
-            .filter { !it.isExpired(now) && it.matches(uid, info.dstIp, info.dstPort, info.protocol) }
-            .maxWithOrNull(
-                compareBy(
-                    { if (it.destHost.isNotEmpty()) 1 else 0 },
-                    { if (it.destPort >= 0) 1 else 0 },
-                    { if (it.protocol >= 0) 1 else 0 },
-                    { it.createdAtEpochMs },
-                ),
-            )
+        val dstIp = info.dstIp
+        var best: FirewallRule? = null
+        var bestScore = -1
+        var bestCreated = Long.MIN_VALUE
+        for (rule in rules.get()) {
+            if (rule.isExpired(now)) continue
+            if (!rule.matches(uid, dstIp, info.dstPort, info.protocol)) continue
+            val score =
+                (if (rule.destHost.isNotEmpty()) 4 else 0) +
+                    (if (rule.destPort >= 0) 2 else 0) +
+                    (if (rule.protocol >= 0) 1 else 0)
+            if (score > bestScore ||
+                (score == bestScore && rule.createdAtEpochMs > bestCreated)
+            ) {
+                best = rule
+                bestScore = score
+                bestCreated = rule.createdAtEpochMs
+            }
+        }
+        return best
     }
 
-    private fun rememberDecision(ruleKey: String, flowKey: String, verdict: FirewallVerdict) {
-        decisionCache[ruleKey] = verdict
+    private fun rememberDecision(decisionKey: Long, flowKey: Long, verdict: FirewallVerdict) {
+        decisionCache[decisionKey] = verdict
         rememberFlow(flowKey, verdict)
         trimDecisionCache()
     }
 
-    private fun rememberFlow(flowKey: String, verdict: FirewallVerdict) {
+    private fun rememberFlow(flowKey: Long, verdict: FirewallVerdict) {
         flowCache[flowKey] = verdict
         if (flowCache.size > MAX_FLOW_CACHE) {
-            // Drop arbitrary half — avoids total wipe that races mid-session.
+            // Budgeted trim — avoid walking half the map on the TUN thread.
             var n = 0
             val it = flowCache.keys.iterator()
-            while (it.hasNext() && n < MAX_FLOW_CACHE / 2) {
+            while (it.hasNext() && n < FLOW_TRIM_BUDGET) {
                 it.next()
                 it.remove()
                 n++
@@ -371,13 +383,11 @@ class InteractiveFirewallEngine @Inject constructor(
     private fun trimDecisionCache() {
         if (decisionCache.size <= MAX_DECISION_CACHE) return
         var n = 0
-        val it = decisionCache.keys.iterator()
-        while (it.hasNext() && n < MAX_DECISION_CACHE / 2) {
-            val k = it.next()
-            if (!pendingByKey.containsKey(k)) {
-                it.remove()
-                n++
-            }
+        val it = decisionCache.entries.iterator()
+        while (it.hasNext() && n < DECISION_TRIM_BUDGET) {
+            it.next()
+            it.remove()
+            n++
         }
     }
 
@@ -442,8 +452,23 @@ class InteractiveFirewallEngine @Inject constructor(
         journalChannel.trySend(entry)
     }
 
-    private fun flowKey(info: IpPacketInfo): String =
-        "${info.protocol}|${info.srcIp}:${info.srcPort}->${info.dstIp}:${info.dstPort}"
+    /** Packed 5-tuple hash for flow cache (hot path — no String alloc). */
+    private fun flowKey(info: IpPacketInfo): Long {
+        var h = info.srcIpInt.toLong() and 0xffffffffL
+        h = h * MIX + (info.dstIpInt.toLong() and 0xffffffffL)
+        h = h * MIX + info.srcPort
+        h = h * MIX + info.dstPort
+        h = h * MIX + info.protocol
+        return h
+    }
+
+    private fun decisionKey(uid: Int, info: IpPacketInfo): Long {
+        var h = uid.toLong()
+        h = h * MIX + (info.dstIpInt.toLong() and 0xffffffffL)
+        h = h * MIX + info.dstPort
+        h = h * MIX + info.protocol
+        return h
+    }
 
     private fun ruleKey(uid: Int, destIp: String, destPort: Int, protocol: Int): String =
         "$uid|$destIp|$destPort|$protocol"
@@ -456,9 +481,10 @@ class InteractiveFirewallEngine @Inject constructor(
 
     private class QueuedPrompt(
         val request: FirewallConnectionInfo,
-        val flowKey: String,
+        val flowKey: Long,
         val app: AppIdentity,
         val ruleKey: String,
+        val decisionKey: Long,
     )
 
     companion object {
@@ -468,6 +494,10 @@ class InteractiveFirewallEngine @Inject constructor(
         private const val MAX_QUEUE = 64
         private const val MAX_FLOW_CACHE = 8_000
         private const val MAX_DECISION_CACHE = 4_000
+        private const val FLOW_TRIM_BUDGET = 128
+        private const val DECISION_TRIM_BUDGET = 64
+        /** Golden-ratio mix (signed Long form of 0x9E3779B97F4A7C15). */
+        private const val MIX = -7046029254386353131L
     }
 }
 
