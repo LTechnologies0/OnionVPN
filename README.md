@@ -1,9 +1,20 @@
 # OnionVPN
 
-Tor + DNSCrypt VPN for Android (InviZible / Mullvad-inspired). Traffic is forced through Tor; app DNS goes through DNSCrypt over Tor SOCKS (default), with FakeDNS/SOCKS5A as a settings fallback.
+Privacy-focused Android VPN that routes **all device traffic through Tor**, with **DNSCrypt** for app DNS (over Tor SOCKS by default; FakeDNS / SOCKS5A as a settings fallback). Inspired by InviZible and Mullvad-style leak protection.
 
 **Package:** `ltechnologies.onionphone.onionvpn`  
 **Min SDK 26 · Target / Compile SDK 37 · Java/Kotlin 21 · Jetpack Compose**
+
+### What it does
+
+| Feature | Description |
+|---------|-------------|
+| Tor tunnel | Full-device VPN via hev-socks5-tunnel → Tor SOCKS; kill switch blocks traffic when the tunnel is down |
+| DNSCrypt | App DNS resolved through DNSCrypt (upstream via Tor); TunDnsMux on `10.8.0.1` |
+| Interactive firewall | OpenSnitch-style Accept / Deny for new outbound connections (notification + prompt, FIFO queue, permanent / session / temporary rules) |
+| Domain threat lists | HaGeZi lists colour destinations on prompts: 🟢 safe (unlisted), 🟠 ads/tracking/telemetry, 🔴 malware/C2 — updates prefer Tor when the tunnel is up |
+| App lock | Lock the UI without stopping the tunnel or kill switch |
+| Tor tuning | Circuit rotation presets, stream isolation modes, editable `torrc` / `dnscrypt-proxy.toml` |
 
 ## Architecture
 
@@ -12,6 +23,7 @@ Tor + DNSCrypt VPN for Android (InviZible / Mullvad-inspired). Traffic is forced
 | Tor | SOCKS + DNSPort (ephemeral ports), SafeSocks depending on DNS mode |
 | DNSCrypt | App DNS via TunDnsMux; upstream via Tor SOCKS; bootstrap via Tor DNSPort |
 | VPN | `OnionVpnService` + hev-socks5-tunnel; client `10.8.0.2`, DNS `10.8.0.1` |
+| Firewall | `InteractiveFirewallEngine` on the TUN; DNS hostname cache + HaGeZi reputation for prompt UI |
 
 Modules: `app`, `core:model`, `core:tor`, `core:dnscrypt`, `core:vpn`, `core:validation`.
 
