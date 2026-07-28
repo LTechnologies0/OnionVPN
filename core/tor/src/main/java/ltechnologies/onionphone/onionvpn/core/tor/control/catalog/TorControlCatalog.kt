@@ -82,62 +82,94 @@ object TorControlCatalog {
      * Async event codes for SETEVENTS.
      *
      * @property wire event keyword
-     * @property client true when OnionVPN VPN client should subscribe by default
+     * @property tier subscription layer — Tor 552s the *entire* SETEVENTS if any keyword
+     *   is unknown, so tiers are applied incrementally (core → optional → PT).
      */
-    enum class Event(val wire: String, val client: Boolean) {
-        CIRC("CIRC", true),
-        CIRC_MINOR("CIRC_MINOR", true),
-        STREAM("STREAM", true),
-        ORCONN("ORCONN", true),
-        BW("BW", true),
-        NOTICE("NOTICE", true),
-        WARN("WARN", true),
-        ERR("ERR", true),
-        NEWDESC("NEWDESC", false),
-        ADDRMAP("ADDRMAP", true),
-        AUTHDIR_NEWDESCS("AUTHDIR_NEWDESCS", false),
-        DESCCHANGED("DESCCHANGED", false),
-        STATUS_GENERAL("STATUS_GENERAL", true),
-        STATUS_CLIENT("STATUS_CLIENT", true),
-        STATUS_SERVER("STATUS_SERVER", false),
-        GUARD("GUARD", true),
-        NS("NS", false),
-        STREAM_BW("STREAM_BW", false),
-        CLIENTS_SEEN("CLIENTS_SEEN", false),
-        NEWCONSENSUS("NEWCONSENSUS", false),
-        BUILDTIMEOUT_SET("BUILDTIMEOUT_SET", true),
-        SIGNAL("SIGNAL", true),
-        CONF_CHANGED("CONF_CHANGED", true),
-        CIRC_BW("CIRC_BW", false),
-        CONN_BW("CONN_BW", false),
-        CELL_STATS("CELL_STATS", false),
-        TB_EMPTY("TB_EMPTY", false),
-        TRANSPORT_LAUNCHED("TRANSPORT_LAUNCHED", true),
-        HS_DESC("HS_DESC", false),
-        HS_DESC_CONTENT("HS_DESC_CONTENT", false),
-        PT_LOG("PT_LOG", true),
-        PT_STATUS("PT_STATUS", true),
+    enum class EventTier {
+        /** Always subscribed; must succeed or connect fails. */
+        CORE,
+        /** Best-effort after core (CIRC_MINOR, STATUS_GENERAL, …). */
+        OPTIONAL,
+        /** Only when bridges/PT may be configured. */
+        PT,
+        /** Catalog only — never auto-subscribed. */
+        CATALOG,
     }
 
-    /** Space-separated SETEVENTS list for Orbot-like VPN clients. */
-    val CLIENT_EVENTS: String =
-        Event.entries.filter { it.client }.joinToString(" ") { it.wire }
+    enum class Event(val wire: String, val tier: EventTier) {
+        CIRC("CIRC", EventTier.CORE),
+        CIRC_MINOR("CIRC_MINOR", EventTier.OPTIONAL),
+        STREAM("STREAM", EventTier.CORE),
+        ORCONN("ORCONN", EventTier.CORE),
+        BW("BW", EventTier.CORE),
+        NOTICE("NOTICE", EventTier.CORE),
+        WARN("WARN", EventTier.CORE),
+        ERR("ERR", EventTier.CORE),
+        NEWDESC("NEWDESC", EventTier.CATALOG),
+        ADDRMAP("ADDRMAP", EventTier.CORE),
+        AUTHDIR_NEWDESCS("AUTHDIR_NEWDESCS", EventTier.CATALOG),
+        DESCCHANGED("DESCCHANGED", EventTier.CATALOG),
+        STATUS_GENERAL("STATUS_GENERAL", EventTier.OPTIONAL),
+        STATUS_CLIENT("STATUS_CLIENT", EventTier.CORE),
+        STATUS_SERVER("STATUS_SERVER", EventTier.CATALOG),
+        GUARD("GUARD", EventTier.CORE),
+        NS("NS", EventTier.CATALOG),
+        STREAM_BW("STREAM_BW", EventTier.CATALOG),
+        CLIENTS_SEEN("CLIENTS_SEEN", EventTier.CATALOG),
+        NEWCONSENSUS("NEWCONSENSUS", EventTier.CATALOG),
+        BUILDTIMEOUT_SET("BUILDTIMEOUT_SET", EventTier.OPTIONAL),
+        SIGNAL("SIGNAL", EventTier.OPTIONAL),
+        CONF_CHANGED("CONF_CHANGED", EventTier.OPTIONAL),
+        CIRC_BW("CIRC_BW", EventTier.CATALOG),
+        CONN_BW("CONN_BW", EventTier.CATALOG),
+        CELL_STATS("CELL_STATS", EventTier.CATALOG),
+        TB_EMPTY("TB_EMPTY", EventTier.CATALOG),
+        TRANSPORT_LAUNCHED("TRANSPORT_LAUNCHED", EventTier.PT),
+        HS_DESC("HS_DESC", EventTier.CATALOG),
+        HS_DESC_CONTENT("HS_DESC_CONTENT", EventTier.CATALOG),
+        PT_LOG("PT_LOG", EventTier.PT),
+        PT_STATUS("PT_STATUS", EventTier.PT),
+    }
 
-    /** GETINFO keys polled for health / UI snapshots. */
-    val HEALTH_GETINFO_KEYS = listOf(
+    private fun eventsOf(tier: EventTier): String =
+        Event.entries.filter { it.tier == tier }.joinToString(" ") { it.wire }
+
+    /** Core SETEVENTS — Orbot-like; must be accepted by stock Tor. */
+    val CLIENT_EVENTS: String get() = eventsOf(EventTier.CORE)
+
+    /** Optional extras tried after core succeeds (best-effort, incremental). */
+    val CLIENT_EVENTS_OPTIONAL: String get() = eventsOf(EventTier.OPTIONAL)
+
+    /** Pluggable-transport events (only when bridges configured). */
+    val CLIENT_EVENTS_PT: String get() = eventsOf(EventTier.PT)
+
+    /** Core GETINFO keys — safe to batch (always present on Tor ≥0.2.x). */
+    val HEALTH_GETINFO_CORE = listOf(
         "version",
         "status/bootstrap-phase",
         "status/circuit-established",
         "status/enough-dir-info",
-        "status/good-server-descriptor",
+    )
+
+    /** Optional GETINFO — probe per-key (one 552 must not drop the others). */
+    val HEALTH_GETINFO_OPTIONAL = listOf(
         "dormant",
+        "network-liveness",
+    )
+
+    val HEALTH_GETINFO_TRAFFIC = listOf(
         "traffic/read",
         "traffic/written",
+    )
+
+    val HEALTH_GETINFO_HEAVY = listOf(
         "circuit-status",
         "stream-status",
         "entry-guards",
-        "network-liveness",
-        "process/pid",
-        "process/uid",
     )
+
+    /** Flat union for docs/tests — never join into one GETINFO batch. */
+    val HEALTH_GETINFO_KEYS: List<String>
+        get() = HEALTH_GETINFO_CORE + HEALTH_GETINFO_OPTIONAL +
+            HEALTH_GETINFO_TRAFFIC + HEALTH_GETINFO_HEAVY
 }

@@ -97,7 +97,13 @@ class TorProcessManager(
             // Step 4
             waitForControlPlane()
             // Step 5
-            control.connect(controlSocketFile, cookieFile)
+            control.connect(
+                controlSocketPath = controlSocketFile,
+                cookieFile = cookieFile,
+                bridgesConfigured = preferences.torBridges.lineSequence()
+                    .map { it.trim() }
+                    .any { it.isNotEmpty() && !it.startsWith("#") },
+            )
             // Step 6
             waitForBootstrap(ports)
             // Step 7
@@ -225,61 +231,69 @@ class TorProcessManager(
     /** Step 6: control bootstrap + local Socks/DNSPort readiness. */
     private suspend fun waitForBootstrap(
         ports: TunnelRuntimePorts,
-        timeoutMs: Long = 120_000,
-        pollMs: Long = 800,
+        timeoutMs: Long = 180_000,
+        pollMs: Long = 1_000,
     ) {
         val deadline = System.currentTimeMillis() + timeoutMs
         var lastError: Exception? = null
-        var polls = 0
-        var listenersReady = false
+        var socksReady = false
+        var dnsReady = false
         while (System.currentTimeMillis() < deadline) {
             if (process?.isAlive != true) {
                 throw TunnelFailure.TorBinary("Tor process exited before bootstrap completed")
             }
             try {
-                control.refreshInfo()
+                // Bootstrap-only GETINFO — avoids dormant/network-liveness 552 noise.
+                control.refreshBootstrap()
                 val st = control.status.value
                 val bootDone = st.bootstrapProgress >= 100 ||
                     (st.circuitEstablished && st.enoughDirInfo)
-                // Listener probes are relatively expensive — once after bootstrap, or every 5th poll.
-                if (bootDone || !listenersReady || polls % 5 == 0) {
-                    TorReadiness.assertAllListenersReady(ports)
-                    listenersReady = true
+
+                // SOCKS accepts early; probe often without treating failures as fatal.
+                if (!socksReady) {
+                    socksReady = TorReadiness.areSocksPortsReady(ports)
                 }
-                if (bootDone && listenersReady) {
+
+                // DNSPort answers only after enough dir info — never probe before bootDone
+                // (that caused 1.5–2s timeouts every few polls during bootstrap).
+                if (bootDone && socksReady && !dnsReady) {
+                    dnsReady = TorReadiness.isDnsPortReady(ports.torDnsPort)
+                }
+
+                if (bootDone && socksReady && dnsReady) {
                     Timber.i(
-                        "Tor bootstrap complete progress=%d tag=%s circuits=%d",
+                        "Tor bootstrap complete progress=%d tag=%s",
                         st.bootstrapProgress,
                         st.bootstrapTag,
-                        st.builtCircuits,
                     )
                     return
                 }
                 if (st.bootstrapSummary.isNotBlank()) {
                     Timber.d(
-                        "Tor bootstrap %d%% %s — %s",
+                        "Tor bootstrap %d%% %s — %s (socks=%s dns=%s)",
                         st.bootstrapProgress,
                         st.bootstrapTag,
                         st.bootstrapSummary,
+                        socksReady,
+                        dnsReady,
                     )
                 }
             } catch (error: Exception) {
                 lastError = error
-                listenersReady = false
                 Timber.d(
                     error,
                     "Tor bootstrap poll: %s",
                     error.message ?: error.javaClass.simpleName,
                 )
             }
-            polls++
             delay(pollMs)
         }
         val progress = control.status.value.bootstrapProgress
         val summary = control.status.value.bootstrapSummary.ifBlank { "no summary" }
         throw TunnelFailure.TorBootstrap(
             progress = progress,
-            detail = "Tor bootstrap timed out at $progress% ($summary)",
+            detail = "Tor bootstrap timed out at $progress% ($summary) " +
+                "socks=$socksReady dns=$dnsReady",
             cause = lastError,
         )
     }

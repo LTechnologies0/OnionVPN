@@ -127,18 +127,10 @@ internal class FirewallPromptNotifier(
     }
 
     private fun launchActivity(requestId: String) {
+        // Direct startActivity — do not pass PendingIntent BAL options here.
+        // Those modes are only valid when creating/sending a PendingIntent.
         try {
-            val intent = promptIntent(requestId)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                val opts = ActivityOptions.makeBasic().apply {
-                    setPendingIntentBackgroundActivityStartMode(
-                        ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED,
-                    )
-                }
-                appContext.startActivity(intent, opts.toBundle())
-            } else {
-                appContext.startActivity(intent)
-            }
+            appContext.startActivity(promptIntent(requestId))
         } catch (error: Exception) {
             Timber.w(error, "Direct firewall prompt launch failed; relying on overlay/FSI")
         }
@@ -159,9 +151,12 @@ internal class FirewallPromptNotifier(
     private fun promptPendingIntent(requestId: String): PendingIntent {
         val flags = PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         val intent = promptIntent(requestId)
+        // Creator opt-in (API 34+): grant our BAL privileges to SystemUI when it
+        // sends this PI. setPendingIntentBackgroundActivityStartMode is for the
+        // *sender* only — using it at create time crashes on Android 15+ (IAE).
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             val opts = ActivityOptions.makeBasic().apply {
-                setPendingIntentBackgroundActivityStartMode(
+                setPendingIntentCreatorBackgroundActivityStartMode(
                     ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED,
                 )
             }

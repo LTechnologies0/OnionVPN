@@ -1,12 +1,13 @@
 package ltechnologies.onionphone.onionvpn.core.tor.control.catalog
 
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class TorControlCatalogTest {
     @Test
-    fun clientEvents_includesCoreVpnSet() {
+    fun clientEvents_coreIsTightOrbotSet() {
         val events = TorControlCatalog.CLIENT_EVENTS
         listOf(
             "STATUS_CLIENT",
@@ -22,7 +23,40 @@ class TorControlCatalogTest {
         ).forEach { name ->
             assertTrue("$name missing from CLIENT_EVENTS", events.contains(name))
         }
+        assertFalse("PT events must not be in core SETEVENTS", events.contains("PT_LOG"))
+        assertFalse(events.contains("TRANSPORT_LAUNCHED"))
+        assertFalse(events.contains("CIRC_MINOR"))
         assertFalse(events.contains("DROPTIMEOUTS"))
+    }
+
+    @Test
+    fun eventTiers_areDisjoint() {
+        val core = TorControlCatalog.CLIENT_EVENTS.split(' ').toSet()
+        val optional = TorControlCatalog.CLIENT_EVENTS_OPTIONAL.split(' ').toSet()
+        val pt = TorControlCatalog.CLIENT_EVENTS_PT.split(' ').toSet()
+        assertTrue(core.intersect(optional).isEmpty())
+        assertTrue(core.intersect(pt).isEmpty())
+        assertTrue(optional.intersect(pt).isEmpty())
+        assertTrue(pt.containsAll(listOf("TRANSPORT_LAUNCHED", "PT_LOG", "PT_STATUS")))
+        assertTrue(optional.contains("CIRC_MINOR"))
+    }
+
+    @Test
+    fun healthGetInfo_tiersDoNotOverlapAndDropUnused() {
+        val core = TorControlCatalog.HEALTH_GETINFO_CORE.toSet()
+        val optional = TorControlCatalog.HEALTH_GETINFO_OPTIONAL.toSet()
+        val traffic = TorControlCatalog.HEALTH_GETINFO_TRAFFIC.toSet()
+        val heavy = TorControlCatalog.HEALTH_GETINFO_HEAVY.toSet()
+        assertTrue(core.contains("status/bootstrap-phase"))
+        assertTrue(optional.containsAll(listOf("dormant", "network-liveness")))
+        assertTrue(heavy.contains("entry-guards"))
+        assertFalse(TorControlCatalog.HEALTH_GETINFO_KEYS.contains("process/pid"))
+        assertFalse(TorControlCatalog.HEALTH_GETINFO_KEYS.contains("status/good-server-descriptor"))
+        assertEquals(
+            core.size + optional.size + traffic.size + heavy.size,
+            TorControlCatalog.HEALTH_GETINFO_KEYS.size,
+        )
+        assertTrue(core.intersect(optional).isEmpty())
     }
 
     @Test
@@ -46,15 +80,9 @@ class TorControlCatalogTest {
                     "DROPTIMEOUTS",
                     "SETCONF",
                     "CLOSECIRCUIT",
+                    "USEFEATURE",
                 ),
             ),
         )
-    }
-
-    @Test
-    fun healthGetInfo_coversBootstrapAndGuards() {
-        assertTrue(TorControlCatalog.HEALTH_GETINFO_KEYS.contains("status/bootstrap-phase"))
-        assertTrue(TorControlCatalog.HEALTH_GETINFO_KEYS.contains("entry-guards"))
-        assertTrue(TorControlCatalog.HEALTH_GETINFO_KEYS.contains("network-liveness"))
     }
 }

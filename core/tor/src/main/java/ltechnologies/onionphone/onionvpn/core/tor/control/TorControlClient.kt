@@ -25,9 +25,9 @@ import timber.log.Timber
  * 1. Open ControlSocket (transport)
  * 2. AUTHENTICATE (cookie hex)
  * 3. TAKEOWNERSHIP + RESETCONF __OwningControllerProcess
- * 4. USEFEATURE VERBOSE_NAMES EXTENDED_EVENTS
- * 5. SETEVENTS client set (fallback if rejected)
- * 6. refreshInfo (GETINFO health keys)
+ * 4. USEFEATURE VERBOSE_NAMES then EXTENDED_EVENTS (always-on no-ops on modern Tor)
+ * 5. SETEVENTS core → optional → PT (incremental; PT only if bridges)
+ * 6. refreshBootstrap (minimal GETINFO)
  *
  * @see <a href="https://spec.torproject.org/control-spec/">control-spec</a>
  */
@@ -61,9 +61,14 @@ class TorControlClient {
     /**
      * Runs the sequential auth + subscription pipeline against [controlSocketPath] + cookie.
      *
+     * @param bridgesConfigured when true, also try PT SETEVENTS (TRANSPORT_LAUNCHED / PT_*)
      * @throws IOException if socket/cookie missing or a required command fails
      */
-    fun connect(controlSocketPath: File, cookieFile: File) {
+    fun connect(
+        controlSocketPath: File,
+        cookieFile: File,
+        bridgesConfigured: Boolean = false,
+    ) {
         disconnect(sendShutdown = false)
         if (!cookieFile.exists() || cookieFile.length() == 0L) {
             throw IOException("Cookie file missing: ${cookieFile.absolutePath}")
@@ -76,22 +81,41 @@ class TorControlClient {
         transport.command("AUTHENTICATE $cookieHex")
         runCatching { transport.command("TAKEOWNERSHIP") }
         runCatching { transport.command("RESETCONF __OwningControllerProcess") }
-        runCatching { transport.command("USEFEATURE VERBOSE_NAMES EXTENDED_EVENTS") }
-        subscribeClientEvents()
-        refreshInfo()
+        // One feature per call — USEFEATURE is all-or-nothing on unknown names.
+        runCatching { transport.command("USEFEATURE VERBOSE_NAMES") }
+        runCatching { transport.command("USEFEATURE EXTENDED_EVENTS") }
+        subscribeClientEvents(bridgesConfigured)
+        refreshBootstrap()
         _status.update { it.copy(connected = true, lastError = null) }
-        Timber.i("Tor control connected (%s)", controlSocketPath.name)
+        Timber.i(
+            "Tor control connected (%s) bridges=%s",
+            controlSocketPath.name,
+            bridgesConfigured,
+        )
     }
 
-    private fun subscribeClientEvents() {
-        try {
-            transport.command("SETEVENTS ${TorControlCatalog.CLIENT_EVENTS}")
-        } catch (error: Exception) {
-            Timber.w(error, "SETEVENTS full client set failed — falling back")
-            transport.command(
-                "SETEVENTS STATUS_CLIENT CIRC CIRC_MINOR STREAM ORCONN BW " +
-                    "ADDRMAP NOTICE WARN ERR GUARD BUILDTIMEOUT_SET SIGNAL CONF_CHANGED",
-            )
+    /**
+     * Incremental SETEVENTS: each successful tier becomes the new baseline.
+     * If optional fails, PT is still attempted against core alone (not core+optional).
+     */
+    private fun subscribeClientEvents(bridgesConfigured: Boolean) {
+        val core = TorControlCatalog.CLIENT_EVENTS
+        transport.command("SETEVENTS $core")
+        var active = core
+
+        fun tryAdd(extra: String, label: String) {
+            if (extra.isBlank()) return
+            runCatching {
+                transport.command("SETEVENTS $active $extra")
+                active = "$active $extra"
+            }.onFailure { err ->
+                Timber.d(err, "SETEVENTS %s skipped (active=%s)", label, active)
+            }
+        }
+
+        tryAdd(TorControlCatalog.CLIENT_EVENTS_OPTIONAL, "optional")
+        if (bridgesConfigured) {
+            tryAdd(TorControlCatalog.CLIENT_EVENTS_PT, "PT")
         }
     }
 
@@ -134,6 +158,60 @@ class TorControlClient {
         ops.setNodePrefs(entry, exit, exclude)
 
     /**
+     * Bootstrap-only GETINFO (no dormant / network-liveness — those 552 on some builds
+     * and used to abort every poll).
+     */
+    fun refreshBootstrap() {
+        if (!transport.isOpen) return
+        runCatching {
+            val info = ops.getInfoMany(*TorControlCatalog.HEALTH_GETINFO_CORE.filter {
+                it.startsWith("status/")
+            }.toTypedArray())
+            TorControlEventParser.parseBootstrapPhase(info["status/bootstrap-phase"].orEmpty())
+                ?.let { b ->
+                    _status.update {
+                        it.copy(
+                            bootstrapProgress = b.progress,
+                            bootstrapTag = b.tag,
+                            bootstrapSummary = b.summary,
+                        )
+                    }
+                }
+            _status.update {
+                it.copy(
+                    circuitEstablished = info["status/circuit-established"] == "1",
+                    enoughDirInfo = info["status/enough-dir-info"] == "1",
+                )
+            }
+        }.onFailure { err ->
+            // Fall back to single-key probes so one bad key cannot stall bootstrap.
+            runCatching {
+                TorControlEventParser.parseBootstrapPhase(ops.getInfo("status/bootstrap-phase"))
+                    ?.let { b ->
+                        _status.update {
+                            it.copy(
+                                bootstrapProgress = b.progress,
+                                bootstrapTag = b.tag,
+                                bootstrapSummary = b.summary,
+                            )
+                        }
+                    }
+                _status.update {
+                    it.copy(
+                        circuitEstablished =
+                            runCatching { ops.getInfo("status/circuit-established") }.getOrNull() == "1",
+                        enoughDirInfo =
+                            runCatching { ops.getInfo("status/enough-dir-info") }.getOrNull() == "1",
+                    )
+                }
+            }.onFailure {
+                Timber.w(err, "Tor bootstrap GETINFO failed")
+                _status.update { it.copy(lastError = err.message) }
+            }
+        }
+    }
+
+    /**
      * Cheap bootstrap / health poll — one batched GETINFO, no circuit/stream dumps.
      */
     fun refreshInfo() {
@@ -157,19 +235,20 @@ class TorControlClient {
     private fun refreshHealth(includeTraffic: Boolean, includeCircuits: Boolean) {
         if (!transport.isOpen) return
         runCatching {
-            val keys = buildList {
-                add("version")
-                add("status/bootstrap-phase")
-                add("status/circuit-established")
-                add("status/enough-dir-info")
-                add("dormant")
-                add("network-liveness")
-                if (includeTraffic) {
-                    add("traffic/read")
-                    add("traffic/written")
+            val info = ops.getInfoMany(*TorControlCatalog.HEALTH_GETINFO_CORE.toTypedArray())
+            // Per-key optional — one 552 must not drop the other.
+            val optional = buildMap {
+                for (key in TorControlCatalog.HEALTH_GETINFO_OPTIONAL) {
+                    runCatching { ops.getInfo(key) }.getOrNull()?.let { put(key, it) }
                 }
             }
-            val info = ops.getInfoMany(*keys.toTypedArray())
+            val traffic = if (includeTraffic) {
+                runCatching {
+                    ops.getInfoMany(*TorControlCatalog.HEALTH_GETINFO_TRAFFIC.toTypedArray())
+                }.getOrDefault(emptyMap())
+            } else {
+                emptyMap()
+            }
             TorControlEventParser.parseBootstrapPhase(info["status/bootstrap-phase"].orEmpty())
                 ?.let { b ->
                     _status.update {
@@ -182,15 +261,15 @@ class TorControlClient {
                 }
             val circEst = info["status/circuit-established"] == "1"
             val dirOk = info["status/enough-dir-info"] == "1"
-            val dormant = (info["dormant"]?.toIntOrNull() ?: 0) != 0
-            val live = info["network-liveness"].orEmpty().equals("up", ignoreCase = true)
+            val dormant = (optional["dormant"]?.toIntOrNull() ?: 0) != 0
+            val live = optional["network-liveness"].orEmpty().equals("up", ignoreCase = true)
             val read = if (includeTraffic) {
-                info["traffic/read"]?.toLongOrNull() ?: 0L
+                traffic["traffic/read"]?.toLongOrNull() ?: _status.value.readBytes
             } else {
                 _status.value.readBytes
             }
             val write = if (includeTraffic) {
-                info["traffic/written"]?.toLongOrNull() ?: 0L
+                traffic["traffic/written"]?.toLongOrNull() ?: _status.value.writeBytes
             } else {
                 _status.value.writeBytes
             }
@@ -198,23 +277,28 @@ class TorControlClient {
             var streamCount = _status.value.streamCount
             var guards = _status.value.entryGuardsSummary
             if (includeCircuits) {
-                val circBody = ops.getInfo("circuit-status")
-                built = circBody.lineSequence().count {
-                    it.trim().split(' ').getOrNull(1) == "BUILT"
+                for (key in TorControlCatalog.HEALTH_GETINFO_HEAVY) {
+                    val body = runCatching { ops.getInfo(key) }.getOrDefault("")
+                    when (key) {
+                        "circuit-status" ->
+                            built = body.lineSequence().count {
+                                it.trim().split(' ').getOrNull(1) == "BUILT"
+                            }
+                        "stream-status" ->
+                            streamCount = body.lineSequence().count { it.isNotBlank() }
+                        "entry-guards" ->
+                            guards = body.lineSequence()
+                                .take(3)
+                                .joinToString(" | ") { it.trim().take(48) }
+                    }
                 }
-                val streams = runCatching { ops.getInfo("stream-status") }.getOrDefault("")
-                streamCount = streams.lineSequence().count { it.isNotBlank() }
-                guards = runCatching { ops.getInfo("entry-guards") }.getOrDefault("")
-                    .lineSequence()
-                    .take(3)
-                    .joinToString(" | ") { it.trim().take(48) }
             }
             _status.update {
                 it.copy(
                     torVersion = info["version"].orEmpty().take(40),
                     circuitEstablished = circEst,
                     enoughDirInfo = dirOk,
-                    networkLive = live,
+                    networkLive = live || circEst,
                     dormant = dormant,
                     readBytes = read,
                     writeBytes = write,

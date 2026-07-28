@@ -135,7 +135,8 @@ object AndroidVpnInspector {
                 else -> buildString {
                     append("iface=${link?.interfaceName}")
                     append(" ownerUid=${caps?.ownerUidOrNull() ?: "?"}")
-                    append(" session=${caps?.vpnSessionOrNull() ?: VPN_SESSION_NAME}")
+                    // Session id is @SystemApi / blocked under targetSdk 37 — do not reflect.
+                    append(" session=$VPN_SESSION_NAME")
                     append("; app excluded from TUN (active=${activeCaps?.describe()})")
                 }
             },
@@ -160,9 +161,8 @@ object AndroidVpnInspector {
             val caps = cm.getNetworkCapabilities(network)
             val link = cm.getLinkProperties(network)
             val otherUid = caps?.ownerUidOrNull()
-            val session = caps?.vpnSessionOrNull() ?: "?"
             val iface = link?.interfaceName ?: "?"
-            "iface=$iface session=$session ownerUid=${otherUid ?: "?"}"
+            "iface=$iface ownerUid=${otherUid ?: "?"}"
         }
 
         val sameUserConflict = others.any { network ->
@@ -332,10 +332,8 @@ object AndroidVpnInspector {
             cm.getNetworkCapabilities(network)?.ownerUidOrNull() == ownUid
         }?.let { return it }
 
-        vpnNetworks.firstOrNull { network ->
-            cm.getNetworkCapabilities(network)?.vpnSessionOrNull() == VPN_SESSION_NAME
-        }?.let { return it }
-
+        // Do not read VpnTransportInfo.getSessionId() — hidden / blocked at runtime
+        // (targetSdk 37). ownerUid + TUN fingerprint are enough to pick our network.
         vpnNetworks.firstOrNull { network ->
             val link = cm.getLinkProperties(network) ?: return@firstOrNull false
             matchesOnionVpnFingerprint(link)
@@ -367,15 +365,6 @@ object AndroidVpnInspector {
         } else {
             null
         }
-
-    /** Session id via VpnTransportInfo (API 33+), resolved reflectively for older compile stubs. */
-    private fun NetworkCapabilities.vpnSessionOrNull(): String? {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return null
-        val info = transportInfo ?: return null
-        return runCatching {
-            info.javaClass.getMethod("getSessionId").invoke(info) as? String
-        }.getOrNull()
-    }
 
     private fun NetworkCapabilities.describe(): String =
         buildString {

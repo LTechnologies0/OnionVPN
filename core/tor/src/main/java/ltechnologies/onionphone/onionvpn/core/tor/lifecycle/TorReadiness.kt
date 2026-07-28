@@ -18,22 +18,29 @@ import ltechnologies.onionphone.onionvpn.core.model.TunnelRuntimePorts
 /**
  * Local listener probes used after control bootstrap (pipeline step 6).
  *
- * Verifies the three SocksPorts + DNSPort from [TunnelRuntimePorts] accept connections
- * before the VPN declares Tor ready.
+ * SOCKS TCP accepts early; DNSPort may listen but not answer queries until bootstrap
+ * finishes — never require a successful DNS reply before bootstrap is done.
  */
 internal object TorReadiness {
     /** TCP connect to loopback SOCKS. Throws on failure. */
-    fun assertSocksReady(port: Int) {
+    fun assertSocksReady(port: Int, timeoutMs: Int = 800) {
         Socket().use { socket ->
             socket.connect(
                 InetSocketAddress(TunnelEndpoints.LOOPBACK, port),
-                1_000,
+                timeoutMs,
             )
         }
     }
 
-    /** Minimal DNS query to Tor DNSPort. Throws on failure. */
-    fun assertDnsPortReady(port: Int) {
+    /** True when a SOCKS TCP connect succeeds. */
+    fun isSocksReady(port: Int, timeoutMs: Int = 800): Boolean =
+        runCatching { assertSocksReady(port, timeoutMs) }.isSuccess
+
+    /**
+     * Minimal DNS query to Tor DNSPort.
+     * @throws Exception on send/receive failure or timeout
+     */
+    fun assertDnsPortReady(port: Int, timeoutMs: Int = 1_500) {
         val query = byteArrayOf(
             0x00, 0x01,
             0x01, 0x00,
@@ -49,7 +56,7 @@ internal object TorReadiness {
             0x00, 0x01,
         )
         DatagramSocket().use { socket ->
-            socket.soTimeout = 2_000
+            socket.soTimeout = timeoutMs
             socket.send(
                 DatagramPacket(
                     query,
@@ -63,15 +70,28 @@ internal object TorReadiness {
         }
     }
 
+    fun isDnsPortReady(port: Int, timeoutMs: Int = 1_500): Boolean =
+        runCatching { assertDnsPortReady(port, timeoutMs) }.isSuccess
+
+    /** All three SocksPorts accept TCP. */
+    fun assertSocksPortsReady(ports: TunnelRuntimePorts) {
+        assertSocksReady(ports.torSocksPort)
+        assertSocksReady(ports.torDnsCryptSocksPort)
+        assertSocksReady(ports.torProbeSocksPort)
+    }
+
+    fun areSocksPortsReady(ports: TunnelRuntimePorts): Boolean =
+        isSocksReady(ports.torSocksPort) &&
+            isSocksReady(ports.torDnsCryptSocksPort) &&
+            isSocksReady(ports.torProbeSocksPort)
+
     /**
      * True when apps + DNSCrypt + probe SocksPorts and DNSPort all respond.
      *
      * @throws Exception from the first failing probe
      */
     fun assertAllListenersReady(ports: TunnelRuntimePorts) {
-        assertSocksReady(ports.torSocksPort)
-        assertSocksReady(ports.torDnsCryptSocksPort)
-        assertSocksReady(ports.torProbeSocksPort)
+        assertSocksPortsReady(ports)
         assertDnsPortReady(ports.torDnsPort)
     }
 }
