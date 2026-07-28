@@ -47,7 +47,9 @@ internal class FirewallPromptNotifier(
 
     fun show(info: FirewallConnectionInfo) {
         ensureChannel()
-        val dest = info.displayDestination()
+        // Notification text cannot reliably use coloured spans across OEMs —
+        // prefix the destination with a threat emoji instead.
+        val dest = threatEmoji(info.threatCategory) + " " + info.displayDestination()
         val content = appContext.getString(
             R.string.firewall_prompt_notif_text,
             info.protocolLabel,
@@ -172,5 +174,11 @@ internal class FirewallPromptNotifier(
         private const val REQUEST_OPEN = 4301
         private const val REQUEST_ALLOW = 4302
         private const val REQUEST_DENY = 4303
+
+        fun threatEmoji(category: DomainThreatCategory): String = when (category) {
+            DomainThreatCategory.NONE -> "🟢"
+            DomainThreatCategory.TRACKING -> "🟠"
+            DomainThreatCategory.MALWARE -> "🔴"
+        }
     }
 }
