@@ -42,6 +42,7 @@ import ltechnologies.onionphone.onionvpn.core.vpn.OnionVpnService
 import ltechnologies.onionphone.onionvpn.core.vpn.net.TorBandwidthSampler
 import ltechnologies.onionphone.onionvpn.firewall.InteractiveFirewallEngine
 import ltechnologies.onionphone.onionvpn.prefs.TunnelPreferencesStore
+import ltechnologies.onionphone.onionvpn.threat.DomainReputationRepository
 import timber.log.Timber
 import java.net.InetSocketAddress
 import java.net.Socket
@@ -61,6 +62,7 @@ class TunnelForegroundService : Service() {
     @Inject lateinit var dnsCrypt: DnsCryptProcessManager
     @Inject lateinit var preferencesStore: TunnelPreferencesStore
     @Inject lateinit var firewallEngine: InteractiveFirewallEngine
+    @Inject lateinit var domainReputation: DomainReputationRepository
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val lifecycleMutex = Mutex()
@@ -243,6 +245,7 @@ class TunnelForegroundService : Service() {
             handleFailure(failure.userMessage, fromValidation = false, stopTorProcesses = failure.stopTor)
             return
         }
+        domainReputation.onTorReady()
 
         updateSnapshot(TunnelPhase.StartingDnsCrypt, torRunning = true)
         val useDnsCrypt = preferences.dnsResolverMode == DnsResolverMode.DNSCRYPT_MUX

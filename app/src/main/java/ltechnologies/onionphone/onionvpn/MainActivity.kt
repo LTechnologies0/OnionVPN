@@ -33,6 +33,7 @@ import javax.inject.Inject
 import ltechnologies.onionphone.onionvpn.firewall.InteractiveFirewallEngine
 import ltechnologies.onionphone.onionvpn.security.AppLockAuthenticator
 import ltechnologies.onionphone.onionvpn.security.AppLockManager
+import ltechnologies.onionphone.onionvpn.threat.DomainReputationRepository
 import ltechnologies.onionphone.onionvpn.ui.FirewallScreen
 import ltechnologies.onionphone.onionvpn.ui.LogsScreen
 import ltechnologies.onionphone.onionvpn.ui.SettingsScreen
@@ -46,6 +47,7 @@ class MainActivity : FragmentActivity() {
     private val viewModel: MainViewModel by viewModels()
 
     @Inject lateinit var firewallEngine: InteractiveFirewallEngine
+    @Inject lateinit var domainReputation: DomainReputationRepository
     @Inject lateinit var appLockManager: AppLockManager
     @Inject lateinit var appLockAuthenticator: AppLockAuthenticator
 
@@ -85,6 +87,7 @@ class MainActivity : FragmentActivity() {
                         snapshot = snapshot,
                         preferences = preferences,
                         firewallEngine = firewallEngine,
+                        domainReputation = domainReputation,
                         onStart = ::requestNotificationsThenStart,
                         onStop = viewModel::stopTunnel,
                         onNewNym = viewModel::newNym,
@@ -136,6 +139,7 @@ private fun OnionVpnApp(
     snapshot: ltechnologies.onionphone.onionvpn.core.model.TunnelSnapshot,
     preferences: ltechnologies.onionphone.onionvpn.core.model.TunnelPreferences,
     firewallEngine: InteractiveFirewallEngine,
+    domainReputation: DomainReputationRepository,
     onStart: () -> Unit,
     onStop: () -> Unit,
     onNewNym: () -> Unit,
@@ -188,6 +192,7 @@ private fun OnionVpnApp(
                 2 -> LogsScreen()
                 else -> SettingsScreen(
                     preferences = preferences,
+                    domainReputation = domainReputation,
                     onLoadTorrc = onLoadTorrc,
                     onLoadDnsCryptToml = onLoadDnsCryptToml,
                     onSavePreferences = onSavePreferences,

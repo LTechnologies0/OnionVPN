@@ -33,18 +33,26 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import java.util.concurrent.atomic.AtomicReference
+import ltechnologies.onionphone.onionvpn.R
 import ltechnologies.onionphone.onionvpn.core.dnscrypt.config.DnsCryptPublicResolvers
 import ltechnologies.onionphone.onionvpn.core.model.DnsResolverMode
 import ltechnologies.onionphone.onionvpn.core.model.FirewallDefaultAction
 import ltechnologies.onionphone.onionvpn.core.model.TunnelPreferences
+import ltechnologies.onionphone.onionvpn.threat.DomainReputationRepository
 import ltechnologies.onionphone.onionvpn.util.SystemSecurityIntents
 
 @Composable
 fun SettingsScreen(
     preferences: TunnelPreferences,
+    domainReputation: DomainReputationRepository,
     onLoadTorrc: () -> String,
     onLoadDnsCryptToml: () -> String,
     onSavePreferences: (TunnelPreferences, restartIfConnected: Boolean) -> Unit,
@@ -269,6 +277,56 @@ fun SettingsScreen(
             enabled = local.firewallEnabled,
             modifier = Modifier.fillMaxWidth(),
         )
+
+        Text(stringResource(R.string.domain_lists_title), style = MaterialTheme.typography.titleMedium)
+        Text(
+            text = stringResource(R.string.domain_lists_desc),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        val reputation by domainReputation.status.collectAsStateWithLifecycle()
+        val lastUpdate = if (reputation.lastSuccessEpochMs > 0L) {
+            SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault())
+                .format(Date(reputation.lastSuccessEpochMs))
+        } else {
+            stringResource(R.string.domain_lists_never)
+        }
+        val transport = when {
+            reputation.lastSuccessEpochMs <= 0L -> ""
+            reputation.lastViaTor -> stringResource(R.string.domain_lists_via_tor)
+            else -> stringResource(R.string.domain_lists_via_direct)
+        }
+        Text(
+            text = stringResource(
+                R.string.domain_lists_status,
+                reputation.trackingEntries,
+                reputation.malwareEntries,
+                lastUpdate,
+                transport,
+            ),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        if (reputation.lastError != null) {
+            Text(
+                text = stringResource(R.string.domain_lists_last_error, reputation.lastError!!),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+            )
+        }
+        Button(
+            onClick = { domainReputation.requestUpdate() },
+            enabled = !reputation.updating,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Text(
+                if (reputation.updating) {
+                    stringResource(R.string.domain_lists_updating)
+                } else {
+                    stringResource(R.string.domain_lists_update)
+                },
+            )
+        }
 
         Text("Tor", style = MaterialTheme.typography.titleMedium)
         Text(

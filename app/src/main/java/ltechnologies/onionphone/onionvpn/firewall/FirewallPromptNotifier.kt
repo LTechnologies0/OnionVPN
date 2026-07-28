@@ -16,6 +16,7 @@ import androidx.core.app.NotificationManagerCompat
 import androidx.core.graphics.createBitmap
 import androidx.core.graphics.drawable.IconCompat
 import ltechnologies.onionphone.onionvpn.R
+import ltechnologies.onionphone.onionvpn.core.model.DomainThreatCategory
 import ltechnologies.onionphone.onionvpn.core.model.FirewallConnectionInfo
 import timber.log.Timber
 
@@ -46,12 +47,28 @@ internal class FirewallPromptNotifier(
 
     fun show(info: FirewallConnectionInfo) {
         ensureChannel()
-        val content = appContext.getString(
+        // Notification body text cannot reliably use coloured spans across OEMs.
+        // Prefix only known threats (unknown stays unmarked — never imply "safe").
+        val emoji = info.threatCategory.notificationEmojiOrNull()
+        val dest = if (emoji != null) {
+            "$emoji ${info.displayDestination()}"
+        } else {
+            info.displayDestination()
+        }
+        val base = appContext.getString(
             R.string.firewall_prompt_notif_text,
             info.protocolLabel,
-            info.destIp,
+            dest,
             info.destPort,
         )
+        val threatSuffix = when (info.threatCategory) {
+            DomainThreatCategory.MALWARE ->
+                " · " + appContext.getString(R.string.firewall_threat_malware)
+            DomainThreatCategory.TRACKING ->
+                " · " + appContext.getString(R.string.firewall_threat_tracking)
+            DomainThreatCategory.NONE -> ""
+        }
+        val content = base + threatSuffix
         val openPending = detailPendingIntent(info.requestId)
         val allowPending = actionPendingIntent(
             FirewallPromptActionReceiver.ACTION_ALLOW,

@@ -17,6 +17,7 @@ import ltechnologies.onionphone.onionvpn.logging.LogSource
 import ltechnologies.onionphone.onionvpn.logging.ProcessLogSeverity
 import ltechnologies.onionphone.onionvpn.logging.TunnelLogBuffer
 import ltechnologies.onionphone.onionvpn.logging.TunnelLogTree
+import ltechnologies.onionphone.onionvpn.threat.DomainReputationRepository
 import timber.log.Timber
 
 @HiltAndroidApp
@@ -24,6 +25,7 @@ class OnionVpnApplication : Application() {
     @Inject lateinit var tor: TorProcessManager
     @Inject lateinit var dnsCrypt: DnsCryptProcessManager
     @Inject lateinit var firewallEngine: InteractiveFirewallEngine
+    @Inject lateinit var domainReputation: DomainReputationRepository
 
     private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
@@ -34,6 +36,7 @@ class OnionVpnApplication : Application() {
             Timber.plant(Timber.DebugTree())
         }
         firewallEngine.start()
+        domainReputation.start()
         FirewallBridge.engine = firewallEngine
         tor.onLogLine = { line ->
             val err = ProcessLogSeverity.isError(LogSource.TOR, line)
