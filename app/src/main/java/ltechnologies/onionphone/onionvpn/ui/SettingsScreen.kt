@@ -259,6 +259,11 @@ fun SettingsScreen(
             checked = local.dnsCryptForceTcp,
             onChecked = { local = local.copy(dnsCryptForceTcp = it) },
         )
+        PrefSwitch(
+            label = "require_dnssec",
+            checked = local.dnsCryptRequireDnssec,
+            onChecked = { local = local.copy(dnsCryptRequireDnssec = it) },
+        )
         Button(
             onClick = {
                 tomlDraft = onLoadDnsCryptToml()

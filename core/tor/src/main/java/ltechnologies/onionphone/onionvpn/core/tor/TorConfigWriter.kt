@@ -9,6 +9,7 @@ import ltechnologies.onionphone.onionvpn.core.model.TunnelPreferences
  * - [path-spec stream isolation](https://spec.torproject.org/path-spec/stream-isolation.html)
  * - Tor manual `SocksPort` isolation flags
  * - Whonix multi-SocksPort practice
+ * - Client-side MITM / local-network hardening (RejectInternalAddresses, SafeLogging, …)
  *
  * Isolation model (OnionVPN):
  * 1. **Apps/hev** — SessionGroup=1, IsolateDestAddr+Port (circuit per destination),
@@ -19,6 +20,9 @@ import ltechnologies.onionphone.onionvpn.core.model.TunnelPreferences
  * 3. **Probes** — SessionGroup=4, dedicated SocksPort so exit-IP / SOCKS5A checks never
  *    share circuits with user traffic (proxy-address isolation in path-spec).
  * 4. **DNSPort** — SessionGroup=2 for Automap / bootstrap only.
+ *
+ * BGP / ISP note: Tor cannot rewrite public BGP. Integrity of directory consensus +
+ * TLS/DNSCrypt end-to-end still required. Bridges mitigate ISP fingerprinting of Tor.
  */
 object TorConfigWriter {
     /** Full isolation flags for maximal stream/circuit separation (path-spec + man). */
@@ -37,6 +41,8 @@ object TorConfigWriter {
         appendLine("ClientOnly 1")
         appendLine("AvoidDiskWrites 1")
         appendLine("DormantCanceledByStartup 1")
+        appendLine("SafeLogging 1")
+        appendLine("Log notice stderr")
 
         appendLine("SocksPolicy accept 127.0.0.1")
         appendLine("SocksPolicy reject *")
@@ -72,6 +78,14 @@ object TorConfigWriter {
         appendLine("HTTPTunnelPort 0")
         appendLine("ControlPort 0")
 
+        // Local / private-network MITM: refuse SOCKS to RFC1918/link-local unless Automap.
+        appendLine("ClientRejectInternalAddresses 1")
+        appendLine("AllowNonRFC953Hostnames 0")
+        appendLine("RefuseUnknownExits 1")
+        appendLine("FetchUselessDescriptors 0")
+        appendLine("DownloadExtraInfo 0")
+        appendLine("ClientPreferIPv6ORPort 0")
+
         appendLine("HardwareAccel 1")
         appendLine("VanguardsLiteEnabled 1")
         appendLine("ConfluxEnabled auto")
@@ -86,6 +100,9 @@ object TorConfigWriter {
 
         // IsolateDestAddr opens many circuits — raise pending budget (Tor man).
         appendLine("MaxClientCircuitsPending 128")
+        appendLine("CircuitBuildTimeout 60")
+        appendLine("LearnCircuitBuildTimeout 1")
+        appendLine("SocksTimeout 120")
 
         appendLine("ConnectionPadding auto")
         appendLine("ReducedConnectionPadding 0")
@@ -93,6 +110,7 @@ object TorConfigWriter {
         appendLine("ReducedCircuitPadding 0")
 
         appendLine("WarnPlaintextPorts 23,109,110,143")
+        appendLine("RejectPlaintextPorts 23,109")
 
         appendLine("NewCircuitPeriod ${preferences.torNewCircuitPeriodSec}")
         appendLine("MaxCircuitDirtiness ${preferences.torMaxCircuitDirtinessSec}")

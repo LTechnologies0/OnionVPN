@@ -25,14 +25,38 @@ object VpnProfileBuilder {
     const val SESSION_NAME = "OnionVPN"
 
     val BLOCKED_PUBLIC_DNS = listOf(
+        // Google
         "8.8.8.8",
         "8.8.4.4",
+        "2001:4860:4860::8888",
+        "2001:4860:4860::8844",
+        // Cloudflare
         "1.1.1.1",
         "1.0.0.1",
+        "1.1.1.2",
+        "1.0.0.2",
+        "2606:4700:4700::1111",
+        "2606:4700:4700::1001",
+        // Quad9
         "9.9.9.9",
         "149.112.112.112",
+        "9.9.9.10",
+        "149.112.112.10",
+        // AdGuard
         "94.140.14.14",
         "94.140.15.15",
+        "94.140.14.15",
+        "94.140.15.16",
+        // OpenDNS
+        "208.67.222.222",
+        "208.67.220.220",
+        // CleanBrowsing / Comodo / Level3
+        "185.228.168.9",
+        "185.228.169.9",
+        "8.26.56.26",
+        "8.20.247.20",
+        "4.2.2.1",
+        "4.2.2.2",
     )
 
     fun configure(
@@ -57,7 +81,10 @@ object VpnProfileBuilder {
             .setBlocking(mode == VpnProfileMode.Blocking && preferences.killSwitchEnabled)
 
         BLOCKED_PUBLIC_DNS.forEach { resolver ->
-            builder.addRoute(resolver, 32)
+            // IPv6 literals need prefix length 128; IPv4 /32.
+            val prefix = if (resolver.contains(':')) 128 else 32
+            runCatching { builder.addRoute(resolver, prefix) }
+                .onFailure { Timber.w(it, "Skip DNS pin route $resolver") }
         }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {

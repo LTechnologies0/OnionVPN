@@ -22,5 +22,18 @@ class DnsCryptConfigWriterTest {
         assertTrue(config.contains("netprobe_address = '${TunnelEndpoints.LOOPBACK}:${TunnelEndpoints.TOR_DNS_PORT}'"))
         assertTrue(config.contains("ignore_system_dns = true"))
         assertTrue(config.contains("force_tcp = true"))
+        assertTrue(config.contains("dnscrypt_ephemeral_keys = true"))
+        assertTrue(config.contains("tls_disable_session_tickets = true"))
+        assertTrue(config.contains("block_ipv6 = true"))
+        assertTrue(config.contains("require_dnssec = true"))
+    }
+
+    @Test
+    fun blockedNamesCoverCaptiveAndDoh() {
+        val names = DnsCryptConfigWriter.blockedNamesFileContent()
+        assertTrue(names.contains("connectivitycheck.gstatic.com"))
+        assertTrue(names.contains("captive.apple.com"))
+        assertTrue(names.contains("dns.google"))
+        assertTrue(names.contains("cloudflare-dns.com"))
     }
 }

@@ -9,17 +9,23 @@ import androidx.core.content.getSystemService
 import ltechnologies.onionphone.onionvpn.core.model.ValidationCheck
 import ltechnologies.onionphone.onionvpn.core.model.ValidationStatus
 import ltechnologies.onionphone.onionvpn.core.vpn.OnionVpnService
+import ltechnologies.onionphone.onionvpn.core.vpn.firewall.FirewallBridge
+import ltechnologies.onionphone.onionvpn.core.vpn.firewall.PacketFirewall
 
 /**
  * System-level leak surfaces the TUN cannot fix alone (Tor VPN Threat Model):
- * Always-on/lockdown (from live VpnService when possible), Private DNS (DoT), VPN permission.
+ * Always-on/lockdown, Private DNS (DoT), captive portal, HTTP proxy, VPN permission,
+ * firewall engine wiring.
  */
 object SystemLeakInspector {
     fun inspect(context: Context, killSwitchExpected: Boolean): List<ValidationCheck> {
         return buildList {
             add(checkAlwaysOnLockdown(context, killSwitchExpected))
             add(checkPrivateDns(context))
+            add(checkCaptivePortal(context))
+            add(checkGlobalHttpProxy(context))
             add(checkVpnPermission(context))
+            add(checkFirewallEngine())
         }
     }
 
@@ -37,7 +43,6 @@ object SystemLeakInspector {
             )
         }
 
-        // Prefer live VpnService flags (Orbot/Mullvad) over Settings.Secure scraping.
         val liveAlwaysOn = OnionVpnService.vpnAlwaysOn.value
         val liveLockdown = OnionVpnService.vpnLockdown.value
         val vpnUp = OnionVpnService.vpnEstablished.value
@@ -129,6 +134,57 @@ object SystemLeakInspector {
         }
     }
 
+    /**
+     * Captive portal HTTP checks can phone home on the underlying network
+     * (local MITM / hotel Wi‑Fi). Prefer mode 0 (ignore).
+     */
+    private fun checkCaptivePortal(context: Context): ValidationCheck {
+        val mode = runCatching {
+            Settings.Global.getInt(context.contentResolver, "captive_portal_mode", 1)
+        }.getOrDefault(1)
+        return if (mode == 0) {
+            ValidationCheck(
+                id = "android.captive_portal",
+                label = "Captive portal detection off",
+                status = ValidationStatus.Pass,
+                detail = "captive_portal_mode=0",
+                tripsKillSwitch = false,
+            )
+        } else {
+            ValidationCheck(
+                id = "android.captive_portal",
+                label = "Captive portal detection off",
+                status = ValidationStatus.Fail,
+                detail = "captive_portal_mode=$mode — probes may leak on underlying net. " +
+                    "ADB: settings put global captive_portal_mode 0",
+                tripsKillSwitch = false,
+            )
+        }
+    }
+
+    private fun checkGlobalHttpProxy(context: Context): ValidationCheck {
+        val host = runCatching {
+            Settings.Global.getString(context.contentResolver, "http_proxy")
+        }.getOrNull().orEmpty()
+        return if (host.isBlank() || host.equals(":0", ignoreCase = true)) {
+            ValidationCheck(
+                id = "android.http_proxy",
+                label = "No global HTTP proxy",
+                status = ValidationStatus.Pass,
+                detail = "http_proxy unset",
+                tripsKillSwitch = false,
+            )
+        } else {
+            ValidationCheck(
+                id = "android.http_proxy",
+                label = "No global HTTP proxy",
+                status = ValidationStatus.Fail,
+                detail = "Global HTTP proxy='$host' — clear it (local MITM risk)",
+                tripsKillSwitch = false,
+            )
+        }
+    }
+
     private fun checkVpnPermission(context: Context): ValidationCheck {
         val needsPrep = VpnService.prepare(context) != null
         return ValidationCheck(
@@ -137,6 +193,21 @@ object SystemLeakInspector {
             status = if (needsPrep) ValidationStatus.Fail else ValidationStatus.Pass,
             detail = if (needsPrep) "User must approve VPN" else "VpnService.prepare() == null",
             tripsKillSwitch = true,
+        )
+    }
+
+    private fun checkFirewallEngine(): ValidationCheck {
+        val wired = FirewallBridge.engine !== PacketFirewall.AllowAll
+        return ValidationCheck(
+            id = "firewall.engine",
+            label = "Interactive firewall engine wired",
+            status = if (wired) ValidationStatus.Pass else ValidationStatus.Fail,
+            detail = if (wired) {
+                "FirewallBridge != AllowAll (enable in Settings to enforce)"
+            } else {
+                "FirewallBridge still AllowAll — Application did not install engine"
+            },
+            tripsKillSwitch = false,
         )
     }
 

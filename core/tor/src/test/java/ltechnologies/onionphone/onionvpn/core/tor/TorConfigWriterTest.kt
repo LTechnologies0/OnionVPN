@@ -46,4 +46,16 @@ class TorConfigWriterTest {
         }
         assertTrue(dnsCryptLine.contains("KeepAliveIsolateSOCKSAuth"))
     }
+
+    @Test
+    fun mitmHardening_rejectInternal_safeLogging_refuseUnknownExits() {
+        val torrc = TorConfigWriter.write(dataDirectory = "/tmp/tor")
+        assertTrue(torrc.contains("ClientRejectInternalAddresses 1"))
+        assertTrue(torrc.contains("SafeLogging 1"))
+        assertTrue(torrc.contains("RefuseUnknownExits 1"))
+        assertTrue(torrc.contains("AllowNonRFC953Hostnames 0"))
+        assertTrue(torrc.contains("ClientPreferIPv6ORPort 0"))
+        assertTrue(torrc.contains("RejectPlaintextPorts 23,109"))
+        assertFalse(torrc.contains("GeoIPExcludeUnknown"))
+    }
 }

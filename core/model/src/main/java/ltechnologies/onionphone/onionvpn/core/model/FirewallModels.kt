@@ -106,6 +106,8 @@ data class TunnelPreferences(
     val dnsCryptRequireNoLog: Boolean = true,
     val dnsCryptRequireNoFilter: Boolean = false,
     val dnsCryptForceTcp: Boolean = true,
+    /** Prefer DNSCrypt servers advertising DNSSEC in their stamp. */
+    val dnsCryptRequireDnssec: Boolean = true,
     /** Interactive OpenSnitch-style firewall on the TUN path. */
     val firewallEnabled: Boolean = false,
     val firewallDefaultAction: FirewallDefaultAction = FirewallDefaultAction.ASK,
