@@ -1,7 +1,6 @@
 package ltechnologies.onionphone.onionvpn.firewall
 
 import android.content.Context
-import android.content.pm.PackageManager
 import android.os.Handler
 import android.os.Looper
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -53,6 +52,7 @@ class InteractiveFirewallEngine @Inject constructor(
 ) : PacketFirewall {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val ownerResolver = ConnectionOwnerResolver(context)
+    private val appUidResolver = AppUidResolver(context)
     private val mainHandler = Handler(Looper.getMainLooper())
     private val ownUid = android.os.Process.myUid()
     private val promptNotifier = FirewallPromptNotifier(context)
@@ -62,8 +62,6 @@ class InteractiveFirewallEngine @Inject constructor(
 
     private val flowCache = ConcurrentHashMap<String, FirewallVerdict>()
     private val decisionCache = ConcurrentHashMap<String, FirewallVerdict>()
-    /** UID → label cache (PackageManager is slow; bound size for DoS). */
-    private val appCache = ConcurrentHashMap<Int, AppIdentity>()
 
     /** ruleKey → queued or active prompt (dedupe). */
     private val pendingByKey = ConcurrentHashMap<String, QueuedPrompt>()
@@ -91,6 +89,7 @@ class InteractiveFirewallEngine @Inject constructor(
 
     fun start() {
         promptNotifier.ensureChannel()
+        appUidResolver.start()
         scope.launch {
             for (entry in journalChannel) {
                 _journal.updateAndGet { list -> (listOf(entry) + list).take(MAX_JOURNAL) }
@@ -117,7 +116,6 @@ class InteractiveFirewallEngine @Inject constructor(
         }
         flowCache.clear()
         decisionCache.clear()
-        appCache.clear()
         synchronized(queueLock) {
             waitQueue.clear()
             pendingByKey.clear()
@@ -148,7 +146,7 @@ class InteractiveFirewallEngine @Inject constructor(
         // Do not blanket-allow SYSTEM_UID: many OEM services share 1000 and still need a rule
         // when the user wants least privilege. Unknown uid still goes through ASK/DENY/ALLOW.
 
-        val effectiveUid = if (uid < 0) UNKNOWN_UID else uid
+        val effectiveUid = if (ConnectionOwnerResolver.isValidUid(uid)) uid else UNKNOWN_UID
         val app = resolveApp(effectiveUid)
 
         val matching = findRule(effectiveUid, info)
@@ -383,37 +381,12 @@ class InteractiveFirewallEngine @Inject constructor(
     }
 
     private fun resolveApp(uid: Int): AppIdentity {
-        if (uid == UNKNOWN_UID) {
-            return AppIdentity("unknown", "Unknown app")
-        }
-        appCache[uid]?.let { return it }
-        val resolved = try {
-            val pm = context.packageManager
-            val packages = pm.getPackagesForUid(uid)
-            val pkg = packages?.firstOrNull()
-                ?: pm.getNameForUid(uid)?.substringBefore(':')
-                ?: "uid:$uid"
-            val label = try {
-                val ai = pm.getApplicationInfo(pkg, 0)
-                pm.getApplicationLabel(ai).toString()
-            } catch (_: PackageManager.NameNotFoundException) {
-                pkg
-            }
-            AppIdentity(pkg, label)
-        } catch (_: Exception) {
-            AppIdentity("uid:$uid", "UID $uid")
-        }
-        if (appCache.size >= MAX_APP_CACHE) {
-            var n = 0
-            val it = appCache.keys.iterator()
-            while (it.hasNext() && n < MAX_APP_CACHE / 2) {
-                it.next()
-                it.remove()
-                n++
-            }
-        }
-        appCache[uid] = resolved
-        return resolved
+        val id = appUidResolver.resolve(uid)
+        return AppIdentity(
+            packageName = id.packageName,
+            label = id.label,
+            confident = id.confident,
+        )
     }
 
     private fun appendJournal(
@@ -469,7 +442,11 @@ class InteractiveFirewallEngine @Inject constructor(
     private fun ruleKey(uid: Int, destIp: String, destPort: Int, protocol: Int): String =
         "$uid|$destIp|$destPort|$protocol"
 
-    private data class AppIdentity(val packageName: String, val label: String)
+    private data class AppIdentity(
+        val packageName: String,
+        val label: String,
+        val confident: Boolean = true,
+    )
 
     private class QueuedPrompt(
         val request: FirewallConnectionInfo,
@@ -485,7 +462,6 @@ class InteractiveFirewallEngine @Inject constructor(
         private const val MAX_QUEUE = 64
         private const val MAX_FLOW_CACHE = 8_000
         private const val MAX_DECISION_CACHE = 4_000
-        private const val MAX_APP_CACHE = 512
     }
 }
 
