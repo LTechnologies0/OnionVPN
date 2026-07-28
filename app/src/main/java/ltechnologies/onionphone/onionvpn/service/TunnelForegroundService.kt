@@ -715,6 +715,7 @@ class TunnelForegroundService : Service() {
         const val EXTRA_DNS_NOLOG = "dns_nolog"
         const val EXTRA_DNS_NOFILTER = "dns_nofilter"
         const val EXTRA_DNS_FORCE_TCP = "dns_force_tcp"
+        const val EXTRA_DNS_DNSSEC = "dns_dnssec"
 
         private const val CHANNEL_ID = "onionvpn_tunnel"
         private const val NOTIFICATION_ID = 42
@@ -747,6 +748,7 @@ class TunnelForegroundService : Service() {
             dnsCryptRequireNoLog = intent.getBooleanExtra(EXTRA_DNS_NOLOG, true),
             dnsCryptRequireNoFilter = intent.getBooleanExtra(EXTRA_DNS_NOFILTER, false),
             dnsCryptForceTcp = intent.getBooleanExtra(EXTRA_DNS_FORCE_TCP, true),
+            dnsCryptRequireDnssec = intent.getBooleanExtra(EXTRA_DNS_DNSSEC, true),
         )
     }
 }
