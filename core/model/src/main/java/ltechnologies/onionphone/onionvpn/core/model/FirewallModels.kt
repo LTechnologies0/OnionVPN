@@ -98,10 +98,18 @@ data class FirewallConnectionInfo(
     val destIp: String,
     val destPort: Int,
     val protocol: Int,
+    /**
+     * Transport or DPI application label shown in UI
+     * (TCP/UDP, or DNS/HTTP/HTTPS/TLS/DoT/QUIC when classified).
+     */
     val protocolLabel: String,
     /** Resolved hostname from DNS snooping, when available. */
     val destHost: String? = null,
     val threatCategory: DomainThreatCategory = DomainThreatCategory.NONE,
+    /**
+     * Optional DPI detail for notifications (DNS QNAME, HTTP Host, TLS SNI, …).
+     */
+    val dpiDetail: String? = null,
     val timestampEpochMs: Long = System.currentTimeMillis(),
 ) {
     /** Prefer hostname for display; fall back to IP. */

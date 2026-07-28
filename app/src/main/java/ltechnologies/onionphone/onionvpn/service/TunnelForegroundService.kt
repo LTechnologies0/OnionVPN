@@ -36,6 +36,7 @@ import ltechnologies.onionphone.onionvpn.core.model.TunnelSnapshot
 import ltechnologies.onionphone.onionvpn.core.model.ValidationCheck
 import ltechnologies.onionphone.onionvpn.core.model.ValidationStatus
 import ltechnologies.onionphone.onionvpn.core.tor.control.TorControlHealth
+import ltechnologies.onionphone.onionvpn.core.tor.control.model.TorControlStatus
 import ltechnologies.onionphone.onionvpn.core.tor.TorProcessManager
 import ltechnologies.onionphone.onionvpn.core.validation.TunnelValidator
 import ltechnologies.onionphone.onionvpn.core.vpn.OnionVpnService
@@ -74,6 +75,11 @@ class TunnelForegroundService : Service() {
     private var preferences = TunnelPreferences()
     private var runtimePorts: TunnelRuntimePorts? = null
     private var throughputText = ""
+    /** Cumulative Tor `traffic/read` at last throughput sample (all circuits). */
+    private var lastTrafficReadBytes = -1L
+    /** Cumulative Tor `traffic/written` at last throughput sample (all circuits). */
+    private var lastTrafficWriteBytes = -1L
+    private var lastTrafficAtMs = 0L
     private val bandwidthSampler by lazy { TorBandwidthSampler(applicationInfo.uid) }
     private val notifications by lazy { TunnelNotifications(this) }
     private val vpnBridge by lazy { TunnelVpnBridge(this) }
@@ -584,13 +590,17 @@ class TunnelForegroundService : Service() {
         throughputJob?.cancel()
         bandwidthSampler.reset()
         throughputText = ""
+        lastTrafficReadBytes = -1L
+        lastTrafficWriteBytes = -1L
+        lastTrafficAtMs = 0L
         var ticks = 0
         throughputJob = scope.launch {
             while (isActive) {
                 delay(THROUGHPUT_INTERVAL_MS)
                 val phase = _snapshot.value.phase
                 if (phase != TunnelPhase.Connected && phase != TunnelPhase.StartingTor) continue
-                // Prefer live BW events from ControlPort (zero GETINFO cost).
+                // Aggregate bandwidth = process-wide traffic/read|written deltas (all circuits).
+                // BW events are also global; CIRC_BW/STREAM_BW are never used (per-circuit).
                 // Circuit dumps only every ~2 min; lite health every ~10s.
                 ticks++
                 if (ticks % FULL_CONTROL_REFRESH_TICKS == 0) {
@@ -598,16 +608,13 @@ class TunnelForegroundService : Service() {
                 } else if (ticks % LITE_CONTROL_REFRESH_TICKS == 0 || phase == TunnelPhase.StartingTor) {
                     tor.refreshControlHealthLite()
                 }
+                if (phase == TunnelPhase.Connected && tor.controlStatus.value.connected) {
+                    // Dedicated cheap GETINFO so rates track all circuits every tick.
+                    tor.refreshControlTraffic()
+                }
                 val st = tor.controlStatus.value
                 if (phase == TunnelPhase.Connected && st.connected) {
-                    val down = st.lastBwReadPerSec
-                    val up = st.lastBwWritePerSec
-                    throughputText = if (down > 0L || up > 0L) {
-                        "Tor ▼ ${TunnelSnapshotBuilder.formatRate(down)}  ▲ ${TunnelSnapshotBuilder.formatRate(up)}  " +
-                            "circ=${st.builtCircuits}"
-                    } else {
-                        bandwidthSampler.sample().displayText
-                    }
+                    throughputText = formatAggregateThroughput(st)
                 } else if (phase == TunnelPhase.Connected) {
                     throughputText = bandwidthSampler.sample().displayText
                 }
@@ -616,11 +623,56 @@ class TunnelForegroundService : Service() {
         }
     }
 
+    /**
+     * Builds the notification/Status throughput line from **all Tor circuits combined**.
+     *
+     * Priority: cumulative traffic/read|written deltas → control BW event → UID TrafficStats.
+     */
+    private fun formatAggregateThroughput(st: TorControlStatus): String {
+        val now = System.currentTimeMillis()
+        var trafficDown = 0L
+        var trafficUp = 0L
+        if (lastTrafficAtMs > 0L &&
+            lastTrafficReadBytes >= 0L &&
+            st.readBytes >= lastTrafficReadBytes &&
+            st.writeBytes >= lastTrafficWriteBytes
+        ) {
+            val elapsedSec = ((now - lastTrafficAtMs).coerceAtLeast(1L)) / 1000.0
+            trafficDown = ((st.readBytes - lastTrafficReadBytes) / elapsedSec).toLong()
+            trafficUp = ((st.writeBytes - lastTrafficWriteBytes) / elapsedSec).toLong()
+        }
+        lastTrafficReadBytes = st.readBytes
+        lastTrafficWriteBytes = st.writeBytes
+        lastTrafficAtMs = now
+
+        val down: Long
+        val up: Long
+        when {
+            trafficDown > 0L || trafficUp > 0L -> {
+                down = trafficDown
+                up = trafficUp
+            }
+            st.lastBwReadPerSec > 0L || st.lastBwWritePerSec > 0L -> {
+                down = st.lastBwReadPerSec
+                up = st.lastBwWritePerSec
+            }
+            else -> {
+                val sample = bandwidthSampler.sample()
+                return "${sample.displayText}  · ${st.builtCircuits} circuits"
+            }
+        }
+        return "Tor ▼ ${TunnelSnapshotBuilder.formatRate(down)}  ▲ ${TunnelSnapshotBuilder.formatRate(up)}" +
+            "  · ${st.builtCircuits} circuits"
+    }
+
     private fun stopThroughputUpdates() {
         throughputJob?.cancel()
         throughputJob = null
         throughputText = ""
         bandwidthSampler.reset()
+        lastTrafficReadBytes = -1L
+        lastTrafficWriteBytes = -1L
+        lastTrafficAtMs = 0L
     }
 
     private fun acquireBootstrapWakeLock() {

@@ -127,7 +127,10 @@ data class TunnelSnapshot(
     val vpnEstablished: Boolean = false,
     val validations: List<ValidationCheck> = emptyList(),
     val lastError: String? = null,
-    /** Live Tor bandwidth text (control GETINFO preferred, UID TrafficStats fallback). */
+    /**
+     * Live Tor bandwidth text — aggregate across **all circuits**
+     * (traffic/read|written deltas, then BW events, then UID TrafficStats).
+     */
     val throughputText: String = "",
     /** Tor control-spec bootstrap 0–100. */
     val torBootstrapProgress: Int = 0,

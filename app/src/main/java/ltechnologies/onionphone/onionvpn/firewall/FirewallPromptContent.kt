@@ -87,6 +87,14 @@ fun FirewallPromptContent(
                 FontWeight.Normal
             },
         )
+        val dpiDetail = info.dpiDetail
+        if (!dpiDetail.isNullOrBlank()) {
+            Text(
+                dpiDetail,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
         if (!info.destHost.isNullOrBlank()) {
             Text(
                 "IP ${info.destIp}",

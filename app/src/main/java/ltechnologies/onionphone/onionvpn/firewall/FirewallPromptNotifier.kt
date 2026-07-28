@@ -49,6 +49,7 @@ internal class FirewallPromptNotifier(
         ensureChannel()
         // Coloured spans are unreliable on OEMs — emoji next to the domain:
         // 🟢 sûr (pas tracking/malware) · 🟠 tracking · 🔴 malware
+        // protocolLabel is DPI-enhanced (DNS / HTTP / HTTPS / TLS / QUIC / TCP / UDP).
         val dest = "${info.threatCategory.notificationEmoji()} ${info.displayDestination()}"
         val base = appContext.getString(
             R.string.firewall_prompt_notif_text,
@@ -56,6 +57,7 @@ internal class FirewallPromptNotifier(
             dest,
             info.destPort,
         )
+        val dpiSuffix = info.dpiDetail?.takeIf { it.isNotBlank() }?.let { " · $it" }.orEmpty()
         val threatSuffix = when (info.threatCategory) {
             DomainThreatCategory.MALWARE ->
                 " · " + appContext.getString(R.string.firewall_threat_malware)
@@ -63,7 +65,7 @@ internal class FirewallPromptNotifier(
                 " · " + appContext.getString(R.string.firewall_threat_tracking)
             DomainThreatCategory.NONE -> ""
         }
-        val content = base + threatSuffix
+        val content = base + dpiSuffix + threatSuffix
         val openPending = detailPendingIntent(info.requestId)
         val allowPending = actionPendingIntent(
             FirewallPromptActionReceiver.ACTION_ALLOW,
