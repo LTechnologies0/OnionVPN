@@ -3,17 +3,40 @@ package ltechnologies.onionphone.onionvpn.core.tor
 import android.content.Context
 import java.io.File
 import java.io.IOException
-import java.net.InetSocketAddress
-import java.net.Socket
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.withContext
-import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
 import ltechnologies.onionphone.onionvpn.core.model.TunnelPreferences
 import ltechnologies.onionphone.onionvpn.core.model.TunnelRuntimePorts
+import ltechnologies.onionphone.onionvpn.core.tor.config.TorConfigWriter
+import ltechnologies.onionphone.onionvpn.core.tor.control.TorControlClient
+import ltechnologies.onionphone.onionvpn.core.tor.control.model.TorControlStatus
+import ltechnologies.onionphone.onionvpn.core.tor.lifecycle.TorReadiness
 import timber.log.Timber
 
+/**
+ * Owns the Tor native process and orchestrates the sequential start/stop pipeline.
+ *
+ * Lives in the root `core.tor` package (public DI entry) while control/config/lifecycle
+ * internals stay in subpackages — keeps Hilt/KSP resolution stable.
+ *
+ * **Start pipeline (ordered):**
+ * 1. [stopInternal] + kill orphans + delete stale ControlSocket/cookie
+ * 2. [writeTorrc] via [TorConfigWriter]
+ * 3. [spawnTorProcess]
+ * 4. [waitForControlPlane] (sock + cookie files)
+ * 5. [TorControlClient.connect] (auth / SETEVENTS)
+ * 6. [waitForBootstrap] (GETINFO + [TorReadiness] listeners)
+ * 7. SIGNAL ACTIVE
+ *
+ * **Network recovery sub-pipeline:** DROPTIMEOUTS → ACTIVE → CLEARDNSCACHE → refresh.
+ *
+ * Control ops are exposed via [control] (single surface — no duplicated SIGNAL wrappers).
+ * App conveniences kept: [newNym], [onNetworkChanged], [signalDormant].
+ *
+ * Imported by: DI, TunnelForegroundService, MainViewModel, OnionVpnApplication.
+ */
 class TorProcessManager(
     private val context: Context,
 ) {
@@ -21,7 +44,11 @@ class TorProcessManager(
     private var logThread: Thread? = null
     private var runtimePorts: TunnelRuntimePorts? = null
     private var preferences: TunnelPreferences = TunnelPreferences()
-    private val control = TorControlClient()
+
+    /**
+     * Public control session — prefer this over adding more manager wrappers.
+     */
+    val control = TorControlClient()
 
     val controlStatus: StateFlow<TorControlStatus> = control.status
     val controlEvents = control.events
@@ -41,29 +68,38 @@ class TorProcessManager(
     val binaryFile: File
         get() = File(context.applicationInfo.nativeLibraryDir, "libtor.so")
 
+    /** Optional sink for stderr/stdout lines from the Tor process. */
+    var onLogLine: ((String) -> Unit)? = null
+
+    /**
+     * Runs the full start pipeline on [Dispatchers.IO].
+     *
+     * @return success when bootstrap + listeners ready; failure rolls back via [stopInternal]
+     */
     suspend fun start(
         ports: TunnelRuntimePorts,
         preferences: TunnelPreferences = TunnelPreferences(),
     ): Result<Unit> = withContext(Dispatchers.IO) {
         this@TorProcessManager.preferences = preferences
         runtimePorts = ports
+        // Step 1
         stopInternal()
         killOrphanedProcesses()
-        // Stale control socket blocks bind.
         runCatching { controlSocketFile.delete() }
         runCatching { cookieFile.delete() }
         try {
             ensureExecutable(binaryFile)
+            // Step 2
             writeTorrc(ports)
-            val command = listOf(binaryFile.absolutePath, "-f", torrcFile.absolutePath)
-            process = ProcessBuilder(command)
-                .directory(configDirectory)
-                .redirectErrorStream(true)
-                .start()
-            startLogPump(process!!)
+            // Step 3
+            spawnTorProcess()
+            // Step 4
             waitForControlPlane()
+            // Step 5
             control.connect(controlSocketFile, cookieFile)
+            // Step 6
             waitForBootstrap(ports)
+            // Step 7
             control.setActive()
             Timber.i(
                 "Tor ready socks=${ports.torSocksPort} " +
@@ -85,6 +121,7 @@ class TorProcessManager(
 
     fun isRunning(): Boolean = process?.isAlive == true
 
+    /** SIGNAL NEWNYM + CLEARDNSCACHE (user “new identity”). */
     fun newNym(): Result<Unit> {
         if (!control.isConnected) return Result.failure(IOException("control not connected"))
         return control.newNym().also {
@@ -93,40 +130,63 @@ class TorProcessManager(
         }
     }
 
-    fun clearDnsCache(): Result<Unit> = control.clearDnsCache()
-
-    fun signalActive(): Result<Unit> = control.setActive().also {
-        it.onSuccess { Timber.i("SIGNAL ACTIVE (underlying network change)") }
-    }
-
+    /** SIGNAL DORMANT (kill-switch Blocking while keeping Tor process). */
     fun signalDormant(): Result<Unit> = control.setDormant()
 
-    fun refreshControlInfo() = control.refreshInfo()
-
-    fun closeBuiltCircuits(): Result<Int> = control.closeBuiltCircuits()
-
-    /** Optional sink for UI log buffers (set by app layer). */
-    var onLogLine: ((String) -> Unit)? = null
-
-    private fun startLogPump(proc: Process) {
-        logThread = Thread {
-            try {
-                proc.inputStream.bufferedReader().useLines { lines ->
-                    lines.forEach { line ->
-                        Timber.tag(LOG_TAG).d(line)
-                        onLogLine?.invoke(line)
-                    }
-                }
-            } catch (_: Exception) {
-                // Process stopped — ignore read interruption.
-            }
-        }.apply {
-            name = "tor-log"
-            isDaemon = true
-            start()
+    /**
+     * Underlying Android network changed — Orbot-style recovery:
+     * DROPTIMEOUTS → ACTIVE → CLEARDNSCACHE → refreshInfo.
+     */
+    fun onNetworkChanged(): Result<Unit> {
+        if (!control.isConnected) return Result.failure(IOException("control not connected"))
+        control.dropTimeouts().onFailure { Timber.w(it, "DROPTIMEOUTS failed") }
+        val active = control.setActive()
+        control.clearDnsCache().onFailure { Timber.w(it, "CLEARDNSCACHE failed") }
+        control.refreshInfo()
+        return active.also {
+            it.onSuccess { Timber.i("Tor network recovery: DROPTIMEOUTS+ACTIVE+CLEARDNSCACHE") }
         }
     }
 
+    /** Convenience: refresh GETINFO into [controlStatus]. */
+    fun refreshControlInfo() = control.refreshInfo()
+
+    /** Live SETCONF bridges from multiline preference text. */
+    fun setBridgesLive(bridgeText: String): Result<Unit> {
+        if (!control.isConnected) return Result.failure(IOException("control not connected"))
+        val lines = bridgeText.lineSequence().map { it.trim() }.filter { it.isNotEmpty() }.toList()
+        return control.setBridges(lines).also {
+            it.onSuccess { Timber.i("SETCONF bridges live count=%d", lines.size) }
+        }
+    }
+
+    // --- private pipeline steps ---
+
+    /** Step 3: spawn libtor.so -f torrc. */
+    private fun spawnTorProcess() {
+        val command = listOf(binaryFile.absolutePath, "-f", torrcFile.absolutePath)
+        process = ProcessBuilder(command)
+            .directory(configDirectory)
+            .redirectErrorStream(true)
+            .start()
+        startLogPump(process!!)
+    }
+
+    /** Step 2: write torrc from current preferences + ports. */
+    private fun writeTorrc(ports: TunnelRuntimePorts) {
+        torrcFile.writeText(
+            TorConfigWriter.write(
+                dataDirectory = configDirectory.absolutePath,
+                socksPort = ports.torSocksPort,
+                dnsCryptSocksPort = ports.torDnsCryptSocksPort,
+                probeSocksPort = ports.torProbeSocksPort,
+                dnsPort = ports.torDnsPort,
+                preferences = preferences,
+            ),
+        )
+    }
+
+    /** Step 4: wait until ControlSocket + cookie exist. */
     private suspend fun waitForControlPlane(timeoutMs: Long = 60_000) {
         val deadline = System.currentTimeMillis() + timeoutMs
         while (System.currentTimeMillis() < deadline) {
@@ -134,7 +194,6 @@ class TorProcessManager(
                 throw IOException("Tor process exited before control socket")
             }
             if (controlSocketFile.exists() && cookieFile.exists() && cookieFile.length() > 0) {
-                // Brief settle — Tor finishes listen bind.
                 delay(150)
                 return
             }
@@ -146,6 +205,7 @@ class TorProcessManager(
         )
     }
 
+    /** Step 6: control bootstrap + local Socks/DNSPort readiness. */
     private suspend fun waitForBootstrap(
         ports: TunnelRuntimePorts,
         timeoutMs: Long = 120_000,
@@ -162,12 +222,8 @@ class TorProcessManager(
                 val st = control.status.value
                 val bootDone = st.bootstrapProgress >= 100 ||
                     (st.circuitEstablished && st.enoughDirInfo)
-                val socksReady =
-                    isSocksReady(ports.torSocksPort) &&
-                        isSocksReady(ports.torDnsCryptSocksPort) &&
-                        isSocksReady(ports.torProbeSocksPort) &&
-                        isDnsPortReady(ports.torDnsPort)
-                if (bootDone && socksReady) {
+                TorReadiness.assertAllListenersReady(ports)
+                if (bootDone) {
                     Timber.i(
                         "Tor bootstrap complete progress=%d tag=%s circuits=%d",
                         st.bootstrapProgress,
@@ -192,45 +248,23 @@ class TorProcessManager(
         throw IOException("Tor bootstrap timed out", lastError)
     }
 
-    private fun isSocksReady(port: Int): Boolean {
-        Socket().use { socket ->
-            socket.connect(
-                InetSocketAddress(TunnelEndpoints.LOOPBACK, port),
-                1_000,
-            )
+    private fun startLogPump(proc: Process) {
+        logThread = Thread {
+            try {
+                proc.inputStream.bufferedReader().useLines { lines ->
+                    lines.forEach { line ->
+                        Timber.tag(LOG_TAG).d(line)
+                        onLogLine?.invoke(line)
+                    }
+                }
+            } catch (_: Exception) {
+                // Process stopped.
+            }
+        }.apply {
+            name = "tor-log"
+            isDaemon = true
+            start()
         }
-        return true
-    }
-
-    private fun isDnsPortReady(port: Int): Boolean {
-        val query = byteArrayOf(
-            0x00, 0x01,
-            0x01, 0x00,
-            0x00, 0x01,
-            0x00, 0x00,
-            0x00, 0x00,
-            0x00, 0x00,
-            0x07, 'e'.code.toByte(), 'x'.code.toByte(), 'a'.code.toByte(),
-            'm'.code.toByte(), 'p'.code.toByte(), 'l'.code.toByte(), 'e'.code.toByte(),
-            0x03, 'c'.code.toByte(), 'o'.code.toByte(), 'm'.code.toByte(),
-            0x00,
-            0x00, 0x01,
-            0x00, 0x01,
-        )
-        java.net.DatagramSocket().use { socket ->
-            socket.soTimeout = 2_000
-            socket.send(
-                java.net.DatagramPacket(
-                    query,
-                    query.size,
-                    java.net.InetAddress.getByName(TunnelEndpoints.LOOPBACK),
-                    port,
-                ),
-            )
-            val response = java.net.DatagramPacket(ByteArray(512), 512)
-            socket.receive(response)
-        }
-        return true
     }
 
     private fun ensureExecutable(file: File) {
@@ -242,25 +276,7 @@ class TorProcessManager(
         }
     }
 
-    private fun writeTorrc(ports: TunnelRuntimePorts) {
-        torrcFile.writeText(
-            TorConfigWriter.write(
-                dataDirectory = configDirectory.absolutePath,
-                socksPort = ports.torSocksPort,
-                dnsCryptSocksPort = ports.torDnsCryptSocksPort,
-                probeSocksPort = ports.torProbeSocksPort,
-                dnsPort = ports.torDnsPort,
-                preferences = preferences,
-            ),
-        )
-    }
-
-    companion object {
-        const val LOG_TAG = "tor"
-    }
-
     private fun stopInternal() {
-        // TAKEOWNERSHIP: closing control asks Tor to exit cleanly.
         runCatching { control.disconnect(sendShutdown = true) }
         process?.destroyForcibly()
         runCatching { process?.waitFor() }
@@ -277,5 +293,9 @@ class TorProcessManager(
                 .exec(arrayOf("sh", "-c", "pkill -f ${binaryFile.name} 2>/dev/null || true"))
                 .waitFor()
         }
+    }
+
+    companion object {
+        const val LOG_TAG = "tor"
     }
 }

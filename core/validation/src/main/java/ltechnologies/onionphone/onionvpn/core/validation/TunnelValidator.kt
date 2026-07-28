@@ -9,8 +9,19 @@ import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
 import ltechnologies.onionphone.onionvpn.core.model.TunnelRuntimePorts
 import ltechnologies.onionphone.onionvpn.core.model.ValidationCheck
 import ltechnologies.onionphone.onionvpn.core.model.ValidationStatus
-import ltechnologies.onionphone.onionvpn.core.vpn.VpnProfileBuilder
+import ltechnologies.onionphone.onionvpn.core.validation.android.AndroidVpnInspector
+import ltechnologies.onionphone.onionvpn.core.validation.leak.SystemLeakInspector
+import ltechnologies.onionphone.onionvpn.core.validation.path.DnsCryptPathValidator
+import ltechnologies.onionphone.onionvpn.core.validation.path.ExitIpValidator
+import ltechnologies.onionphone.onionvpn.core.validation.path.TorPathValidator
+import ltechnologies.onionphone.onionvpn.core.vpn.profile.VpnProfileBuilder
 
+/**
+ * Orchestrates the full tunnel validation graph (configs → path probes → Android VPN → leaks).
+ *
+ * Imported by [ltechnologies.onionphone.onionvpn.service.TunnelForegroundService].
+ * Leaf validators live under `path/`, `android/`, `leak/` packages.
+ */
 object TunnelValidator {
     suspend fun validateAll(
         context: Context,

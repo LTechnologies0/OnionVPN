@@ -34,6 +34,15 @@ import ltechnologies.onionphone.onionvpn.core.vpn.firewall.PacketFirewall
 import ltechnologies.onionphone.onionvpn.prefs.TunnelPreferencesStore
 import timber.log.Timber
 
+/**
+ * Interactive OpenSnitch-style firewall engine (app layer).
+ *
+ * Wired into [ltechnologies.onionphone.onionvpn.core.vpn.firewall.FirewallBridge] so
+ * [ltechnologies.onionphone.onionvpn.core.vpn.forwarder.TunDnsMux] can ask allow/deny
+ * without depending on the app module at compile time.
+ *
+ * Decision pipeline: cache → permanent/session rules → default ASK/DENY/ALLOW → prompt.
+ */
 @Singleton
 class InteractiveFirewallEngine @Inject constructor(
     @ApplicationContext private val context: Context,

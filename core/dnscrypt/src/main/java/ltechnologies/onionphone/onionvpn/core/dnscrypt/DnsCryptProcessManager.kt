@@ -3,19 +3,29 @@ package ltechnologies.onionphone.onionvpn.core.dnscrypt
 import android.content.Context
 import java.io.File
 import java.io.IOException
-import java.net.DatagramPacket
-import java.net.DatagramSocket
-import java.net.InetAddress
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
-import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
+import ltechnologies.onionphone.onionvpn.core.dnscrypt.config.DnsCryptConfigWriter
+import ltechnologies.onionphone.onionvpn.core.dnscrypt.lifecycle.DnsCryptReadiness
 import ltechnologies.onionphone.onionvpn.core.model.TunnelPreferences
 import ltechnologies.onionphone.onionvpn.core.model.TunnelRuntimePorts
 import timber.log.Timber
 
+/**
+ * Owns the dnscrypt-proxy native process (public DI façade at module root).
+ *
+ * **Start pipeline (ordered):**
+ * 1. [stopInternal] + kill orphans
+ * 2. [writeConfig] via [DnsCryptConfigWriter]
+ * 3. [spawnProcess]
+ * 4. [waitForListener] ([DnsCryptReadiness] + log hints)
+ * 5. [waitForLiveServer] (upstream via Tor SOCKS)
+ *
+ * Imported by: TunnelModule, TunnelForegroundService, OnionVpnApplication.
+ */
 class DnsCryptProcessManager(
     private val context: Context,
 ) {
@@ -45,24 +55,20 @@ class DnsCryptProcessManager(
     ): Result<Unit> = withContext(Dispatchers.IO) {
         this@DnsCryptProcessManager.preferences = preferences
         listenPort = ports.dnsCryptListenPort
+        // Step 1
         stopInternal()
         killOrphanedProcesses()
         listenerReady.set(false)
         serverReady.set(false)
         try {
             ensureExecutable(binaryFile)
+            // Step 2
             writeConfig(serverName.ifBlank { preferences.dnsCryptServerName }, ports)
-            val command = listOf(
-                binaryFile.absolutePath,
-                "-config",
-                configFile.absolutePath,
-            )
-            process = ProcessBuilder(command)
-                .directory(configDirectory)
-                .redirectErrorStream(true)
-                .start()
-            startLogPump(process!!)
+            // Step 3
+            spawnProcess()
+            // Step 4
             waitForListener(ports.dnsCryptListenPort)
+            // Step 5
             waitForLiveServer()
             Timber.i("DNSCrypt listening on ${ports.dnsCryptListenPort}")
             Result.success(Unit)
@@ -79,6 +85,19 @@ class DnsCryptProcessManager(
 
     fun isRunning(): Boolean = process?.isAlive == true
 
+    private fun spawnProcess() {
+        val command = listOf(
+            binaryFile.absolutePath,
+            "-config",
+            configFile.absolutePath,
+        )
+        process = ProcessBuilder(command)
+            .directory(configDirectory)
+            .redirectErrorStream(true)
+            .start()
+        startLogPump(process!!)
+    }
+
     private fun startLogPump(proc: Process) {
         logThread = Thread {
             try {
@@ -86,18 +105,13 @@ class DnsCryptProcessManager(
                     lines.forEach { line ->
                         Timber.tag(LOG_TAG).d(line)
                         onLogLine?.invoke(line)
-                        if (line.contains("Now listening to") || line.contains("live servers:")) {
-                            listenerReady.set(true)
-                        }
-                        if (line.contains("live servers:") ||
-                            (line.contains("[NOTICE]") && line.contains("OK") && line.contains("ms"))
-                        ) {
-                            serverReady.set(true)
-                        }
+                        val (listener, server) = DnsCryptReadiness.hintsFromLogLine(line)
+                        if (listener) listenerReady.set(true)
+                        if (server) serverReady.set(true)
                     }
                 }
             } catch (_: Exception) {
-                // Process stopped — ignore read interruption.
+                // Process stopped.
             }
         }.apply {
             name = "dnscrypt-log"
@@ -122,8 +136,8 @@ class DnsCryptProcessManager(
                 Timber.i("DNSCrypt upstream server ready")
                 return
             }
-            // Successful A query proves an upstream is usable.
-            if (probeResolvesExample(listenPort ?: return)) {
+            val port = listenPort ?: return
+            if (DnsCryptReadiness.probeResolvesExample(port)) {
                 serverReady.set(true)
                 Timber.i("DNSCrypt upstream ready (DNS probe)")
                 return
@@ -132,46 +146,6 @@ class DnsCryptProcessManager(
         }
         throw IOException("DNSCrypt upstream server timed out (SafeSocks/proxy?)")
     }
-
-    private fun probeResolvesExample(port: Int): Boolean {
-        return try {
-            DatagramSocket().use { socket ->
-                socket.soTimeout = 3_000
-                val query = byteArrayOf(
-                    0x00, 0x02,
-                    0x01, 0x00,
-                    0x00, 0x01,
-                    0x00, 0x00,
-                    0x00, 0x00,
-                    0x00, 0x00,
-                    0x07, 'e'.code.toByte(), 'x'.code.toByte(), 'a'.code.toByte(),
-                    'm'.code.toByte(), 'p'.code.toByte(), 'l'.code.toByte(), 'e'.code.toByte(),
-                    0x03, 'c'.code.toByte(), 'o'.code.toByte(), 'm'.code.toByte(),
-                    0x00,
-                    0x00, 0x01,
-                    0x00, 0x01,
-                )
-                socket.send(
-                    DatagramPacket(
-                        query,
-                        query.size,
-                        InetAddress.getByName(TunnelEndpoints.LOOPBACK),
-                        port,
-                    ),
-                )
-                val response = DatagramPacket(ByteArray(512), 512)
-                socket.receive(response)
-                // RCODE == 0 and at least one answer.
-                response.length > 12 &&
-                    (responseBufRcode(response.data) == 0) &&
-                    (((response.data[6].toInt() and 0xff) shl 8) or (response.data[7].toInt() and 0xff)) > 0
-            }
-        } catch (_: Exception) {
-            false
-        }
-    }
-
-    private fun responseBufRcode(data: ByteArray): Int = data[3].toInt() and 0x0f
 
     private suspend fun waitForListener(
         port: Int,
@@ -186,63 +160,15 @@ class DnsCryptProcessManager(
             if (process?.isAlive != true) {
                 throw IOException("DNSCrypt process exited before listener was ready")
             }
-            if (listenerReady.get() || probeLocalDns(port) || probeLocalTcp(port)) return
+            if (listenerReady.get() ||
+                DnsCryptReadiness.probeLocalDns(port) ||
+                DnsCryptReadiness.probeLocalTcp(port)
+            ) {
+                return
+            }
             delay(pollMs)
         }
         throw IOException("DNSCrypt listener timed out on port $port")
-    }
-
-    private fun probeLocalTcp(port: Int): Boolean {
-        return try {
-            java.net.Socket().use { socket ->
-                socket.connect(
-                    java.net.InetSocketAddress(
-                        TunnelEndpoints.LOOPBACK,
-                        port,
-                    ),
-                    1_000,
-                )
-            }
-            true
-        } catch (_: Exception) {
-            false
-        }
-    }
-
-    private fun probeLocalDns(port: Int): Boolean {
-        return try {
-            DatagramSocket().use { socket ->
-                socket.soTimeout = 1_000
-                val query = byteArrayOf(
-                    0x00, 0x01,
-                    0x01, 0x00,
-                    0x00, 0x01,
-                    0x00, 0x00,
-                    0x00, 0x00,
-                    0x00, 0x00,
-                    0x03, 'w'.code.toByte(), 'w'.code.toByte(), 'w'.code.toByte(),
-                    0x07, 'e'.code.toByte(), 'x'.code.toByte(), 'a'.code.toByte(),
-                    'm'.code.toByte(), 'p'.code.toByte(), 'l'.code.toByte(), 'e'.code.toByte(),
-                    0x03, 'c'.code.toByte(), 'o'.code.toByte(), 'm'.code.toByte(),
-                    0x00,
-                    0x00, 0x01,
-                    0x00, 0x01,
-                )
-                socket.send(
-                    DatagramPacket(
-                        query,
-                        query.size,
-                        InetAddress.getByName(TunnelEndpoints.LOOPBACK),
-                        port,
-                    ),
-                )
-                val response = DatagramPacket(ByteArray(512), 512)
-                socket.receive(response)
-                response.length > 0
-            }
-        } catch (_: Exception) {
-            false
-        }
     }
 
     private fun ensureExecutable(file: File) {

@@ -77,7 +77,7 @@ enum class DnsResolverMode {
 }
 
 /**
- * VPN profile applied by [ltechnologies.onionphone.onionvpn.core.vpn.VpnProfileBuilder].
+ * VPN profile applied by [ltechnologies.onionphone.onionvpn.core.vpn.profile.VpnProfileBuilder].
  *
  * - [Connected]: DNS → DNSCrypt stub, hev-socks5 forwards to Tor SOCKS.
  * - [Blocking]: dummy DNS, TUN kept up, forwarder stopped — kill switch (Mullvad error state).
@@ -135,6 +135,12 @@ data class TunnelSnapshot(
     val torControlConnected: Boolean = false,
     val torBuiltCircuits: Int = 0,
     val torCircuitEstablished: Boolean = false,
+    val torVersion: String = "",
+    val torStreamCount: Int = 0,
+    val torNetworkLive: Boolean = false,
+    val torDormant: Boolean = false,
+    val torEntryGuards: String = "",
+    val torLastCircEvent: String = "",
 ) {
     val isBusy: Boolean
         get() = when (phase) {

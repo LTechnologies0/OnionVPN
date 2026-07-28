@@ -23,7 +23,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
-import ltechnologies.onionphone.onionvpn.core.dnscrypt.DnsCryptConfigWriter
+import ltechnologies.onionphone.onionvpn.core.dnscrypt.config.DnsCryptConfigWriter
 import ltechnologies.onionphone.onionvpn.core.model.DnsResolverMode
 import ltechnologies.onionphone.onionvpn.core.model.FirewallDefaultAction
 import ltechnologies.onionphone.onionvpn.core.model.TunnelPreferences

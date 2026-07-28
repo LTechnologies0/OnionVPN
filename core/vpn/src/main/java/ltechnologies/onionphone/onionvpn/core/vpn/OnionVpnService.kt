@@ -14,8 +14,23 @@ import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
 import ltechnologies.onionphone.onionvpn.core.model.TunnelPreferences
 import ltechnologies.onionphone.onionvpn.core.model.VpnEstablishResult
 import ltechnologies.onionphone.onionvpn.core.model.VpnProfileMode
+import ltechnologies.onionphone.onionvpn.core.vpn.forwarder.HevSocks5TunForwarder
+import ltechnologies.onionphone.onionvpn.core.vpn.net.UnderlyingNetworkTracker
+import ltechnologies.onionphone.onionvpn.core.vpn.profile.TunForwarder
+import ltechnologies.onionphone.onionvpn.core.vpn.profile.VpnProfileBuilder
 import timber.log.Timber
 
+/**
+ * Android [VpnService] data plane — builds TUN profiles and runs hev forwarder.
+ *
+ * Sequential applyProfile:
+ * 1. Parse intent prefs/mode/ports/generation
+ * 2. [VpnProfileBuilder.configure] + establish TUN (before closing old)
+ * 3. Optionally start [HevSocks5TunForwarder]
+ * 4. [UnderlyingNetworkTracker] for SIGNAL ACTIVE on net change
+ *
+ * Coordinator: [ltechnologies.onionphone.onionvpn.service.TunnelForegroundService].
+ */
 class OnionVpnService : VpnService() {
     private var tunForwarder: TunForwarder? = null
     private var tunInterface: ParcelFileDescriptor? = null

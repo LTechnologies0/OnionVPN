@@ -14,12 +14,3 @@ fun interface PacketFirewall {
         val AllowAll: PacketFirewall = PacketFirewall { _, _ -> true }
     }
 }
-
-/**
- * Process-wide hook so [TunDnsMux] (core:vpn) can call the app-layer engine
- * without a reverse module dependency.
- */
-object FirewallBridge {
-    @Volatile
-    var engine: PacketFirewall = PacketFirewall.AllowAll
-}

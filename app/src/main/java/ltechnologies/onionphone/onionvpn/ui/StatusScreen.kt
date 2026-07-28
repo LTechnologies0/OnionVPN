@@ -41,15 +41,41 @@ fun StatusScreen(
         Text(text = "VPN: ${if (snapshot.vpnEstablished) "up" else "down"}")
         if (snapshot.torControlConnected || snapshot.torBootstrapProgress > 0) {
             Text(
-                text = "Control: ${if (snapshot.torControlConnected) "up" else "…"}  " +
-                    "bootstrap ${snapshot.torBootstrapProgress}%  " +
-                    "circuits=${snapshot.torBuiltCircuits}" +
-                    if (snapshot.torCircuitEstablished) " (established)" else "",
+                text = buildString {
+                    append("Control: ${if (snapshot.torControlConnected) "up" else "…"}  ")
+                    append("bootstrap ${snapshot.torBootstrapProgress}%  ")
+                    append("circuits=${snapshot.torBuiltCircuits}")
+                    if (snapshot.torCircuitEstablished) append(" (established)")
+                    append(" streams=${snapshot.torStreamCount}")
+                    if (snapshot.torNetworkLive) append(" live")
+                    if (snapshot.torDormant) append(" dormant")
+                },
                 style = MaterialTheme.typography.bodySmall,
             )
+            if (snapshot.torVersion.isNotBlank()) {
+                Text(
+                    text = "Tor ${snapshot.torVersion}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
             if (snapshot.torBootstrapSummary.isNotBlank() && snapshot.torBootstrapProgress < 100) {
                 Text(
                     text = snapshot.torBootstrapSummary,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            if (snapshot.torEntryGuards.isNotBlank()) {
+                Text(
+                    text = "Guards: ${snapshot.torEntryGuards}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            if (snapshot.torLastCircEvent.isNotBlank()) {
+                Text(
+                    text = "Last CIRC: ${snapshot.torLastCircEvent}",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
