@@ -12,7 +12,7 @@
     <string name="firewall_prompt_channel_name">Firewall prompts</string>
     <string name="firewall_prompt_channel_desc">Connection allow/deny requests with Accept and Deny actions</string>
     <string name="firewall_prompt_notif_title">%1$s wants to connect</string>
-    <!-- %1$s = DPI/app protocol (DNS/HTTP/HTTPS/TCP/…), %2$s = emoji+dest, %3$d = port -->
+    <!-- %1$s = DPI label (DNS/HTTP/HTTPS/SSH/STUN/…), %2$s = emoji+dest, %3$d = port -->
     <string name="firewall_prompt_notif_text">%1$s → %2$s:%3$d</string>
     <string name="firewall_threat_malware">Malware / C2</string>
     <string name="firewall_threat_tracking">Ads / tracking / telemetry</string>
