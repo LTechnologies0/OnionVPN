@@ -219,6 +219,24 @@ class TorControlClient {
     }
 
     /**
+     * Traffic counters only (`traffic/read` + `traffic/written`) — process-wide totals
+     * across **all** circuits. Used by the aggregate bandwidth indicator.
+     */
+    fun refreshTraffic() {
+        if (!transport.isOpen) return
+        runCatching {
+            val traffic = ops.getInfoMany(*TorControlCatalog.HEALTH_GETINFO_TRAFFIC.toTypedArray())
+            val read = traffic["traffic/read"]?.toLongOrNull() ?: return
+            val write = traffic["traffic/written"]?.toLongOrNull() ?: return
+            _status.update {
+                it.copy(readBytes = read, writeBytes = write)
+            }
+        }.onFailure { err ->
+            Timber.d(err, "Tor traffic GETINFO failed")
+        }
+    }
+
+    /**
      * Cheap health poll for network recovery / periodic keep-alive.
      */
     fun refreshHealthLite() {

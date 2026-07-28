@@ -7,12 +7,17 @@ import kotlin.math.abs
 import kotlin.math.max
 
 /**
- * Measures **Tor clearnet bandwidth** for OnionVPN's UID.
+ * Fallback sampler for **aggregate Tor clearnet bandwidth** (OnionVPN UID).
+ *
+ * Prefer ControlPort `traffic/read|written` deltas (all circuits) in the foreground
+ * service; this UID path is the last resort when control is unavailable.
  *
  * Tor (and DNSCrypt) run in our process UID and are [VpnService.Builder.addDisallowedApplication]
  * self-excluded, so their guard/middle/exit TCP shows up on [TrafficStats.getUidRxBytes] /
  * [TrafficStats.getUidTxBytes] — not on the TUN. App payload through hev is attributed to
  * other UIDs; [TProxyService.TProxyGetStats] is only a secondary "tunnel payload" hint.
+ *
+ * Counters cover **all** OR connections / circuits for this UID — never a single circuit.
  *
  * @see android.net.TrafficStats
  * @see android.net.VpnService

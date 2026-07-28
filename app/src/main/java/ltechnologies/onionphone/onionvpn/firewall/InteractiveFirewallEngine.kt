@@ -29,6 +29,7 @@ import ltechnologies.onionphone.onionvpn.core.model.FirewallRuleScope
 import ltechnologies.onionphone.onionvpn.core.model.FirewallVerdict
 import ltechnologies.onionphone.onionvpn.core.model.TunnelPreferences
 import ltechnologies.onionphone.onionvpn.core.vpn.dns.DnsHostnameCache
+import ltechnologies.onionphone.onionvpn.core.vpn.firewall.ApplicationLayerDetector
 import ltechnologies.onionphone.onionvpn.core.vpn.firewall.ConnectionOwnerResolver
 import ltechnologies.onionphone.onionvpn.core.vpn.firewall.IpPacketInfo
 import ltechnologies.onionphone.onionvpn.core.vpn.firewall.IpPacketParser
@@ -171,6 +172,8 @@ class InteractiveFirewallEngine @Inject constructor(
 
         // Resolve app label only on cold ASK/DENY paths (never on cache hits).
         val app = resolveApp(effectiveUid)
+        // DPI only on cold paths — classify DNS/HTTP/HTTPS/… for UX.
+        val dpi = ApplicationLayerDetector.classify(packet, length, info)
         return when (prefs.firewallDefaultAction) {
             FirewallDefaultAction.ALLOW -> {
                 rememberDecision(rk, flowKey, FirewallVerdict.ALLOW)
@@ -184,11 +187,13 @@ class InteractiveFirewallEngine @Inject constructor(
                     info = info,
                     verdict = FirewallVerdict.DENY,
                     scope = FirewallRuleScope.SESSION,
-                    note = "default deny",
+                    note = dpiJournalNote("default deny", dpi),
+                    protocolLabel = dpi.label,
                 )
                 false
             }
-            FirewallDefaultAction.ASK -> enqueuePrompt(effectiveUid, app, info, flowKey, pendingKey, rk)
+            FirewallDefaultAction.ASK ->
+                enqueuePrompt(effectiveUid, app, info, flowKey, pendingKey, rk, dpi)
         }
     }
 
@@ -203,6 +208,7 @@ class InteractiveFirewallEngine @Inject constructor(
         flowKey: Long,
         ruleKey: String,
         decisionKey: Long,
+        dpi: ApplicationLayerDetector.Result,
     ): Boolean {
         val destHost = DnsHostnameCache.lookup(info.dstIp)
         val threat = domainReputation.classify(destHost)
@@ -214,9 +220,10 @@ class InteractiveFirewallEngine @Inject constructor(
             destIp = info.dstIp,
             destPort = info.dstPort,
             protocol = info.protocol,
-            protocolLabel = IpPacketParser.protocolLabel(info.protocol),
+            protocolLabel = dpi.label,
             destHost = destHost,
             threatCategory = threat,
+            dpiDetail = dpi.detail,
         )
         val queued = QueuedPrompt(request, flowKey, app, ruleKey, decisionKey)
         synchronized(queueLock) {
@@ -232,7 +239,8 @@ class InteractiveFirewallEngine @Inject constructor(
                     info = info,
                     verdict = FirewallVerdict.DENY,
                     scope = FirewallRuleScope.SESSION,
-                    note = "queue full — drop (no sticky rule)",
+                    note = dpiJournalNote("queue full — drop (no sticky rule)", dpi),
+                    protocolLabel = dpi.label,
                 )
                 return false
             }
@@ -318,6 +326,7 @@ class InteractiveFirewallEngine @Inject constructor(
             FirewallRuleScope.SESSION -> "until VPN stops"
             FirewallRuleScope.PERMANENT -> "permanent"
         }
+        val dpiNote = answered.request.dpiDetail?.takeIf { it.isNotBlank() }
         appendJournal(
             uid = answered.request.uid,
             app = answered.app,
@@ -328,7 +337,7 @@ class InteractiveFirewallEngine @Inject constructor(
             protocolLabel = answered.request.protocolLabel,
             verdict = verdict,
             ruleScope = ruleScope,
-            note = note,
+            note = if (dpiNote != null) "$note · $dpiNote" else note,
         )
     }
 
@@ -418,6 +427,7 @@ class InteractiveFirewallEngine @Inject constructor(
         verdict: FirewallVerdict,
         scope: FirewallRuleScope,
         note: String,
+        protocolLabel: String = IpPacketParser.protocolLabel(info.protocol),
     ) {
         val destHost = DnsHostnameCache.lookup(info.dstIp)
         appendJournal(
@@ -427,11 +437,16 @@ class InteractiveFirewallEngine @Inject constructor(
             destHost = destHost,
             threatCategory = domainReputation.classify(destHost),
             destPort = info.dstPort,
-            protocolLabel = IpPacketParser.protocolLabel(info.protocol),
+            protocolLabel = protocolLabel,
             verdict = verdict,
             ruleScope = scope,
             note = note,
         )
+    }
+
+    private fun dpiJournalNote(base: String, dpi: ApplicationLayerDetector.Result): String {
+        val detail = dpi.detail?.takeIf { it.isNotBlank() }
+        return if (detail != null) "$base · ${dpi.label}: $detail" else "$base · ${dpi.label}"
     }
 
     private fun appendJournal(

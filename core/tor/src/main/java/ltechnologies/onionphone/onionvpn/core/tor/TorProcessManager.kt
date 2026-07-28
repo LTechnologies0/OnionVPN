@@ -177,6 +177,11 @@ class TorProcessManager(
     /** Lightweight health poll (no circuit-status dump). */
     fun refreshControlHealthLite() = control.refreshHealthLite()
 
+    /**
+     * Process-wide `traffic/read|written` only — for aggregate bandwidth across all circuits.
+     */
+    fun refreshControlTraffic() = control.refreshTraffic()
+
     /** Live SETCONF bridges from multiline preference text. */
     fun setBridgesLive(bridgeText: String): Result<Unit> {
         if (!control.isConnected) return Result.failure(IOException("control not connected"))

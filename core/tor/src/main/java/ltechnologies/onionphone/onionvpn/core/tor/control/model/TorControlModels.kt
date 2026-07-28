@@ -49,13 +49,19 @@ data class TorControlStatus(
     val lastCircEvent: String = "",
     /** Last STREAM status line for UI debug. */
     val lastStreamEvent: String = "",
-    /** GETINFO traffic/read (bytes). */
+    /** GETINFO traffic/read — cumulative bytes read by Tor (**all circuits**). */
     val readBytes: Long = 0L,
-    /** GETINFO traffic/written (bytes). */
+    /** GETINFO traffic/written — cumulative bytes written by Tor (**all circuits**). */
     val writeBytes: Long = 0L,
-    /** Last BW event read bytes/sec (control-spec). */
+    /**
+     * Last control-spec `BW` event read bytes/sec.
+     * Process-wide (sum of all OR/circuit traffic), not a single circuit.
+     */
     val lastBwReadPerSec: Long = 0L,
-    /** Last BW event written bytes/sec (control-spec). */
+    /**
+     * Last control-spec `BW` event written bytes/sec.
+     * Process-wide (sum of all OR/circuit traffic), not a single circuit.
+     */
     val lastBwWritePerSec: Long = 0L,
     /** Last control-plane error message, if any. */
     val lastError: String? = null,
