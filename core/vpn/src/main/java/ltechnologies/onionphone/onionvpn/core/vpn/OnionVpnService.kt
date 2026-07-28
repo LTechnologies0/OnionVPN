@@ -304,6 +304,11 @@ class OnionVpnService : VpnService() {
         private val forwarderAlive = MutableStateFlow(true)
         val tunForwarderAlive: StateFlow<Boolean> = forwarderAlive.asStateFlow()
 
+        /** After a successful hev rebind, clear the dead-forwarder latch. */
+        fun markForwarderAlive() {
+            forwarderAlive.value = true
+        }
+
         private val alwaysOnActive = MutableStateFlow(false)
         val vpnAlwaysOn: StateFlow<Boolean> = alwaysOnActive.asStateFlow()
 

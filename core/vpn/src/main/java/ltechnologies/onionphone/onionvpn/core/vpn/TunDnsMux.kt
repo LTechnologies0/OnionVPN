@@ -9,12 +9,16 @@ import java.net.InetAddress
 import java.util.concurrent.Executors
 import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.atomic.AtomicBoolean
+import ltechnologies.onionphone.onionvpn.core.vpn.firewall.FirewallBridge
 import timber.log.Timber
 
 /**
  * Splits VPN TUN traffic:
- * - UDP to [vpnDnsAddress]:53 → DNSCrypt on loopback (async, non-blocking)
- * - everything else → hev socket (raw IP packet stream)
+ * - When [divertDnsToDnsCrypt]: UDP to [vpnDnsAddress]:53 → DNSCrypt on loopback
+ * - everything else → firewall check → hev socket (raw IP packet stream)
+ *
+ * When divert is false (FakeDNS), UDP/53 also goes to hev (mapdns) after firewall
+ * (DNS to VPN resolver is always allowed).
  */
 class TunDnsMux(
     private val tunFd: ParcelFileDescriptor,
@@ -22,6 +26,7 @@ class TunDnsMux(
     private val dnsCryptHost: String,
     private val dnsCryptPort: Int,
     private val vpnDnsAddress: String,
+    private val divertDnsToDnsCrypt: Boolean = true,
 ) {
     private val running = AtomicBoolean(false)
     private var tunToHev: Thread? = null
@@ -50,7 +55,7 @@ class TunDnsMux(
                             Thread.sleep(1)
                             continue
                         }
-                        isDnsQueryToVpnDns(buf, n, vpnDns) -> {
+                        divertDnsToDnsCrypt && isDnsQueryToVpnDns(buf, n, vpnDns) -> {
                             val packet = buf.copyOf(n)
                             try {
                                 dnsExecutor.execute { handleDnsQuery(packet, tunOut) }
@@ -58,10 +63,14 @@ class TunDnsMux(
                                 Timber.w("DNS executor saturated, dropping query")
                             }
                         }
-                        else -> synchronized(hevWriteLock) {
-                            hevOut.write(buf, 0, n)
-                            hevOut.flush()
+                        isDnsQueryToVpnDns(buf, n, vpnDns) -> {
+                            // FakeDNS path: always allow VPN DNS toward hev mapdns.
+                            writeHev(hevOut, buf, n)
                         }
+                        !FirewallBridge.engine.allowOutbound(buf, n) -> {
+                            // Drop — least privilege / user deny.
+                        }
+                        else -> writeHev(hevOut, buf, n)
                     }
                 }
             } catch (error: Exception) {
@@ -98,7 +107,10 @@ class TunDnsMux(
             start()
         }
 
-        Timber.i("TunDnsMux started dns=$vpnDnsAddress → $dnsCryptHost:$dnsCryptPort")
+        Timber.i(
+            "TunDnsMux started dns=$vpnDnsAddress divertDns=$divertDnsToDnsCrypt " +
+                "→ $dnsCryptHost:$dnsCryptPort",
+        )
     }
 
     fun stop() {
@@ -110,6 +122,13 @@ class TunDnsMux(
         hevToTun?.interrupt()
         tunToHev = null
         hevToTun = null
+    }
+
+    private fun writeHev(hevOut: FileOutputStream, buf: ByteArray, n: Int) {
+        synchronized(hevWriteLock) {
+            hevOut.write(buf, 0, n)
+            hevOut.flush()
+        }
     }
 
     private fun isDnsQueryToVpnDns(packet: ByteArray, length: Int, vpnDns: ByteArray): Boolean {

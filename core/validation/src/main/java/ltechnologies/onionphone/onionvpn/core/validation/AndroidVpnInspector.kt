@@ -96,24 +96,25 @@ object AndroidVpnInspector {
                 ?.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) == true
         } ?: underlying.firstOrNull()
         val caps = best?.let { cm.getNetworkCapabilities(it) }
-        return ValidationCheck(
-            id = "android.vpn.underlying",
-            label = "Underlying network for Tor upstream",
-            status = if (best != null) ValidationStatus.Pass else ValidationStatus.Fail,
-            detail = if (best != null) {
-                buildString {
-                    append("net=$best")
-                    if (caps?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true) append(" WIFI")
-                    if (caps?.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) == true) append(" CELL")
-                    if (caps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) == true) {
-                        append(" VALIDATED")
+        return             ValidationCheck(
+                id = "android.vpn.underlying",
+                label = "Underlying network for Tor upstream",
+                status = if (best != null) ValidationStatus.Pass else ValidationStatus.Fail,
+                detail = if (best != null) {
+                    buildString {
+                        append("net=$best")
+                        if (caps?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true) append(" WIFI")
+                        if (caps?.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) == true) append(" CELL")
+                        if (caps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) == true) {
+                            append(" VALIDATED")
+                        }
                     }
-                }
-            } else {
-                "No INTERNET+NOT_VPN upstream — Tor cannot reach guards"
-            },
-            tripsKillSwitch = true,
-        )
+                } else {
+                    "No INTERNET+NOT_VPN upstream — Tor cannot reach guards"
+                },
+                // Soft: Wi‑Fi blip — keep Tor; Blocking would drop correctly-routable streams.
+                tripsKillSwitch = false,
+            )
     }
 
     private fun checkOwnVpnRegistered(

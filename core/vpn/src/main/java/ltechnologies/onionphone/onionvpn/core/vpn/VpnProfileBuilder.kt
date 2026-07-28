@@ -17,6 +17,8 @@ import timber.log.Timber
  * - Self-excluded so Tor/DNSCrypt/hev loopback is not re-captured
  * - Public DNS /32 routes pinned into tunnel
  * - Never [VpnService.Builder.allowBypass]
+ * - [setBlocking] only in [VpnProfileMode.Blocking]: drop unread TUN packets (unroutable).
+ *   Connected mode keeps [setBlocking] false so hev can drain Tor-routable streams.
  * - [setConfigureIntent] so Always-on VPN settings open the app (InviZible/Mullvad)
  */
 object VpnProfileBuilder {

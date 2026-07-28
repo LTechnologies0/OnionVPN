@@ -29,6 +29,16 @@
             </intent-filter>
         </activity>
 
+        <activity
+            android:name=".firewall.FirewallPromptActivity"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:launchMode="singleTop"
+            android:showWhenLocked="true"
+            android:taskAffinity=""
+            android:theme="@style/Theme.OnionVPN"
+            android:turnScreenOn="true" />
+
         <service
             android:name=".service.TunnelForegroundService"
             android:exported="false"

@@ -14,6 +14,7 @@ import javax.inject.Singleton
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import ltechnologies.onionphone.onionvpn.core.model.DnsResolverMode
+import ltechnologies.onionphone.onionvpn.core.model.FirewallDefaultAction
 import ltechnologies.onionphone.onionvpn.core.model.TunnelPreferences
 
 private val Context.tunnelDataStore: DataStore<Preferences> by preferencesDataStore(name = "tunnel_prefs")
@@ -36,48 +37,19 @@ class TunnelPreferencesStore @Inject constructor(
         val requireNoLog = booleanPreferencesKey("dns_nolog")
         val requireNoFilter = booleanPreferencesKey("dns_nofilter")
         val forceTcp = booleanPreferencesKey("dns_force_tcp")
+        val firewallEnabled = booleanPreferencesKey("firewall_enabled")
+        val firewallDefault = stringPreferencesKey("firewall_default")
+        val firewallTempMin = intPreferencesKey("firewall_temp_min")
+        val firewallPromptSec = intPreferencesKey("firewall_prompt_sec")
     }
 
     val preferences: Flow<TunnelPreferences> = context.tunnelDataStore.data.map { prefs ->
-        TunnelPreferences(
-            routeAllTrafficThroughTor = prefs[Keys.routeAll] ?: true,
-            killSwitchEnabled = prefs[Keys.killSwitch] ?: true,
-            dnsCryptServerName = prefs[Keys.dnsServer] ?: "cloudflare",
-            dnsResolverMode = prefs[Keys.dnsMode]
-                ?.let { runCatching { DnsResolverMode.valueOf(it) }.getOrNull() }
-                ?: DnsResolverMode.DNSCRYPT_MUX,
-            torBridges = prefs[Keys.torBridges].orEmpty(),
-            torEntryNodes = prefs[Keys.torEntry].orEmpty(),
-            torExitNodes = prefs[Keys.torExit].orEmpty(),
-            torExcludeNodes = prefs[Keys.torExclude].orEmpty(),
-            torNewCircuitPeriodSec = prefs[Keys.newCircuit] ?: 30,
-            torMaxCircuitDirtinessSec = prefs[Keys.maxDirtiness] ?: 600,
-            dnsCryptRequireNoLog = prefs[Keys.requireNoLog] ?: true,
-            dnsCryptRequireNoFilter = prefs[Keys.requireNoFilter] ?: false,
-            dnsCryptForceTcp = prefs[Keys.forceTcp] ?: true,
-        )
+        prefs.toModel()
     }
 
     suspend fun update(transform: (TunnelPreferences) -> TunnelPreferences) {
         context.tunnelDataStore.edit { prefs ->
-            val current = TunnelPreferences(
-                routeAllTrafficThroughTor = prefs[Keys.routeAll] ?: true,
-                killSwitchEnabled = prefs[Keys.killSwitch] ?: true,
-                dnsCryptServerName = prefs[Keys.dnsServer] ?: "cloudflare",
-                dnsResolverMode = prefs[Keys.dnsMode]
-                    ?.let { runCatching { DnsResolverMode.valueOf(it) }.getOrNull() }
-                    ?: DnsResolverMode.DNSCRYPT_MUX,
-                torBridges = prefs[Keys.torBridges].orEmpty(),
-                torEntryNodes = prefs[Keys.torEntry].orEmpty(),
-                torExitNodes = prefs[Keys.torExit].orEmpty(),
-                torExcludeNodes = prefs[Keys.torExclude].orEmpty(),
-                torNewCircuitPeriodSec = prefs[Keys.newCircuit] ?: 30,
-                torMaxCircuitDirtinessSec = prefs[Keys.maxDirtiness] ?: 600,
-                dnsCryptRequireNoLog = prefs[Keys.requireNoLog] ?: true,
-                dnsCryptRequireNoFilter = prefs[Keys.requireNoFilter] ?: false,
-                dnsCryptForceTcp = prefs[Keys.forceTcp] ?: true,
-            )
-            val next = transform(current)
+            val next = transform(prefs.toModel())
             prefs[Keys.routeAll] = next.routeAllTrafficThroughTor
             prefs[Keys.killSwitch] = next.killSwitchEnabled
             prefs[Keys.dnsServer] = next.dnsCryptServerName
@@ -91,6 +63,34 @@ class TunnelPreferencesStore @Inject constructor(
             prefs[Keys.requireNoLog] = next.dnsCryptRequireNoLog
             prefs[Keys.requireNoFilter] = next.dnsCryptRequireNoFilter
             prefs[Keys.forceTcp] = next.dnsCryptForceTcp
+            prefs[Keys.firewallEnabled] = next.firewallEnabled
+            prefs[Keys.firewallDefault] = next.firewallDefaultAction.name
+            prefs[Keys.firewallTempMin] = next.firewallTempMinutes
+            prefs[Keys.firewallPromptSec] = next.firewallPromptTimeoutSec
         }
     }
+
+    private fun Preferences.toModel(): TunnelPreferences = TunnelPreferences(
+        routeAllTrafficThroughTor = this[Keys.routeAll] ?: true,
+        killSwitchEnabled = this[Keys.killSwitch] ?: true,
+        dnsCryptServerName = this[Keys.dnsServer] ?: "cloudflare",
+        dnsResolverMode = this[Keys.dnsMode]
+            ?.let { runCatching { DnsResolverMode.valueOf(it) }.getOrNull() }
+            ?: DnsResolverMode.DNSCRYPT_MUX,
+        torBridges = this[Keys.torBridges].orEmpty(),
+        torEntryNodes = this[Keys.torEntry].orEmpty(),
+        torExitNodes = this[Keys.torExit].orEmpty(),
+        torExcludeNodes = this[Keys.torExclude].orEmpty(),
+        torNewCircuitPeriodSec = this[Keys.newCircuit] ?: 30,
+        torMaxCircuitDirtinessSec = this[Keys.maxDirtiness] ?: 180,
+        dnsCryptRequireNoLog = this[Keys.requireNoLog] ?: true,
+        dnsCryptRequireNoFilter = this[Keys.requireNoFilter] ?: false,
+        dnsCryptForceTcp = this[Keys.forceTcp] ?: true,
+        firewallEnabled = this[Keys.firewallEnabled] ?: false,
+        firewallDefaultAction = this[Keys.firewallDefault]
+            ?.let { runCatching { FirewallDefaultAction.valueOf(it) }.getOrNull() }
+            ?: FirewallDefaultAction.ASK,
+        firewallTempMinutes = this[Keys.firewallTempMin] ?: 5,
+        firewallPromptTimeoutSec = this[Keys.firewallPromptSec] ?: 15,
+    )
 }

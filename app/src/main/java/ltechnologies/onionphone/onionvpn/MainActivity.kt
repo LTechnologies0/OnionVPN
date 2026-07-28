@@ -11,6 +11,7 @@ import androidx.activity.viewModels
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.List
+import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material3.Icon
@@ -28,6 +29,9 @@ import androidx.compose.ui.Modifier
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dagger.hilt.android.AndroidEntryPoint
+import javax.inject.Inject
+import ltechnologies.onionphone.onionvpn.firewall.InteractiveFirewallEngine
+import ltechnologies.onionphone.onionvpn.ui.FirewallScreen
 import ltechnologies.onionphone.onionvpn.ui.LogsScreen
 import ltechnologies.onionphone.onionvpn.ui.SettingsScreen
 import ltechnologies.onionphone.onionvpn.ui.StatusScreen
@@ -35,6 +39,8 @@ import ltechnologies.onionphone.onionvpn.ui.StatusScreen
 @AndroidEntryPoint
 class MainActivity : ComponentActivity() {
     private val viewModel: MainViewModel by viewModels()
+
+    @Inject lateinit var firewallEngine: InteractiveFirewallEngine
 
     private val vpnPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult(),
@@ -60,6 +66,7 @@ class MainActivity : ComponentActivity() {
                 OnionVpnApp(
                     snapshot = snapshot,
                     preferences = preferences,
+                    firewallEngine = firewallEngine,
                     onStart = ::requestNotificationsThenStart,
                     onStop = viewModel::stopTunnel,
                     onSavePreferences = viewModel::savePreferences,
@@ -100,6 +107,7 @@ class MainActivity : ComponentActivity() {
 private fun OnionVpnApp(
     snapshot: ltechnologies.onionphone.onionvpn.core.model.TunnelSnapshot,
     preferences: ltechnologies.onionphone.onionvpn.core.model.TunnelPreferences,
+    firewallEngine: InteractiveFirewallEngine,
     onStart: () -> Unit,
     onStop: () -> Unit,
     onSavePreferences: (ltechnologies.onionphone.onionvpn.core.model.TunnelPreferences) -> Unit,
@@ -109,7 +117,7 @@ private fun OnionVpnApp(
     onSaveDnsCryptToml: (String) -> Unit,
 ) {
     var selected by remember { mutableIntStateOf(0) }
-    val destinations = listOf("Status", "Logs", "Settings")
+    val destinations = listOf("Status", "Firewall", "Logs", "Settings")
 
     Scaffold(
         bottomBar = {
@@ -122,7 +130,8 @@ private fun OnionVpnApp(
                             Icon(
                                 imageVector = when (index) {
                                     0 -> Icons.Filled.Shield
-                                    1 -> Icons.Filled.List
+                                    1 -> Icons.Filled.Security
+                                    2 -> Icons.Filled.List
                                     else -> Icons.Filled.Settings
                                 },
                                 contentDescription = label,
@@ -142,7 +151,8 @@ private fun OnionVpnApp(
                     onStart = onStart,
                     onStop = onStop,
                 )
-                1 -> LogsScreen()
+                1 -> FirewallScreen(engine = firewallEngine)
+                2 -> LogsScreen()
                 else -> SettingsScreen(
                     preferences = preferences,
                     onLoadTorrc = onLoadTorrc,

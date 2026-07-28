@@ -5,6 +5,8 @@ import dagger.hilt.android.HiltAndroidApp
 import javax.inject.Inject
 import ltechnologies.onionphone.onionvpn.core.dnscrypt.DnsCryptProcessManager
 import ltechnologies.onionphone.onionvpn.core.tor.TorProcessManager
+import ltechnologies.onionphone.onionvpn.core.vpn.firewall.FirewallBridge
+import ltechnologies.onionphone.onionvpn.firewall.InteractiveFirewallEngine
 import ltechnologies.onionphone.onionvpn.logging.LogSource
 import ltechnologies.onionphone.onionvpn.logging.ProcessLogSeverity
 import ltechnologies.onionphone.onionvpn.logging.TunnelLogBuffer
@@ -15,6 +17,7 @@ import timber.log.Timber
 class OnionVpnApplication : Application() {
     @Inject lateinit var tor: TorProcessManager
     @Inject lateinit var dnsCrypt: DnsCryptProcessManager
+    @Inject lateinit var firewallEngine: InteractiveFirewallEngine
 
     override fun onCreate() {
         super.onCreate()
@@ -22,6 +25,8 @@ class OnionVpnApplication : Application() {
         if (BuildConfig.DEBUG) {
             Timber.plant(Timber.DebugTree())
         }
+        firewallEngine.start()
+        FirewallBridge.engine = firewallEngine
         tor.onLogLine = { line ->
             val err = ProcessLogSeverity.isError(LogSource.TOR, line)
             if (err) Timber.tag("tor").e("%s", line)

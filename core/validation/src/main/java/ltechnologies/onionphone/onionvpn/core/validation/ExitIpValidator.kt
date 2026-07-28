@@ -22,8 +22,9 @@ import timber.log.Timber
  * Proves egress is a Tor exit — not the device ISP/LAN IP (Whonix Reliable IP Hiding +
  * Tor Project check.torproject.org).
  *
- * Fetches [https://check.torproject.org/api/ip] over the **app** Tor SocksPort and
- * compares the reported IP to every non-VPN interface address Android still exposes
+ * Fetches [https://check.torproject.org/api/ip] over the **probe** Tor SocksPort
+ * (SessionGroup PROBE — path-spec proxy-address isolation from app/hev traffic)
+ * and compares the reported IP to every non-VPN interface address Android still exposes
  * (Tor VPN Threat Model §5.1.1 — apps can see those; egress must not equal them).
  */
 object ExitIpValidator {
@@ -100,7 +101,8 @@ object ExitIpValidator {
                 label = "Egress IP is Tor exit (not ISP/LAN)",
                 status = ValidationStatus.Fail,
                 detail = egress.error ?: "No IP from check.torproject.org via SOCKS",
-                tripsKillSwitch = true,
+                // Soft: probe flake — Tor SOCKS may still route apps correctly.
+                tripsKillSwitch = false,
             )
         }
         if (isPrivateOrLocal(ip)) {

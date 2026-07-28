@@ -25,6 +25,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import ltechnologies.onionphone.onionvpn.core.dnscrypt.DnsCryptConfigWriter
 import ltechnologies.onionphone.onionvpn.core.model.DnsResolverMode
+import ltechnologies.onionphone.onionvpn.core.model.FirewallDefaultAction
 import ltechnologies.onionphone.onionvpn.core.model.TunnelPreferences
 
 @Composable
@@ -106,6 +107,60 @@ fun SettingsScreen(
             checked = local.killSwitchEnabled,
             onChecked = { local = local.copy(killSwitchEnabled = it) },
         )
+        Text(
+            text = "Kill switch drops only app packets that cannot go through Tor " +
+                "(Blocking TUN / no clearnet). Working Tor circuits stay up — soft probe " +
+                "flakes (DNSCrypt, exit-IP fetch, Wi‑Fi blip) do not tear them down.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+
+        Text("Interactive firewall", style = MaterialTheme.typography.titleMedium)
+        Text(
+            text = "OpenSnitch-style prompts for new outbound connections on the TUN. " +
+                "Allow / deny permanently or for a few minutes. Timeout = deny.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        PrefSwitch(
+            label = "Enable firewall",
+            checked = local.firewallEnabled,
+            onChecked = { local = local.copy(firewallEnabled = it) },
+        )
+        Text("Default when no rule", style = MaterialTheme.typography.labelLarge)
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FilterChip(
+                selected = local.firewallDefaultAction == FirewallDefaultAction.ASK,
+                onClick = { local = local.copy(firewallDefaultAction = FirewallDefaultAction.ASK) },
+                label = { Text("Ask") },
+            )
+            FilterChip(
+                selected = local.firewallDefaultAction == FirewallDefaultAction.DENY,
+                onClick = { local = local.copy(firewallDefaultAction = FirewallDefaultAction.DENY) },
+                label = { Text("Deny") },
+            )
+            FilterChip(
+                selected = local.firewallDefaultAction == FirewallDefaultAction.ALLOW,
+                onClick = { local = local.copy(firewallDefaultAction = FirewallDefaultAction.ALLOW) },
+                label = { Text("Allow") },
+            )
+        }
+        OutlinedTextField(
+            value = local.firewallTempMinutes.toString(),
+            onValueChange = {
+                it.toIntOrNull()?.let { v -> local = local.copy(firewallTempMinutes = v.coerceIn(1, 1440)) }
+            },
+            label = { Text("Temporary rule (minutes)") },
+            modifier = Modifier.fillMaxWidth(),
+        )
+        OutlinedTextField(
+            value = local.firewallPromptTimeoutSec.toString(),
+            onValueChange = {
+                it.toIntOrNull()?.let { v -> local = local.copy(firewallPromptTimeoutSec = v.coerceIn(5, 120)) }
+            },
+            label = { Text("Prompt timeout (seconds)") },
+            modifier = Modifier.fillMaxWidth(),
+        )
 
         Text("System leak checklist", style = MaterialTheme.typography.titleMedium)
         Text(
@@ -154,6 +209,12 @@ fun SettingsScreen(
             },
             label = { Text("NewCircuitPeriod (sec)") },
             modifier = Modifier.fillMaxWidth(),
+        )
+        Text(
+            text = "MaxCircuitDirtiness (sec) — lower = more circuit rotation " +
+                "(path-spec; app SocksPort has no KeepAliveIsolateSOCKSAuth).",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         OutlinedTextField(
             value = local.torMaxCircuitDirtinessSec.toString(),

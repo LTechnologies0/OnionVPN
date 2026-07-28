@@ -27,14 +27,14 @@ object TunnelValidator {
             if (runtimePorts != null) {
                 addAll(
                     TorPathValidator.validate(
-                        socksPort = runtimePorts.torSocksPort,
+                        socksPort = runtimePorts.torProbeSocksPort,
                         dnsPort = runtimePorts.torDnsPort,
                     ),
                 )
                 addAll(
                     ExitIpValidator.validate(
                         context = context.applicationContext,
-                        socksPort = runtimePorts.torSocksPort,
+                        socksPort = runtimePorts.torProbeSocksPort,
                     ),
                 )
                 addAll(DnsCryptPathValidator.validate(listenPort = runtimePorts.dnsCryptListenPort))
@@ -79,6 +79,44 @@ object TunnelValidator {
     fun isKillSwitchFailure(check: ValidationCheck): Boolean =
         check.status == ValidationStatus.Fail && check.tripsKillSwitch
 
+    /**
+     * Hard kill-switch only when **app packets cannot be routed through Tor** (or would
+     * clearnet-leak). Soft probe flakes (DNSCrypt, remote DNS, exit-IP fetch timeout,
+     * underlying Wi‑Fi blip) must NOT blackhole traffic that Tor is still carrying.
+     *
+     * Kill-switch action = Blocking TUN (drop unroutable app packets). Tor/DNSCrypt stay
+     * up for recovery unless Tor SOCKS itself is dead.
+     */
+    fun isHardKillSwitchFailure(check: ValidationCheck): Boolean {
+        if (!isKillSwitchFailure(check)) return false
+        return when (check.id) {
+            // Tor SOCKS gone → nothing can be circuit-routed.
+            "tor.socks" -> true
+            // Confirmed non-Tor egress / ISP IP on SOCKS path.
+            "tor.exit.istor" -> true
+            "tor.exit.ip" -> {
+                val d = check.detail.lowercase()
+                d.contains("equals device") ||
+                    d.contains("isp ip") ||
+                    d.contains("private/local") ||
+                    d.contains("clearnet leak")
+            }
+            // hev wiring broken → TUN packets won't reach Tor SOCKS.
+            "hev.config.missing", "hev.forwarder.wiring" -> true
+            // VPN interface / route ownership lost or stolen.
+            "vpn.not.established",
+            "android.vpn.link.missing",
+            "android.vpn.default.network",
+            "android.vpn.competing",
+            "android.vpn.permission",
+            -> true
+            // Another app owns Always-on — our TUN can be displaced.
+            "android.vpn.always_on" -> true
+            // Soft: DNSCrypt / DNSPort / SOCKS5A example.com / underlying / timeout / config cosmetics.
+            else -> false
+        }
+    }
+
 
     /**
      * Mode A: mapdns FakeDNS on 10.8.0.1:53 + fake-IP pool outside VPN subnet.
@@ -118,6 +156,7 @@ object TunnelValidator {
                     detail = "mode=DNSCRYPT_MUX socks=$socksPortOk auth=$socksAuth " +
                         "icmpOff=$icmpOff ipv6=$ipv6 noMapDns=$noMapDns " +
                         "(expect socks ${ports.torSocksPort})",
+                    tripsKillSwitch = true,
                 )
             }
             DnsResolverMode.FAKE_IP_SOCKS5A -> {
@@ -133,6 +172,7 @@ object TunnelValidator {
                     status = if (ok) ValidationStatus.Pass else ValidationStatus.Fail,
                     detail = "mode=FAKE_IP socksPortOk=$socksPortOk mapAddrOk=$mapAddrOk " +
                         "mapPortOk=$mapPortOk poolOk=$poolOk",
+                    tripsKillSwitch = true,
                 )
             }
         }
@@ -169,6 +209,7 @@ object TunnelValidator {
             detail = "listen=$listenOk proxy=$proxyOk bootstrap=$bootstrapOk " +
                 "netprobe=$netprobeOk ignore_system_dns=$ignoreSystem " +
                 "socks=${ports.torDnsCryptSocksPort}",
+            tripsKillSwitch = false,
         )
     }
 

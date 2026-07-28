@@ -34,42 +34,19 @@ class HevSocks5TunForwarder(
 
     override fun start(tunFd: ParcelFileDescriptor, socksHost: String, socksPort: Int, dnsCryptPort: Int) {
         stop()
-        when (dnsMode) {
-            DnsResolverMode.DNSCRYPT_MUX -> startWithDnsMux(tunFd, socksHost, socksPort, dnsCryptPort)
-            DnsResolverMode.FAKE_IP_SOCKS5A -> startDirect(tunFd, socksHost, socksPort, useMapDns = true)
-        }
+        // Always mux TUN↔hev so PacketFirewall can inspect both DNSCRYPT_MUX and FakeDNS paths.
+        val useMapDns = dnsMode == DnsResolverMode.FAKE_IP_SOCKS5A
+        val divertDns = dnsMode == DnsResolverMode.DNSCRYPT_MUX
+        startWithMux(tunFd, socksHost, socksPort, dnsCryptPort, useMapDns, divertDns)
     }
 
-    private fun startDirect(
-        tunFd: ParcelFileDescriptor,
-        socksHost: String,
-        socksPort: Int,
-        useMapDns: Boolean,
-    ) {
-        val dup = tunFd.dup()
-        val fd = dup.fd
-        tunDup = dup
-        val job = scope.launch {
-            val configFile = File(context.filesDir, "hev-socks5-tunnel.yaml")
-            configFile.writeText(buildConfig(socksHost, socksPort, useMapDns = useMapDns))
-            Timber.i(
-                "Starting hev-socks5-tunnel on fd=$fd socks=$socksPort mapdns=$useMapDns mode=$dnsMode",
-            )
-            try {
-                hev.sockstun.TProxyService.TProxyStartService(configFile.absolutePath, fd)
-            } catch (error: Exception) {
-                Timber.e(error, "hev-socks5-tunnel exited")
-                onFatal?.invoke(error)
-            }
-        }
-        worker.set(job)
-    }
-
-    private fun startWithDnsMux(
+    private fun startWithMux(
         tunFd: ParcelFileDescriptor,
         socksHost: String,
         socksPort: Int,
         dnsCryptPort: Int,
+        useMapDns: Boolean,
+        divertDns: Boolean,
     ) {
         // SOCK_DGRAM (not STREAM): preserve IP packet boundaries for hev.
         val pair = createPacketSocketPair()
@@ -79,9 +56,10 @@ class HevSocks5TunForwarder(
 
         val job = scope.launch {
             val configFile = File(context.filesDir, "hev-socks5-tunnel.yaml")
-            configFile.writeText(buildConfig(socksHost, socksPort, useMapDns = false))
+            configFile.writeText(buildConfig(socksHost, socksPort, useMapDns = useMapDns))
             Timber.i(
-                "Starting hev-socks5-tunnel (mux/dgram) on fd=${hevEnd.fd} socks=$socksPort dnscrypt=$dnsCryptPort",
+                "Starting hev-socks5-tunnel (mux/dgram) on fd=${hevEnd.fd} " +
+                    "socks=$socksPort dnscrypt=$dnsCryptPort mapdns=$useMapDns divertDns=$divertDns",
             )
             try {
                 hev.sockstun.TProxyService.TProxyStartService(configFile.absolutePath, hevEnd.fd)
@@ -98,6 +76,7 @@ class HevSocks5TunForwarder(
             dnsCryptHost = TunnelEndpoints.LOOPBACK,
             dnsCryptPort = dnsCryptPort,
             vpnDnsAddress = TunnelEndpoints.VPN_DNS_ADDRESS,
+            divertDnsToDnsCrypt = divertDns,
         )
         dnsMux = mux
         mux.start()
@@ -130,7 +109,8 @@ class HevSocks5TunForwarder(
         appendLine("  address: '$socksHost'")
         // Force UDP associate over TCP — no clearnet UDP side-channel.
         appendLine("  udp: 'tcp'")
-        // IsolateSOCKSAuth: dedicated Tor circuits for OnionVPN's SOCKS stream.
+        // IsolateSOCKSAuth token for hev (static — hev has no per-stream auth).
+        // Per-destination circuits come from Tor IsolateDestAddr/IsolateDestPort.
         appendLine("  username: '${TunnelEndpoints.SOCKS_ISOLATION_USER}'")
         appendLine("  password: '${TunnelEndpoints.SOCKS_ISOLATION_PASS}'")
         if (useMapDns) {

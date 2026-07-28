@@ -50,7 +50,8 @@ class TorProcessManager(
             waitForBootstrap(ports)
             Timber.i(
                 "Tor listening socks=${ports.torSocksPort} " +
-                    "dnscryptSocks=${ports.torDnsCryptSocksPort} dns=${ports.torDnsPort}",
+                    "dnscryptSocks=${ports.torDnsCryptSocksPort} " +
+                    "probeSocks=${ports.torProbeSocksPort} dns=${ports.torDnsPort}",
             )
             Result.success(Unit)
         } catch (error: Exception) {
@@ -104,6 +105,7 @@ class TorProcessManager(
                 if (
                     isSocksReady(ports.torSocksPort) &&
                     isSocksReady(ports.torDnsCryptSocksPort) &&
+                    isSocksReady(ports.torProbeSocksPort) &&
                     isDnsPortReady(ports.torDnsPort)
                 ) {
                     Timber.i("Tor bootstrap complete")
@@ -173,6 +175,7 @@ class TorProcessManager(
                 dataDirectory = configDirectory.absolutePath,
                 socksPort = ports.torSocksPort,
                 dnsCryptSocksPort = ports.torDnsCryptSocksPort,
+                probeSocksPort = ports.torProbeSocksPort,
                 dnsPort = ports.torDnsPort,
                 preferences = preferences,
             ),

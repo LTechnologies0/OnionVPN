@@ -5,19 +5,31 @@ import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
 import ltechnologies.onionphone.onionvpn.core.model.TunnelPreferences
 
 /**
- * Tor configuration from Tor Project defaults + Whonix stream isolation + Orbot lockdown:
+ * Tor client config aligned with:
+ * - [path-spec stream isolation](https://spec.torproject.org/path-spec/stream-isolation.html)
+ * - Tor manual `SocksPort` isolation flags
+ * - Whonix multi-SocksPort practice
  *
- * - **Two SocksPorts** (Whonix): apps/hev vs DNSCrypt — no circuit correlation.
- * - IsolateDestAddr/Port + IsolateSOCKSAuth on each SocksPort.
- * - SocksPolicy accept 127.0.0.1 only (Orbot/Tor: no LAN SOCKS exposure).
- * - UseEntryGuards 1 (Tor Project OPSEC default).
- * - DNSPort SessionGroup separate from both SOCKS (proposal 171).
+ * Isolation model (OnionVPN):
+ * 1. **Apps/hev** — SessionGroup=1, IsolateDestAddr+Port (circuit per destination),
+ *    IsolateSOCKSAuth (hev credentials). No KeepAliveIsolateSOCKSAuth: hev uses one
+ *    static SOCKS token for all TUN streams, so KeepAlive would pin long-lived circuits
+ *    without per-app tokens; MaxCircuitDirtiness rotates instead.
+ * 2. **DNSCrypt** — SessionGroup=3, separate SocksPort + auth (DNS ≠ app circuit family).
+ * 3. **Probes** — SessionGroup=4, dedicated SocksPort so exit-IP / SOCKS5A checks never
+ *    share circuits with user traffic (proxy-address isolation in path-spec).
+ * 4. **DNSPort** — SessionGroup=2 for Automap / bootstrap only.
  */
 object TorConfigWriter {
+    /** Full isolation flags for maximal stream/circuit separation (path-spec + man). */
+    const val SOCKS_ISOLATION_MAX =
+        "IsolateClientAddr IsolateClientProtocol IsolateDestAddr IsolateDestPort IsolateSOCKSAuth"
+
     fun write(
         dataDirectory: String,
         socksPort: Int = TunnelEndpoints.TOR_SOCKS_PORT,
         dnsCryptSocksPort: Int = TunnelEndpoints.TOR_SOCKS_PORT + 1,
+        probeSocksPort: Int = TunnelEndpoints.TOR_SOCKS_PORT + 2,
         dnsPort: Int = TunnelEndpoints.TOR_DNS_PORT,
         preferences: TunnelPreferences = TunnelPreferences(),
     ): String = buildString {
@@ -26,25 +38,28 @@ object TorConfigWriter {
         appendLine("AvoidDiskWrites 1")
         appendLine("DormantCanceledByStartup 1")
 
-        // Loopback-only SOCKS — never bind on 0.0.0.0 (Orbot/Tor hardening).
         appendLine("SocksPolicy accept 127.0.0.1")
         appendLine("SocksPolicy reject *")
 
-        // Whonix: dedicated SocksPort for application / hev traffic.
+        // Apps / hev — per-destination circuits; dirtiness rotates (no KeepAlive).
         appendLine(
             "SOCKSPort ${TunnelEndpoints.LOOPBACK}:$socksPort " +
-                "SessionGroup=1 IsolateDestAddr IsolateDestPort " +
-                "IsolateSOCKSAuth KeepaliveIsolateSOCKSAuth",
+                "SessionGroup=${TunnelEndpoints.SESSION_GROUP_APPS} $SOCKS_ISOLATION_MAX",
         )
-        // Whonix: dedicated SocksPort for DNSCrypt upstream (different circuits).
+        // DNSCrypt upstream — own SessionGroup + KeepAlive (single logical DNS context).
         appendLine(
             "SOCKSPort ${TunnelEndpoints.LOOPBACK}:$dnsCryptSocksPort " +
-                "SessionGroup=3 IsolateDestAddr IsolateDestPort " +
-                "IsolateSOCKSAuth KeepaliveIsolateSOCKSAuth",
+                "SessionGroup=${TunnelEndpoints.SESSION_GROUP_DNSCRYPT} $SOCKS_ISOLATION_MAX " +
+                "KeepAliveIsolateSOCKSAuth",
+        )
+        // Validation / leak probes — never share circuits with apps or DNSCrypt.
+        appendLine(
+            "SOCKSPort ${TunnelEndpoints.LOOPBACK}:$probeSocksPort " +
+                "SessionGroup=${TunnelEndpoints.SESSION_GROUP_PROBE} $SOCKS_ISOLATION_MAX",
         )
         appendLine(
             "DNSPort ${TunnelEndpoints.LOOPBACK}:$dnsPort " +
-                "SessionGroup=2 IsolateDestAddr",
+                "SessionGroup=${TunnelEndpoints.SESSION_GROUP_DNS} IsolateDestAddr",
         )
         appendLine("AutomapHostsOnResolve 1")
         appendLine("AutomapHostsSuffixes .onion,.exit")
@@ -69,12 +84,14 @@ object TorConfigWriter {
         appendLine("EnforceDistinctSubnets 1")
         appendLine("StrictNodes 0")
 
+        // IsolateDestAddr opens many circuits — raise pending budget (Tor man).
+        appendLine("MaxClientCircuitsPending 128")
+
         appendLine("ConnectionPadding auto")
         appendLine("ReducedConnectionPadding 0")
         appendLine("CircuitPadding 1")
         appendLine("ReducedCircuitPadding 0")
 
-        // Surface cleartext protocols in logs (Whonix / Tor manual).
         appendLine("WarnPlaintextPorts 23,109,110,143")
 
         appendLine("NewCircuitPeriod ${preferences.torNewCircuitPeriodSec}")

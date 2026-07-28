@@ -10,9 +10,11 @@ import java.net.ServerSocket
  * Picks ephemeral loopback ports at tunnel start to avoid clashes with Tor Browser,
  * InviZible, Orbot, or stale processes still bound to well-known defaults.
  *
- * Whonix stream isolation: [torSocksPort] (hev/apps) and [torDnsCryptSocksPort]
- * (DNSCrypt upstream) are **distinct** Tor SocksPorts so DNS metadata cannot be
- * circuit-correlated with application TCP.
+ * Whonix / path-spec stream isolation:
+ * - [torSocksPort] hev/apps (SessionGroup APPS)
+ * - [torDnsCryptSocksPort] DNSCrypt upstream (SessionGroup DNSCRYPT)
+ * - [torProbeSocksPort] exit-IP / SOCKS5A probes (SessionGroup PROBE)
+ * Distinct SocksPorts ⇒ incompatible proxy-address isolation profiles.
  */
 object TunnelPortAllocator {
     private const val MIN_PORT = 10240
@@ -24,6 +26,7 @@ object TunnelPortAllocator {
         return TunnelRuntimePorts(
             torSocksPort = allocateTcpPort(used),
             torDnsCryptSocksPort = allocateTcpPort(used),
+            torProbeSocksPort = allocateTcpPort(used),
             torDnsPort = allocateUdpPort(used),
             dnsCryptListenPort = allocateTcpUdpPort(used),
         )
@@ -79,6 +82,8 @@ data class TunnelRuntimePorts(
     val torSocksPort: Int,
     /** Tor SocksPort for DNSCrypt upstream only (Whonix: separate circuit family). */
     val torDnsCryptSocksPort: Int,
+    /** Tor SocksPort for OnionVPN validation probes only (no app circuit sharing). */
+    val torProbeSocksPort: Int,
     val torDnsPort: Int,
     val dnsCryptListenPort: Int,
 )

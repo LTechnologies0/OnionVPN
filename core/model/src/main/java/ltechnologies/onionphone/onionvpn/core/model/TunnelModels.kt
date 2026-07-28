@@ -40,6 +40,9 @@ object TunnelEndpoints {
 
     /**
      * SOCKS5 credentials for hev → Tor IsolateSOCKSAuth (app traffic circuits).
+     * hev uses one token for all TUN streams — circuit separation relies on
+     * IsolateDestAddr/IsolateDestPort (path-spec); KeepAliveIsolateSOCKSAuth is
+     * intentionally off on the app SocksPort so MaxCircuitDirtiness rotates.
      */
     const val SOCKS_ISOLATION_USER = "onionvpn"
     const val SOCKS_ISOLATION_PASS = "stream"
@@ -50,6 +53,16 @@ object TunnelEndpoints {
      */
     const val SOCKS_DNSCRYPT_USER = "dnscrypt"
     const val SOCKS_DNSCRYPT_PASS = "resolver"
+
+    /** SOCKS auth for validation probes (SessionGroup_PROBE SocksPort). */
+    const val SOCKS_PROBE_USER = "probe"
+    const val SOCKS_PROBE_PASS = "check"
+
+    /** Tor SessionGroup IDs — distinct families never share circuits (proposal 171). */
+    const val SESSION_GROUP_APPS = 1
+    const val SESSION_GROUP_DNS = 2
+    const val SESSION_GROUP_DNSCRYPT = 3
+    const val SESSION_GROUP_PROBE = 4
 }
 
 /**
@@ -98,7 +111,11 @@ data class ValidationCheck(
     val label: String,
     val status: ValidationStatus,
     val detail: String,
-    /** If false, shown in UI but must not tear down the tunnel (e.g. OS Settings the app cannot force). */
+    /**
+     * If false, advisory only (UI / logs) — never tear down Tor-routed traffic.
+     * If true, still filtered by [ltechnologies.onionphone.onionvpn.core.validation.TunnelValidator.isHardKillSwitchFailure]
+     * so flaky probes cannot blackhole a working Tor path.
+     */
     val tripsKillSwitch: Boolean = true,
 )
 
@@ -126,22 +143,6 @@ data class TunnelSnapshot(
     val isActive: Boolean
         get() = phase == TunnelPhase.Connected || phase == TunnelPhase.Blocking
 }
-
-data class TunnelPreferences(
-    val routeAllTrafficThroughTor: Boolean = true,
-    val killSwitchEnabled: Boolean = true,
-    val dnsCryptServerName: String = "cloudflare",
-    val dnsResolverMode: DnsResolverMode = DnsResolverMode.DNSCRYPT_MUX,
-    val torBridges: String = "",
-    val torEntryNodes: String = "",
-    val torExitNodes: String = "",
-    val torExcludeNodes: String = "",
-    val torNewCircuitPeriodSec: Int = 30,
-    val torMaxCircuitDirtinessSec: Int = 600,
-    val dnsCryptRequireNoLog: Boolean = true,
-    val dnsCryptRequireNoFilter: Boolean = false,
-    val dnsCryptForceTcp: Boolean = true,
-)
 
 sealed interface VpnEstablishResult {
     data class Success(val mode: VpnProfileMode) : VpnEstablishResult

@@ -34,6 +34,7 @@ import ltechnologies.onionphone.onionvpn.MainActivity
 import ltechnologies.onionphone.onionvpn.R
 import ltechnologies.onionphone.onionvpn.core.dnscrypt.DnsCryptProcessManager
 import ltechnologies.onionphone.onionvpn.core.model.DnsResolverMode
+import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
 import ltechnologies.onionphone.onionvpn.core.model.TunnelPhase
 import ltechnologies.onionphone.onionvpn.core.model.TunnelPortAllocator
 import ltechnologies.onionphone.onionvpn.core.model.TunnelPreferences
@@ -46,8 +47,11 @@ import ltechnologies.onionphone.onionvpn.core.tor.TorProcessManager
 import ltechnologies.onionphone.onionvpn.core.validation.TunnelValidator
 import ltechnologies.onionphone.onionvpn.core.vpn.OnionVpnService
 import ltechnologies.onionphone.onionvpn.core.vpn.TorBandwidthSampler
+import ltechnologies.onionphone.onionvpn.firewall.InteractiveFirewallEngine
 import ltechnologies.onionphone.onionvpn.prefs.TunnelPreferencesStore
 import timber.log.Timber
+import java.net.InetSocketAddress
+import java.net.Socket
 
 /**
  * Foreground coordinator — InviZible control/data-plane split:
@@ -63,6 +67,7 @@ class TunnelForegroundService : Service() {
     @Inject lateinit var tor: TorProcessManager
     @Inject lateinit var dnsCrypt: DnsCryptProcessManager
     @Inject lateinit var preferencesStore: TunnelPreferencesStore
+    @Inject lateinit var firewallEngine: InteractiveFirewallEngine
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val lifecycleMutex = Mutex()
@@ -179,7 +184,8 @@ class TunnelForegroundService : Service() {
         runtimePorts = ports
         Timber.i(
             "Allocated tunnel ports socks=${ports.torSocksPort} " +
-                "dnscryptSocks=${ports.torDnsCryptSocksPort} dns=${ports.torDnsPort} " +
+                "dnscryptSocks=${ports.torDnsCryptSocksPort} " +
+                "probeSocks=${ports.torProbeSocksPort} dns=${ports.torDnsPort} " +
                 "dnscrypt=${ports.dnsCryptListenPort} dnsMode=${preferences.dnsResolverMode}",
         )
 
@@ -190,15 +196,28 @@ class TunnelForegroundService : Service() {
         }
 
         updateSnapshot(TunnelPhase.StartingDnsCrypt, torRunning = true)
-        val dnsResult = dnsCrypt.start(preferences.dnsCryptServerName, ports, preferences)
-        if (dnsResult.isFailure) {
-            handleFailure(dnsResult.exceptionOrNull()?.message ?: "DNSCrypt failed", fromValidation = false)
-            return
+        val useDnsCrypt = preferences.dnsResolverMode == DnsResolverMode.DNSCRYPT_MUX
+        if (useDnsCrypt) {
+            val dnsResult = dnsCrypt.start(preferences.dnsCryptServerName, ports, preferences)
+            if (dnsResult.isFailure) {
+                // DNSCrypt down ≠ Tor down. Keep Tor; blackhole apps until user retries / FakeDNS.
+                handleFailure(
+                    message = dnsResult.exceptionOrNull()?.message ?: "DNSCrypt failed",
+                    fromValidation = false,
+                    stopTorProcesses = false,
+                )
+                return
+            }
+            updateSnapshot(TunnelPhase.StartingVpn, dnsCryptRunning = true)
+        } else {
+            // FakeDNS: apps never need DNSCrypt — skip so a resolver flake cannot block Tor streams.
+            runCatching { dnsCrypt.stop() }
+            Timber.i("FakeDNS mode — DNSCrypt not required for app DNS")
+            updateSnapshot(TunnelPhase.StartingVpn, dnsCryptRunning = false)
         }
 
-        updateSnapshot(TunnelPhase.StartingVpn, dnsCryptRunning = true)
         if (VpnService.prepare(this) != null) {
-            handleFailure("VPN permission not granted", fromValidation = false)
+            handleFailure("VPN permission not granted", fromValidation = false, stopTorProcesses = false)
             return
         }
 
@@ -208,36 +227,47 @@ class TunnelForegroundService : Service() {
 
         val vpnReady = waitForVpnEstablishment(vpnGeneration, ports)
         if (!vpnReady) {
-            handleFailure("VPN interface not established", fromValidation = false)
+            handleFailure("VPN interface not established", fromValidation = false, stopTorProcesses = false)
             return
         }
 
         val hevSocks = OnionVpnService.hevSocksPort.value
         val hevDns = OnionVpnService.hevDnsCryptPort.value
-        if (hevSocks != ports.torSocksPort || hevDns != ports.dnsCryptListenPort) {
+        val dnsPortExpected = if (useDnsCrypt) ports.dnsCryptListenPort else hevDns
+        if (hevSocks != ports.torSocksPort || (useDnsCrypt && hevDns != ports.dnsCryptListenPort)) {
             handleFailure(
-                "hev-socks5 port desync (hev socks=$hevSocks dns=$hevDns; " +
-                    "expected socks=${ports.torSocksPort} dns=${ports.dnsCryptListenPort})",
+                message = "hev-socks5 port desync (hev socks=$hevSocks dns=$hevDns; " +
+                    "expected socks=${ports.torSocksPort} dns=$dnsPortExpected)",
                 fromValidation = false,
+                stopTorProcesses = false,
             )
             return
         }
 
         updateSnapshot(TunnelPhase.Validating, vpnEstablished = true)
         val validations = runValidation(ports)
-        val failedChecks = validations.filter { TunnelValidator.isKillSwitchFailure(it) }
+        val hardFails = validations.filter { TunnelValidator.isHardKillSwitchFailure(it) }
+        val softFails = validations.filter {
+            it.status == ValidationStatus.Fail && !TunnelValidator.isHardKillSwitchFailure(it)
+        }
 
         releaseBootstrapWakeLock()
 
-        if (failedChecks.isNotEmpty()) {
-            failedChecks.forEach { check ->
-                Timber.e("Validation FAIL [${check.id}] ${check.label}: ${check.detail}")
+        softFails.forEach { check ->
+            Timber.e("Soft FAIL (Tor kept) [${check.id}] ${check.label}: ${check.detail}")
+        }
+
+        if (hardFails.isNotEmpty()) {
+            hardFails.forEach { check ->
+                Timber.e("Hard FAIL [${check.id}] ${check.label}: ${check.detail}")
             }
-            val summary = failedChecks.joinToString("; ") { "${it.label}: ${it.detail}" }
+            val summary = hardFails.joinToString("; ") { "${it.label}: ${it.detail}" }
+            val torDead = hardFails.any { it.id == "tor.socks" } || !tor.isRunning()
             handleFailure(
                 message = "Validation failed — $summary",
                 fromValidation = true,
                 validations = validations,
+                stopTorProcesses = torDead,
             )
             return
         }
@@ -246,7 +276,7 @@ class TunnelForegroundService : Service() {
             phase = TunnelPhase.Connected,
             validations = validations,
             torRunning = true,
-            dnsCryptRunning = true,
+            dnsCryptRunning = useDnsCrypt && dnsCrypt.isRunning(),
             vpnEstablished = true,
         )
         startPeriodicValidation()
@@ -282,14 +312,16 @@ class TunnelForegroundService : Service() {
         message: String,
         fromValidation: Boolean,
         validations: List<ValidationCheck> = emptyList(),
+        /** Only stop Tor when SOCKS/process is dead — never nuke a live Tor path for soft faults. */
+        stopTorProcesses: Boolean = true,
     ) {
-        Timber.e("Tunnel failure: $message")
+        Timber.e("Tunnel failure: $message (stopTor=$stopTorProcesses)")
         releaseBootstrapWakeLock()
         stopThroughputUpdates()
 
         val canBlock = preferences.killSwitchEnabled && VpnService.prepare(this) == null
         if (canBlock) {
-            enterBlockingMode(message, validations)
+            enterBlockingMode(message, validations, stopTorProcesses = stopTorProcesses)
             return
         }
 
@@ -298,20 +330,30 @@ class TunnelForegroundService : Service() {
         stopSelf()
     }
 
+    /**
+     * Kill-switch: Blocking TUN blackholes **app** packets that cannot be Tor-routed.
+     * Tor/DNSCrypt stay alive when [stopTorProcesses] is false so correctly-working
+     * circuits / bidouilles (self-exclusion, dual SocksPorts, FakeDNS) are not torn down.
+     */
     private suspend fun enterBlockingMode(
         message: String,
         validations: List<ValidationCheck>,
+        stopTorProcesses: Boolean,
     ) {
         updateSnapshot(TunnelPhase.Blocking, lastError = message, validations = validations)
         val gen = OnionVpnService.nextGeneration()
         startVpnBlocking(gen)
         waitForBlockingEstablishment(gen)
-        dnsCrypt.stop()
-        tor.stop()
+        if (stopTorProcesses) {
+            dnsCrypt.stop()
+            tor.stop()
+        } else {
+            Timber.i("Kill-switch Blocking TUN only — Tor/DNSCrypt kept for recovery")
+        }
         updateSnapshot(
             phase = TunnelPhase.Blocking,
-            torRunning = false,
-            dnsCryptRunning = false,
+            torRunning = tor.isRunning(),
+            dnsCryptRunning = dnsCrypt.isRunning(),
             vpnEstablished = OnionVpnService.vpnEstablished.value,
             lastError = message,
             validations = validations,
@@ -328,6 +370,7 @@ class TunnelForegroundService : Service() {
             stopThroughputUpdates()
             forwarderWatchJob?.cancel()
             forwarderWatchJob = null
+            firewallEngine.clearSessionRules()
             teardownModules(
                 resetSnapshot = userInitiated,
                 phase = TunnelPhase.Stopping,
@@ -411,15 +454,38 @@ class TunnelForegroundService : Service() {
         forwarderWatchJob = scope.launch {
             OnionVpnService.tunForwarderAlive.collect { alive ->
                 if (!alive && _snapshot.value.phase == TunnelPhase.Connected) {
-                    Timber.e("TUN forwarder died while Connected — entering kill-switch")
                     lifecycleMutex.withLock {
-                        if (_snapshot.value.phase == TunnelPhase.Connected) {
-                            handleFailure("TUN forwarder died", fromValidation = true)
+                        if (_snapshot.value.phase != TunnelPhase.Connected) return@withLock
+                        val ports = runtimePorts
+                        if (ports != null && tor.isRunning() && isSocksReachable(ports.torSocksPort)) {
+                            Timber.w("TUN forwarder died — Tor SOCKS still up; rebinding hev (keep Tor)")
+                            val gen = OnionVpnService.nextGeneration()
+                            startVpn(VpnProfileMode.Connected, ports, gen)
+                            if (waitForVpnEstablishment(gen, ports)) {
+                                OnionVpnService.markForwarderAlive()
+                                Timber.i("hev rebound after forwarder death")
+                                return@withLock
+                            }
                         }
+                        Timber.e("TUN forwarder dead and Tor path unusable — kill-switch Blocking TUN")
+                        handleFailure(
+                            message = "TUN forwarder died",
+                            fromValidation = true,
+                            stopTorProcesses = !tor.isRunning(),
+                        )
                     }
                 }
             }
         }
+    }
+
+    private fun isSocksReachable(port: Int): Boolean = try {
+        Socket().use { socket ->
+            socket.connect(InetSocketAddress(TunnelEndpoints.LOOPBACK, port), 1_000)
+        }
+        true
+    } catch (_: Exception) {
+        false
     }
 
     private suspend fun stopVpnAndWait() {
@@ -468,17 +534,25 @@ class TunnelForegroundService : Service() {
                     runtimePorts = ports,
                     dnsResolverMode = preferences.dnsResolverMode,
                 )
-                val failedChecks = checks.filter { TunnelValidator.isKillSwitchFailure(it) }
+                val hardFails = checks.filter { TunnelValidator.isHardKillSwitchFailure(it) }
+                val softFails = checks.filter {
+                    it.status == ValidationStatus.Fail && !TunnelValidator.isHardKillSwitchFailure(it)
+                }
                 _snapshot.update { it.copy(validations = checks) }
-                if (failedChecks.isNotEmpty()) {
-                    failedChecks.forEach { check ->
-                        Timber.e("Periodic FAIL [${check.id}] ${check.label}: ${check.detail}")
+                softFails.forEach { check ->
+                    Timber.e("Periodic soft FAIL [${check.id}] ${check.label}: ${check.detail}")
+                }
+                if (hardFails.isNotEmpty()) {
+                    hardFails.forEach { check ->
+                        Timber.e("Periodic hard FAIL [${check.id}] ${check.label}: ${check.detail}")
                     }
-                    val summary = failedChecks.joinToString("; ") { it.label }
+                    val summary = hardFails.joinToString("; ") { it.label }
+                    val torDead = hardFails.any { it.id == "tor.socks" } || !tor.isRunning()
                     handleFailure(
                         message = "Leak detected — $summary",
                         fromValidation = true,
                         validations = checks,
+                        stopTorProcesses = torDead,
                     )
                     break
                 }
@@ -669,7 +743,7 @@ class TunnelForegroundService : Service() {
             torExitNodes = intent.getStringExtra(EXTRA_TOR_EXIT).orEmpty(),
             torExcludeNodes = intent.getStringExtra(EXTRA_TOR_EXCLUDE).orEmpty(),
             torNewCircuitPeriodSec = intent.getIntExtra(EXTRA_TOR_NEW_CIRCUIT, 30),
-            torMaxCircuitDirtinessSec = intent.getIntExtra(EXTRA_TOR_MAX_DIRTINESS, 600),
+            torMaxCircuitDirtinessSec = intent.getIntExtra(EXTRA_TOR_MAX_DIRTINESS, 180),
             dnsCryptRequireNoLog = intent.getBooleanExtra(EXTRA_DNS_NOLOG, true),
             dnsCryptRequireNoFilter = intent.getBooleanExtra(EXTRA_DNS_NOFILTER, false),
             dnsCryptForceTcp = intent.getBooleanExtra(EXTRA_DNS_FORCE_TCP, true),

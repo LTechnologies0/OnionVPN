@@ -51,18 +51,26 @@ object TorPathValidator {
         val entryGuards = config.contains("UseEntryGuards 1")
         val socksIsolation = config.contains("IsolateDestAddr") &&
             config.contains("IsolateDestPort") &&
-            config.contains("IsolateSOCKSAuth")
+            config.contains("IsolateSOCKSAuth") &&
+            config.contains("IsolateClientAddr") &&
+            config.contains("IsolateClientProtocol")
         val socksPolicy = config.contains("SocksPolicy accept 127.0.0.1") &&
             config.contains("SocksPolicy reject *")
-        // Whonix: two SOCKSPort lines (app + DNSCrypt).
-        val dualSocks = config.lineSequence().count { it.startsWith("SOCKSPort ") } >= 2
+        // Apps + DNSCrypt + probe SocksPorts (path-spec proxy-address isolation).
+        val multiSocks = config.lineSequence().count { it.startsWith("SOCKSPort ") } >= 3
+        val hasProbeGroup = config.contains("SessionGroup=${TunnelEndpoints.SESSION_GROUP_PROBE}")
+        val noKeepAliveOnApps = !config.lineSequence()
+            .filter { it.startsWith("SOCKSPort ") && it.contains("SessionGroup=${TunnelEndpoints.SESSION_GROUP_APPS}") }
+            .any { it.contains("KeepAliveIsolateSOCKSAuth") }
         val ok = hasSocks && hasDns && safeSocksSet && clientOnly &&
-            entryGuards && socksIsolation && socksPolicy && dualSocks
+            entryGuards && socksIsolation && socksPolicy && multiSocks &&
+            hasProbeGroup && noKeepAliveOnApps
         return ValidationCheck(
             id = "tor.config.content",
             label = "Tor torrc (runtime)",
             status = if (ok) ValidationStatus.Pass else ValidationStatus.Fail,
-            detail = "$source: socks=$hasSocks dns=$hasDns dualSocks=$dualSocks " +
+            detail = "$source: socks=$hasSocks dns=$hasDns multiSocks=$multiSocks " +
+                "probeGroup=$hasProbeGroup noKeepAliveApps=$noKeepAliveOnApps " +
                 "SocksPolicy=$socksPolicy EntryGuards=$entryGuards Isolation=$socksIsolation" +
                 (if (socksPort != null) " ports=$socksPort/$dnsPort" else ""),
         )
@@ -79,7 +87,7 @@ object TorPathValidator {
             }
             ValidationCheck(id, label, ValidationStatus.Pass, "$host:$port (UDP)")
         } catch (error: Exception) {
-            ValidationCheck(id, label, ValidationStatus.Fail, error.message ?: "unreachable")
+            ValidationCheck(id, label, ValidationStatus.Fail, error.message ?: "unreachable", tripsKillSwitch = false)
         }
     }
 
@@ -90,7 +98,13 @@ object TorPathValidator {
             }
             ValidationCheck(id, label, ValidationStatus.Pass, "$host:$port")
         } catch (error: Exception) {
-            ValidationCheck(id, label, ValidationStatus.Fail, error.message ?: "unreachable")
+            ValidationCheck(
+                id,
+                label,
+                ValidationStatus.Fail,
+                error.message ?: "unreachable",
+                tripsKillSwitch = id == "tor.socks",
+            )
         }
     }
 
@@ -113,6 +127,7 @@ object TorPathValidator {
                 label = "SOCKS5A remote DNS via Tor",
                 status = ValidationStatus.Fail,
                 detail = error.message ?: "remote DNS failed",
+                tripsKillSwitch = false,
             )
         }
     }
