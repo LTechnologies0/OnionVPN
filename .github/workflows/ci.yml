@@ -77,6 +77,10 @@ jobs:
   dependency-review:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    # Soft-fail until Dependency graph is enabled:
+    # Settings → Code security → Dependency graph
+    # (action errors with "Dependency review is not supported" otherwise).
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: actions/dependency-review-action@v4
