@@ -16,6 +16,7 @@ import androidx.core.app.NotificationManagerCompat
 import androidx.core.graphics.createBitmap
 import androidx.core.graphics.drawable.IconCompat
 import ltechnologies.onionphone.onionvpn.R
+import ltechnologies.onionphone.onionvpn.core.model.DomainThreatCategory
 import ltechnologies.onionphone.onionvpn.core.model.FirewallConnectionInfo
 import timber.log.Timber
 
