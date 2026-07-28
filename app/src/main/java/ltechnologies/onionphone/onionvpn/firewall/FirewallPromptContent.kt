@@ -16,7 +16,6 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -26,9 +25,6 @@ import ltechnologies.onionphone.onionvpn.core.model.DomainThreatCategory
 import ltechnologies.onionphone.onionvpn.core.model.FirewallConnectionInfo
 import ltechnologies.onionphone.onionvpn.core.model.FirewallRuleScope
 import ltechnologies.onionphone.onionvpn.core.model.FirewallVerdict
-
-private val ThreatOrange = Color(0xFFE65100)
-private val ThreatRed = Color(0xFFC62828)
 
 @Composable
 fun FirewallPromptContent(
@@ -40,16 +36,8 @@ fun FirewallPromptContent(
     val icon = runCatching {
         context.packageManager.getApplicationIcon(info.packageName).toBitmap(96, 96).asImageBitmap()
     }.getOrNull()
-    val destColor = when (info.threatCategory) {
-        DomainThreatCategory.MALWARE -> ThreatRed
-        DomainThreatCategory.TRACKING -> ThreatOrange
-        DomainThreatCategory.NONE -> MaterialTheme.colorScheme.onSurface
-    }
-    val threatLabel = when (info.threatCategory) {
-        DomainThreatCategory.MALWARE -> "Malware / C2"
-        DomainThreatCategory.TRACKING -> "Ads / tracking / telemetry"
-        DomainThreatCategory.NONE -> null
-    }
+    val destColor = threatTextColor(info.threatCategory)
+    val threatLabel = threatLabelOrNull(info.threatCategory)
 
     Column(
         modifier = Modifier

@@ -33,6 +33,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -40,6 +41,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicReference
+import ltechnologies.onionphone.onionvpn.R
 import ltechnologies.onionphone.onionvpn.core.dnscrypt.config.DnsCryptPublicResolvers
 import ltechnologies.onionphone.onionvpn.core.model.DnsResolverMode
 import ltechnologies.onionphone.onionvpn.core.model.FirewallDefaultAction
@@ -276,11 +278,9 @@ fun SettingsScreen(
             modifier = Modifier.fillMaxWidth(),
         )
 
-        Text("Domain threat lists", style = MaterialTheme.typography.titleMedium)
+        Text(stringResource(R.string.domain_lists_title), style = MaterialTheme.typography.titleMedium)
         Text(
-            text = "HaGeZi lists colour firewall prompts: orange = ads/tracking/telemetry " +
-                "(Light + Native Tracker), red = malware/C2 (TIF mini). " +
-                "Updates prefer Tor when the tunnel is up.",
+            text = stringResource(R.string.domain_lists_desc),
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -289,17 +289,27 @@ fun SettingsScreen(
             SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault())
                 .format(Date(reputation.lastSuccessEpochMs))
         } else {
-            "never"
+            stringResource(R.string.domain_lists_never)
+        }
+        val transport = when {
+            reputation.lastSuccessEpochMs <= 0L -> ""
+            reputation.lastViaTor -> stringResource(R.string.domain_lists_via_tor)
+            else -> stringResource(R.string.domain_lists_via_direct)
         }
         Text(
-            text = "Tracking: ${reputation.trackingEntries} · Malware: ${reputation.malwareEntries} · " +
-                "Last update: $lastUpdate",
+            text = stringResource(
+                R.string.domain_lists_status,
+                reputation.trackingEntries,
+                reputation.malwareEntries,
+                lastUpdate,
+                transport,
+            ),
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         if (reputation.lastError != null) {
             Text(
-                text = "Last error: ${reputation.lastError}",
+                text = stringResource(R.string.domain_lists_last_error, reputation.lastError!!),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.error,
             )
@@ -309,7 +319,13 @@ fun SettingsScreen(
             enabled = !reputation.updating,
             modifier = Modifier.fillMaxWidth(),
         ) {
-            Text(if (reputation.updating) "Updating…" else "Update domain lists")
+            Text(
+                if (reputation.updating) {
+                    stringResource(R.string.domain_lists_updating)
+                } else {
+                    stringResource(R.string.domain_lists_update)
+                },
+            )
         }
 
         Text("Tor", style = MaterialTheme.typography.titleMedium)

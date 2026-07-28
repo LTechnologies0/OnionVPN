@@ -99,6 +99,7 @@ class FirewallRulesStore @Inject constructor(
                     .put("packageName", r.packageName)
                     .put("appLabel", r.appLabel)
                     .put("destHost", r.destHost)
+                    .put("displayHost", r.displayHost)
                     .put("destPort", r.destPort)
                     .put("protocol", r.protocol)
                     .put("verdict", r.verdict.name)
@@ -131,6 +132,7 @@ class FirewallRulesStore @Inject constructor(
                             scope = FirewallRuleScope.valueOf(o.getString("scope")),
                             expiresAtEpochMs = expires,
                             createdAtEpochMs = o.optLong("createdAtEpochMs", 0L),
+                            displayHost = o.optString("displayHost"),
                         ),
                     )
                 }

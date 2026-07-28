@@ -176,6 +176,9 @@ class TunDnsMux(
         tunToHev = null
         hevToTun = null
         packetPool.clear()
+        // FakeDNS IPs are reused across sessions — drop stale IP→host bindings.
+        pendingQnames.clear()
+        DnsHostnameCache.clear()
         runCatching {
             if (!dnsExecutor.awaitTermination(2, TimeUnit.SECONDS)) {
                 Timber.w("DNS executor did not terminate cleanly")

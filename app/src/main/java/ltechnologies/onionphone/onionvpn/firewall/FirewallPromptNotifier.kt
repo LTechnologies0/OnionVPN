@@ -47,15 +47,28 @@ internal class FirewallPromptNotifier(
 
     fun show(info: FirewallConnectionInfo) {
         ensureChannel()
-        // Notification text cannot reliably use coloured spans across OEMs —
-        // prefix the destination with a threat emoji instead.
-        val dest = threatEmoji(info.threatCategory) + " " + info.displayDestination()
-        val content = appContext.getString(
+        // Notification body text cannot reliably use coloured spans across OEMs.
+        // Prefix only known threats (unknown stays unmarked — never imply "safe").
+        val emoji = info.threatCategory.notificationEmojiOrNull()
+        val dest = if (emoji != null) {
+            "$emoji ${info.displayDestination()}"
+        } else {
+            info.displayDestination()
+        }
+        val base = appContext.getString(
             R.string.firewall_prompt_notif_text,
             info.protocolLabel,
             dest,
             info.destPort,
         )
+        val threatSuffix = when (info.threatCategory) {
+            DomainThreatCategory.MALWARE ->
+                " · " + appContext.getString(R.string.firewall_threat_malware)
+            DomainThreatCategory.TRACKING ->
+                " · " + appContext.getString(R.string.firewall_threat_tracking)
+            DomainThreatCategory.NONE -> ""
+        }
+        val content = base + threatSuffix
         val openPending = detailPendingIntent(info.requestId)
         val allowPending = actionPendingIntent(
             FirewallPromptActionReceiver.ACTION_ALLOW,
@@ -174,11 +187,5 @@ internal class FirewallPromptNotifier(
         private const val REQUEST_OPEN = 4301
         private const val REQUEST_ALLOW = 4302
         private const val REQUEST_DENY = 4303
-
-        fun threatEmoji(category: DomainThreatCategory): String = when (category) {
-            DomainThreatCategory.NONE -> "🟢"
-            DomainThreatCategory.TRACKING -> "🟠"
-            DomainThreatCategory.MALWARE -> "🔴"
-        }
     }
 }

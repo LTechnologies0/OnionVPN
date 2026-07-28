@@ -35,7 +35,10 @@ data class FirewallRule(
     val uid: Int,
     val packageName: String,
     val appLabel: String,
-    /** Empty = any destination host/IP. */
+    /**
+     * Match key: destination IP (packet path) or empty = any destination.
+     * Hostname is stored separately in [displayHost] for UI only.
+     */
     val destHost: String = "",
     /** -1 = any port. */
     val destPort: Int = -1,
@@ -45,6 +48,8 @@ data class FirewallRule(
     val scope: FirewallRuleScope,
     val expiresAtEpochMs: Long? = null,
     val createdAtEpochMs: Long = System.currentTimeMillis(),
+    /** DNS hostname at decision time (display only; matching uses [destHost]/IP). */
+    val displayHost: String = "",
 ) {
     fun isExpired(nowMs: Long = System.currentTimeMillis()): Boolean {
         if (scope == FirewallRuleScope.TEMPORARY) {
@@ -117,4 +122,7 @@ data class FirewallJournalEntry(
     val note: String = "",
     val destHost: String? = null,
     val threatCategory: DomainThreatCategory = DomainThreatCategory.NONE,
-)
+) {
+    /** Prefer hostname for display; fall back to IP. */
+    fun displayDestination(): String = destHost?.takeIf { it.isNotBlank() } ?: destIp
+}

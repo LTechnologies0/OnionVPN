@@ -16,7 +16,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.graphics.Color
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -29,9 +28,8 @@ import ltechnologies.onionphone.onionvpn.core.model.FirewallVerdict
 import ltechnologies.onionphone.onionvpn.core.model.TunnelPreferences
 import ltechnologies.onionphone.onionvpn.firewall.FirewallPromptContent
 import ltechnologies.onionphone.onionvpn.firewall.InteractiveFirewallEngine
-
-private val ThreatOrange = Color(0xFFE65100)
-private val ThreatRed = Color(0xFFC62828)
+import ltechnologies.onionphone.onionvpn.firewall.threatLabelOrNull
+import ltechnologies.onionphone.onionvpn.firewall.threatTextColor
 
 @Composable
 fun FirewallScreen(
@@ -116,9 +114,16 @@ private fun RuleRow(rule: FirewallRule, onDelete: () -> Unit) {
     ) {
         Column(modifier = Modifier.weight(1f)) {
             Text(
-                "${rule.appLabel} → ${destLabel(rule)}",
+                "${rule.appLabel} → ${ruleDisplayDest(rule)}",
                 style = MaterialTheme.typography.bodyMedium,
             )
+            if (rule.displayHost.isNotBlank()) {
+                Text(
+                    "IP ${rule.destHost.ifEmpty { "*" }}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
             Text(
                 "${verdictLabel(rule.verdict)} · ${scopeLabel(rule)}",
                 style = MaterialTheme.typography.labelSmall,
@@ -137,6 +142,11 @@ private fun RuleRow(rule: FirewallRule, onDelete: () -> Unit) {
 private fun JournalRow(entry: FirewallJournalEntry) {
     val time = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
         .format(Date(entry.timestampEpochMs))
+    val threatLabel = threatLabelOrNull(entry.threatCategory)
+    val destColor = when (entry.threatCategory) {
+        DomainThreatCategory.NONE -> MaterialTheme.colorScheme.onSurfaceVariant
+        else -> threatTextColor(entry.threatCategory)
+    }
     Column(modifier = Modifier.fillMaxWidth()) {
         Text(
             "$time  ${verdictLabel(entry.verdict)}  ${entry.appLabel}",
@@ -148,23 +158,37 @@ private fun JournalRow(entry: FirewallJournalEntry) {
             },
         )
         Text(
-            "${entry.protocolLabel} ${journalDest(entry)}:${entry.destPort}" +
-                if (entry.note.isNotBlank()) " · ${entry.note}" else "",
-            style = MaterialTheme.typography.bodySmall,
-            color = when (entry.threatCategory) {
-                DomainThreatCategory.MALWARE -> ThreatRed
-                DomainThreatCategory.TRACKING -> ThreatOrange
-                DomainThreatCategory.NONE -> MaterialTheme.colorScheme.onSurfaceVariant
+            buildString {
+                append(entry.protocolLabel)
+                append(' ')
+                append(entry.displayDestination())
+                append(':')
+                append(entry.destPort)
+                if (threatLabel != null) {
+                    append(" · ")
+                    append(threatLabel)
+                }
+                if (entry.note.isNotBlank()) {
+                    append(" · ")
+                    append(entry.note)
+                }
             },
+            style = MaterialTheme.typography.bodySmall,
+            color = destColor,
         )
+        if (!entry.destHost.isNullOrBlank()) {
+            Text(
+                "IP ${entry.destIp}",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
     }
 }
 
-private fun journalDest(entry: FirewallJournalEntry): String =
-    entry.destHost?.takeIf { it.isNotBlank() } ?: entry.destIp
-
-private fun destLabel(rule: FirewallRule): String {
-    val host = rule.destHost.ifEmpty { "*" }
+/** Hostname primary when known; match key (IP) otherwise — same pattern as prompts. */
+private fun ruleDisplayDest(rule: FirewallRule): String {
+    val host = rule.displayHost.ifBlank { rule.destHost.ifEmpty { "*" } }
     val port = if (rule.destPort < 0) "*" else rule.destPort.toString()
     return "$host:$port"
 }

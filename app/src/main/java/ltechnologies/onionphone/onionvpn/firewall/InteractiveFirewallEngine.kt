@@ -294,12 +294,14 @@ class InteractiveFirewallEngine @Inject constructor(
             uid = answered.request.uid,
             packageName = answered.request.packageName,
             appLabel = answered.request.appLabel,
+            // Match key stays the packet IP; hostname is display-only.
             destHost = answered.request.destIp,
             destPort = answered.request.destPort,
             protocol = answered.request.protocol,
             verdict = verdict,
             scope = ruleScope,
             expiresAtEpochMs = expires,
+            displayHost = answered.request.destHost.orEmpty(),
         )
         scope.launch { rulesStore.upsert(rule) }
         rules.updateAndGet { list ->

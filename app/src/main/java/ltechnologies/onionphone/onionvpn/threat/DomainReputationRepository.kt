@@ -65,9 +65,19 @@ class DomainReputationRepository @Inject constructor(
         scope.launch { update() }
     }
 
-    /** Called when Tor becomes ready so the next refresh can use probe SOCKS. */
+    /**
+     * Prefer a Tor-backed refresh when probe SOCKS appears.
+     * If the last success was clearnet (or never via Tor), refresh immediately.
+     */
     fun onTorReady() {
-        scope.launch { maybeAutoUpdate() }
+        scope.launch {
+            val st = _status.value
+            if (!st.lastViaTor) {
+                update()
+            } else {
+                maybeAutoUpdate()
+            }
+        }
     }
 
     private suspend fun maybeAutoUpdate() {
@@ -83,6 +93,8 @@ class DomainReputationRepository @Inject constructor(
         val trackingOk = index.loadTrackingFrom(File(dir, TRACKING_FILE))
         val meta = File(dir, META_FILE)
         val lastSuccess = meta.takeIf { it.isFile }?.readText()?.toLongOrNull() ?: 0L
+        val lastViaTor = File(dir, VIA_TOR_FILE).takeIf { it.isFile }
+            ?.readText()?.trim() == "1"
         _status.value = DomainReputationStatus(
             malwareEntries = index.malwareCount(),
             trackingEntries = index.trackingCount(),
@@ -90,6 +102,7 @@ class DomainReputationRepository @Inject constructor(
             lastError = null,
             updating = false,
             loadedFromCache = malwareOk || trackingOk,
+            lastViaTor = lastViaTor,
         )
     }
 
@@ -100,9 +113,11 @@ class DomainReputationRepository @Inject constructor(
             val result = runCatching {
                 withContext(Dispatchers.IO) { downloadAndSwap() }
             }
-            result.onSuccess {
+            result.onSuccess { viaTor ->
                 val now = System.currentTimeMillis()
-                File(listDir(), META_FILE).writeText(now.toString())
+                val dir = listDir()
+                File(dir, META_FILE).writeText(now.toString())
+                File(dir, VIA_TOR_FILE).writeText(if (viaTor) "1" else "0")
                 _status.value = DomainReputationStatus(
                     malwareEntries = index.malwareCount(),
                     trackingEntries = index.trackingCount(),
@@ -110,11 +125,13 @@ class DomainReputationRepository @Inject constructor(
                     lastError = null,
                     updating = false,
                     loadedFromCache = true,
+                    lastViaTor = viaTor,
                 )
                 Timber.i(
-                    "Domain reputation updated malware=%d tracking=%d",
+                    "Domain reputation updated malware=%d tracking=%d viaTor=%s",
                     index.malwareCount(),
                     index.trackingCount(),
+                    viaTor,
                 )
             }.onFailure { error ->
                 Timber.w(error, "Domain reputation update failed")
@@ -126,9 +143,11 @@ class DomainReputationRepository @Inject constructor(
         }
     }
 
-    private fun downloadAndSwap() {
+    /** @return true when the download used Tor probe SOCKS. */
+    private fun downloadAndSwap(): Boolean {
         val dir = listDir()
-        val client = buildClient()
+        val transport = buildClient()
+        val client = transport.client
         try {
             val malwareTmp = File(dir, "$MALWARE_FILE.tmp")
             val trackingTmp = File(dir, "$TRACKING_FILE.tmp")
@@ -179,6 +198,7 @@ class DomainReputationRepository @Inject constructor(
 
             if (malwareSet.isNotEmpty()) index.replaceMalware(malwareSet)
             if (trackingSet.isNotEmpty()) index.replaceTracking(trackingSet)
+            return transport.viaTor
         } finally {
             client.dispatcher.executorService.shutdown()
             client.connectionPool.evictAll()
@@ -219,7 +239,9 @@ class DomainReputationRepository @Inject constructor(
         }
     }
 
-    private fun buildClient(): OkHttpClient {
+    private data class HttpTransport(val client: OkHttpClient, val viaTor: Boolean)
+
+    private fun buildClient(): HttpTransport {
         val builder = OkHttpClient.Builder()
             .connectTimeout(60, TimeUnit.SECONDS)
             .readTimeout(120, TimeUnit.SECONDS)
@@ -234,10 +256,10 @@ class DomainReputationRepository @Inject constructor(
             )
             builder.proxy(proxy)
             Timber.i("Domain reputation download via Tor probe SOCKS :%d", probePort)
-        } else {
-            Timber.i("Domain reputation download via direct HTTPS (Tor not ready)")
+            return HttpTransport(builder.build(), viaTor = true)
         }
-        return builder.build()
+        Timber.i("Domain reputation download via direct HTTPS (Tor not ready)")
+        return HttpTransport(builder.build(), viaTor = false)
     }
 
     private fun listDir(): File =
@@ -247,6 +269,7 @@ class DomainReputationRepository @Inject constructor(
         private const val MALWARE_FILE = "hagezi-tif-mini.txt"
         private const val TRACKING_FILE = "hagezi-tracking.txt"
         private const val META_FILE = "last-success.txt"
+        private const val VIA_TOR_FILE = "last-via-tor.txt"
         /** HaGeZi lists expire ~12h–1d; refresh daily. */
         private const val REFRESH_INTERVAL_MS = 24L * 60L * 60L * 1000L
 
@@ -285,4 +308,6 @@ data class DomainReputationStatus(
     val lastError: String? = null,
     val updating: Boolean = false,
     val loadedFromCache: Boolean = false,
+    /** True when the last successful download used Tor probe SOCKS. */
+    val lastViaTor: Boolean = false,
 )
