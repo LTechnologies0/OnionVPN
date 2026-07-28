@@ -28,11 +28,11 @@ class DnsCryptConfigWriterTest {
     }
 
     @Test
-    fun blockedNamesCoverCaptiveAndDoh() {
-        val names = DnsCryptConfigWriter.blockedNamesFileContent()
-        assertTrue(names.contains("connectivitycheck.gstatic.com"))
-        assertTrue(names.contains("captive.apple.com"))
-        assertTrue(names.contains("dns.google"))
-        assertTrue(names.contains("cloudflare-dns.com"))
+    fun knownServerStampsAreDistinct() {
+        val stamps = DnsCryptConfigWriter.knownServers.values.toSet()
+        assertTrue(stamps.size == DnsCryptConfigWriter.knownServers.size)
+        assertTrue(DnsCryptConfigWriter.stampFor("cloudflare") != DnsCryptConfigWriter.stampFor("adguard"))
+        assertTrue(DnsCryptConfigWriter.stampFor("quad9") != DnsCryptConfigWriter.stampFor("adguard"))
+        assertTrue(DnsCryptConfigWriter.stampFor("cloudflare").startsWith("sdns://"))
     }
 }

@@ -22,7 +22,7 @@ enum class FirewallRuleScope {
 
 /**
  * Least-privilege default when interactive firewall is on and no rule matches.
- * ASK prompts the user; timeout falls back to DENY.
+ * ASK queues a prompt until the user answers (no timeout).
  */
 enum class FirewallDefaultAction {
     ASK,

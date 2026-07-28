@@ -93,7 +93,9 @@ internal class TorControlTransport(
             }
             synchronized(replyLock) {
                 replyError?.let { throw it }
-                return replyBuffer?.toList() ?: emptyList()
+                val lines = replyBuffer?.toList() ?: emptyList()
+                replyBuffer = null
+                return lines
             }
         }
     }
@@ -117,6 +119,7 @@ internal class TorControlTransport(
             replyError = error
             replyLatch?.countDown()
             replyLatch = null
+            replyBuffer = null
         }
     }
 
@@ -131,6 +134,13 @@ internal class TorControlTransport(
                     }
                     synchronized(replyLock) {
                         val buf = replyBuffer ?: return@synchronized
+                        if (buf.size >= MAX_REPLY_LINES) {
+                            replyError = IOException("control reply exceeded $MAX_REPLY_LINES lines")
+                            replyLatch?.countDown()
+                            replyLatch = null
+                            replyBuffer = null
+                            return@synchronized
+                        }
                         buf.add(line)
                         val terminal = line.startsWith("250 ") ||
                             line.startsWith("251 ") ||
@@ -144,8 +154,13 @@ internal class TorControlTransport(
                         }
                     }
                 }
-            } catch (_: Exception) {
-                if (running.get()) Timber.w("Tor control reader stopped")
+            } catch (error: Exception) {
+                if (running.get()) {
+                    Timber.w(error, "Tor control reader stopped")
+                    runCatching {
+                        onAsyncPayload("NOTICE ERR control reader: ${error.javaClass.simpleName}: ${error.message}")
+                    }
+                }
             } finally {
                 running.set(false)
                 onReaderEnded()
@@ -155,5 +170,10 @@ internal class TorControlTransport(
             isDaemon = true
             start()
         }
+    }
+
+    companion object {
+        /** Cap multiline GETINFO bodies so a hostile/buggy Tor cannot OOM the app. */
+        private const val MAX_REPLY_LINES = 8_192
     }
 }

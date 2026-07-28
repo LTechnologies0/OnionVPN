@@ -1,24 +1,25 @@
 package ltechnologies.onionphone.onionvpn.firewall
 
 import android.content.Context
-import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Handler
 import android.os.Looper
 import dagger.hilt.android.qualifiers.ApplicationContext
+import java.util.ArrayDeque
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import ltechnologies.onionphone.onionvpn.core.model.FirewallConnectionInfo
 import ltechnologies.onionphone.onionvpn.core.model.FirewallDefaultAction
@@ -35,13 +36,14 @@ import ltechnologies.onionphone.onionvpn.prefs.TunnelPreferencesStore
 import timber.log.Timber
 
 /**
- * Interactive OpenSnitch-style firewall engine (app layer).
+ * Interactive OpenSnitch-style firewall (app layer).
  *
- * Wired into [ltechnologies.onionphone.onionvpn.core.vpn.firewall.FirewallBridge] so
- * [ltechnologies.onionphone.onionvpn.core.vpn.forwarder.TunDnsMux] can ask allow/deny
- * without depending on the app module at compile time.
+ * Prompt model:
+ * - FIFO queue, one visible prompt at a time
+ * - No timeouts — wait until the user answers (or session clears)
+ * - Packets for a queued/active key are dropped until a verdict exists
  *
- * Decision pipeline: cache → permanent/session rules → default ASK/DENY/ALLOW → prompt.
+ * Decision pipeline: flow cache → rules → decision cache → ASK/DENY/ALLOW.
  */
 @Singleton
 class InteractiveFirewallEngine @Inject constructor(
@@ -53,16 +55,24 @@ class InteractiveFirewallEngine @Inject constructor(
     private val ownerResolver = ConnectionOwnerResolver(context)
     private val mainHandler = Handler(Looper.getMainLooper())
     private val ownUid = android.os.Process.myUid()
+    private val promptNotifier = FirewallPromptNotifier(context)
 
     private val preferences = AtomicReference(TunnelPreferences())
     private val rules = AtomicReference<List<FirewallRule>>(emptyList())
 
-    /** Flow key → last known allow/deny for established flows (session cache). */
     private val flowCache = ConcurrentHashMap<String, FirewallVerdict>()
-    /** uid|dst|port|proto → verdict (survives ephemeral local ports). */
     private val decisionCache = ConcurrentHashMap<String, FirewallVerdict>()
-    /** Rule key (uid|host|port|proto) currently waiting for user. */
-    private val pending = ConcurrentHashMap<String, PendingPrompt>()
+    /** UID → label cache (PackageManager is slow; bound size for DoS). */
+    private val appCache = ConcurrentHashMap<Int, AppIdentity>()
+
+    /** ruleKey → queued or active prompt (dedupe). */
+    private val pendingByKey = ConcurrentHashMap<String, QueuedPrompt>()
+
+    /** FIFO of ruleKeys waiting to be shown (active is NOT in this deque). */
+    private val waitQueue = ArrayDeque<String>()
+    private val queueLock = Any()
+
+    @Volatile private var active: QueuedPrompt? = null
 
     private val _journal = MutableStateFlow<List<FirewallJournalEntry>>(emptyList())
     val journal: StateFlow<List<FirewallJournalEntry>> = _journal.asStateFlow()
@@ -70,10 +80,28 @@ class InteractiveFirewallEngine @Inject constructor(
     private val _pendingPrompt = MutableStateFlow<FirewallConnectionInfo?>(null)
     val pendingPrompt: StateFlow<FirewallConnectionInfo?> = _pendingPrompt.asStateFlow()
 
+    private val _queueDepth = MutableStateFlow(0)
+    val queueDepth: StateFlow<Int> = _queueDepth.asStateFlow()
+
+    /** Off-hot-path journal writer — never blocks TUN; drops under flood. */
+    private val journalChannel = Channel<FirewallJournalEntry>(
+        capacity = JOURNAL_CHANNEL_CAP,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST,
+    )
+
     fun start() {
+        promptNotifier.ensureChannel()
+        scope.launch {
+            for (entry in journalChannel) {
+                _journal.updateAndGet { list -> (listOf(entry) + list).take(MAX_JOURNAL) }
+                runCatching { rulesStore.appendJournal(entry) }
+            }
+        }
         scope.launch {
             rulesStore.load()
             _journal.value = rulesStore.persistedJournal.value
+            // Seed prefs before first packet so firewallEnabled isn't stuck on default false.
+            runCatching { preferences.set(preferencesStore.preferences.first()) }
             preferencesStore.preferences.collect { preferences.set(it) }
         }
         scope.launch {
@@ -89,9 +117,15 @@ class InteractiveFirewallEngine @Inject constructor(
         }
         flowCache.clear()
         decisionCache.clear()
-        pending.values.forEach { it.complete(FirewallVerdict.DENY, timedOut = true) }
-        pending.clear()
-        _pendingPrompt.value = null
+        appCache.clear()
+        synchronized(queueLock) {
+            waitQueue.clear()
+            pendingByKey.clear()
+            active = null
+            _pendingPrompt.value = null
+            publishQueueDepthLocked()
+        }
+        promptNotifier.cancel()
     }
 
     override fun allowOutbound(packet: ByteArray, length: Int): Boolean {
@@ -99,19 +133,21 @@ class InteractiveFirewallEngine @Inject constructor(
         if (!prefs.firewallEnabled) return true
 
         val info = IpPacketParser.parse(packet, length) ?: return true
-        // Only gate new TCP SYNs and UDP datagrams; allow mid-flow TCP.
         val flowKey = flowKey(info)
         flowCache[flowKey]?.let { return it == FirewallVerdict.ALLOW }
 
+        // Mid-flow TCP (ACK/data) never gated — only SYN opens a decision.
         if (info.isTcp && !info.isTcpSyn) {
             return true
         }
 
         val uid = ownerResolver.resolveUid(info)
-        if (uid == ownUid || uid == android.os.Process.SYSTEM_UID) {
+        if (uid == ownUid) {
             return true
         }
-        // Unknown owner: still prompt/deny based on default — use uid=-1 bucket.
+        // Do not blanket-allow SYSTEM_UID: many OEM services share 1000 and still need a rule
+        // when the user wants least privilege. Unknown uid still goes through ASK/DENY/ALLOW.
+
         val effectiveUid = if (uid < 0) UNKNOWN_UID else uid
         val app = resolveApp(effectiveUid)
 
@@ -121,11 +157,15 @@ class InteractiveFirewallEngine @Inject constructor(
             return matching.verdict == FirewallVerdict.ALLOW
         }
 
-        // Collapse ephemeral-port spam (esp. UDP) onto uid|dst|port|proto.
         val rk = ruleKey(effectiveUid, info.dstIp, info.dstPort, info.protocol)
         decisionCache[rk]?.let { v ->
             rememberFlow(flowKey, v)
             return v == FirewallVerdict.ALLOW
+        }
+
+        // Already waiting on this key — keep dropping until answered.
+        if (pendingByKey.containsKey(rk)) {
+            return false
         }
 
         return when (prefs.firewallDefaultAction) {
@@ -145,26 +185,21 @@ class InteractiveFirewallEngine @Inject constructor(
                 )
                 false
             }
-            FirewallDefaultAction.ASK -> askUserNonBlocking(effectiveUid, app, info, flowKey, prefs)
+            FirewallDefaultAction.ASK -> enqueuePrompt(effectiveUid, app, info, flowKey, rk)
         }
     }
 
     /**
-     * Never block the TUN thread. Drop until the user answers; TCP SYN retransmits
-     * after an allow rule is stored.
+     * Enqueue a prompt (FIFO). No timeout — stays until [answerPrompt] or [clearSessionRules].
+     * Returns false (drop packet) always for ASK until a later SYN hits a cached ALLOW.
      */
-    private fun askUserNonBlocking(
+    private fun enqueuePrompt(
         uid: Int,
         app: AppIdentity,
         info: IpPacketInfo,
         flowKey: String,
-        prefs: TunnelPreferences,
+        ruleKey: String,
     ): Boolean {
-        val ruleKey = ruleKey(uid, info.dstIp, info.dstPort, info.protocol)
-        if (pending.containsKey(ruleKey)) {
-            return false
-        }
-
         val request = FirewallConnectionInfo(
             requestId = UUID.randomUUID().toString(),
             uid = uid,
@@ -175,95 +210,90 @@ class InteractiveFirewallEngine @Inject constructor(
             protocol = info.protocol,
             protocolLabel = IpPacketParser.protocolLabel(info.protocol),
         )
-        val prompt = PendingPrompt(request)
-        if (pending.putIfAbsent(ruleKey, prompt) != null) {
-            return false
-        }
-        _pendingPrompt.value = request
-        launchPromptActivity()
-
-        val timeoutSec = prefs.firewallPromptTimeoutSec.coerceIn(5, 120)
-        scope.launch {
-            val verdict = prompt.await(timeoutSec)
-            pending.remove(ruleKey, prompt)
-            if (_pendingPrompt.value?.requestId == request.requestId) {
-                _pendingPrompt.value = null
+        val queued = QueuedPrompt(request, flowKey, app, ruleKey)
+        synchronized(queueLock) {
+            if (pendingByKey.putIfAbsent(ruleKey, queued) != null) {
+                return false
             }
-            if (prompt.timedOut) {
-                // Auto-deny on timeout so retransmits don't re-prompt forever.
-                val denyRule = FirewallRule(
-                    id = UUID.randomUUID().toString(),
-                    uid = uid,
-                    packageName = app.packageName,
-                    appLabel = app.label,
-                    destHost = info.dstIp,
-                    destPort = info.dstPort,
-                    protocol = info.protocol,
-                    verdict = FirewallVerdict.DENY,
-                    scope = FirewallRuleScope.TEMPORARY,
-                    expiresAtEpochMs = System.currentTimeMillis() +
-                        prefs.firewallTempMinutes.coerceIn(1, 1440) * 60_000L,
-                )
-                rules.updateAndGet { list ->
-                    list.filterNot {
-                        it.uid == denyRule.uid &&
-                            it.destHost == denyRule.destHost &&
-                            it.destPort == denyRule.destPort &&
-                            it.protocol == denyRule.protocol
-                    } + denyRule
-                }
-                rulesStore.upsert(denyRule)
+            if (waitQueue.size >= MAX_QUEUE) {
+                pendingByKey.remove(ruleKey, queued)
+                Timber.w("Firewall prompt queue full (%d) — dropping %s", MAX_QUEUE, ruleKey)
                 appendJournal(
                     uid = uid,
                     app = app,
                     info = info,
                     verdict = FirewallVerdict.DENY,
-                    scope = FirewallRuleScope.TEMPORARY,
-                    note = "prompt timeout → deny",
+                    scope = FirewallRuleScope.SESSION,
+                    note = "queue full — drop (no sticky rule)",
                 )
+                return false
             }
-            rememberFlow(flowKey, verdict)
-            decisionCache[ruleKey] = verdict
+            waitQueue.addLast(ruleKey)
+            publishQueueDepthLocked()
+            promoteLocked()
         }
         return false
+    }
+
+    /** Must hold [queueLock]. */
+    private fun promoteLocked() {
+        if (active != null) return
+        while (waitQueue.isNotEmpty()) {
+            val key = waitQueue.removeFirst()
+            val next = pendingByKey[key] ?: continue
+            active = next
+            _pendingPrompt.value = next.request
+            publishQueueDepthLocked()
+            val shown = next.request
+            mainHandler.post { promptNotifier.show(shown) }
+            return
+        }
+        publishQueueDepthLocked()
     }
 
     fun answerPrompt(
         requestId: String,
         verdict: FirewallVerdict,
-        temporary: Boolean,
+        ruleScope: FirewallRuleScope,
     ) {
         val prefs = preferences.get()
-        val current = _pendingPrompt.value
-        if (current == null || current.requestId != requestId) {
-            Timber.w("Stale firewall prompt answer id=$requestId")
-            return
+        val answered: QueuedPrompt
+        synchronized(queueLock) {
+            val current = active
+            if (current == null || current.request.requestId != requestId) {
+                Timber.w("Stale firewall prompt answer id=$requestId")
+                return
+            }
+            answered = current
+            pendingByKey.remove(answered.ruleKey, answered)
+            active = null
+            _pendingPrompt.value = null
+            publishQueueDepthLocked()
         }
-        val ruleKey = ruleKey(current.uid, current.destIp, current.destPort, current.protocol)
-        val pendingPrompt = pending.remove(ruleKey) ?: return
+        // Cancel current notification before promoting the next head of queue.
+        promptNotifier.cancel()
+        synchronized(queueLock) {
+            promoteLocked()
+        }
 
-        val ruleScope = if (temporary) FirewallRuleScope.TEMPORARY else FirewallRuleScope.PERMANENT
-        val expires = if (temporary) {
+        val expires = if (ruleScope == FirewallRuleScope.TEMPORARY) {
             System.currentTimeMillis() + prefs.firewallTempMinutes.coerceIn(1, 1440) * 60_000L
         } else {
             null
         }
         val rule = FirewallRule(
             id = UUID.randomUUID().toString(),
-            uid = current.uid,
-            packageName = current.packageName,
-            appLabel = current.appLabel,
-            destHost = current.destIp,
-            destPort = current.destPort,
-            protocol = current.protocol,
+            uid = answered.request.uid,
+            packageName = answered.request.packageName,
+            appLabel = answered.request.appLabel,
+            destHost = answered.request.destIp,
+            destPort = answered.request.destPort,
+            protocol = answered.request.protocol,
             verdict = verdict,
             scope = ruleScope,
             expiresAtEpochMs = expires,
         )
-        this.scope.launch {
-            rulesStore.upsert(rule)
-        }
-        // Also keep in-memory immediately for hot path.
+        scope.launch { rulesStore.upsert(rule) }
         rules.updateAndGet { list ->
             list.filterNot {
                 it.uid == rule.uid &&
@@ -272,26 +302,28 @@ class InteractiveFirewallEngine @Inject constructor(
                     it.protocol == rule.protocol
             } + rule
         }
-
+        rememberDecision(answered.ruleKey, answered.flowKey, verdict)
+        val note = when (ruleScope) {
+            FirewallRuleScope.TEMPORARY -> "temporary ${prefs.firewallTempMinutes}m"
+            FirewallRuleScope.SESSION -> "until VPN stops"
+            FirewallRuleScope.PERMANENT -> "permanent"
+        }
         appendJournal(
-            uid = current.uid,
-            app = AppIdentity(current.packageName, current.appLabel),
-            destIp = current.destIp,
-            destPort = current.destPort,
-            protocolLabel = current.protocolLabel,
+            uid = answered.request.uid,
+            app = answered.app,
+            destIp = answered.request.destIp,
+            destPort = answered.request.destPort,
+            protocolLabel = answered.request.protocolLabel,
             verdict = verdict,
-            scope = ruleScope,
-            note = if (temporary) "temporary ${prefs.firewallTempMinutes}m" else "permanent",
+            ruleScope = ruleScope,
+            note = note,
         )
-
-        _pendingPrompt.value = null
-        decisionCache[ruleKey] = verdict
-        pendingPrompt.complete(verdict, timedOut = false)
     }
 
     fun deleteRule(id: String) {
         scope.launch { rulesStore.remove(id) }
         rules.updateAndGet { it.filterNot { r -> r.id == id } }
+        // Only wipe caches for the deleted rule's identity if we can; otherwise clear all.
         flowCache.clear()
         decisionCache.clear()
     }
@@ -300,9 +332,7 @@ class InteractiveFirewallEngine @Inject constructor(
 
     private fun findRule(uid: Int, info: IpPacketInfo): FirewallRule? {
         val now = System.currentTimeMillis()
-        val list = rules.get()
-        // Prefer most specific: exact host+port+proto, then host+any port, then uid-wide.
-        return list
+        return rules.get()
             .filter { !it.isExpired(now) && it.matches(uid, info.dstIp, info.dstPort, info.protocol) }
             .maxWithOrNull(
                 compareBy(
@@ -317,39 +347,52 @@ class InteractiveFirewallEngine @Inject constructor(
     private fun rememberDecision(ruleKey: String, flowKey: String, verdict: FirewallVerdict) {
         decisionCache[ruleKey] = verdict
         rememberFlow(flowKey, verdict)
-        if (decisionCache.size > 4_000) {
-            decisionCache.clear()
-        }
+        trimDecisionCache()
     }
 
     private fun rememberFlow(flowKey: String, verdict: FirewallVerdict) {
         flowCache[flowKey] = verdict
-        if (flowCache.size > 8_000) {
-            flowCache.clear()
+        if (flowCache.size > MAX_FLOW_CACHE) {
+            // Drop arbitrary half — avoids total wipe that races mid-session.
+            var n = 0
+            val it = flowCache.keys.iterator()
+            while (it.hasNext() && n < MAX_FLOW_CACHE / 2) {
+                it.next()
+                it.remove()
+                n++
+            }
         }
     }
 
-    private fun launchPromptActivity() {
-        mainHandler.post {
-            try {
-                val intent = Intent(context, FirewallPromptActivity::class.java).apply {
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-                }
-                context.startActivity(intent)
-            } catch (error: Exception) {
-                Timber.e(error, "Failed to launch firewall prompt")
+    private fun trimDecisionCache() {
+        if (decisionCache.size <= MAX_DECISION_CACHE) return
+        var n = 0
+        val it = decisionCache.keys.iterator()
+        while (it.hasNext() && n < MAX_DECISION_CACHE / 2) {
+            val k = it.next()
+            if (!pendingByKey.containsKey(k)) {
+                it.remove()
+                n++
             }
         }
+    }
+
+    private fun publishQueueDepthLocked() {
+        val depth = waitQueue.size + if (active != null) 1 else 0
+        _queueDepth.value = depth
     }
 
     private fun resolveApp(uid: Int): AppIdentity {
         if (uid == UNKNOWN_UID) {
             return AppIdentity("unknown", "Unknown app")
         }
-        return try {
+        appCache[uid]?.let { return it }
+        val resolved = try {
             val pm = context.packageManager
             val packages = pm.getPackagesForUid(uid)
-            val pkg = packages?.firstOrNull() ?: "uid:$uid"
+            val pkg = packages?.firstOrNull()
+                ?: pm.getNameForUid(uid)?.substringBefore(':')
+                ?: "uid:$uid"
             val label = try {
                 val ai = pm.getApplicationInfo(pkg, 0)
                 pm.getApplicationLabel(ai).toString()
@@ -360,6 +403,17 @@ class InteractiveFirewallEngine @Inject constructor(
         } catch (_: Exception) {
             AppIdentity("uid:$uid", "UID $uid")
         }
+        if (appCache.size >= MAX_APP_CACHE) {
+            var n = 0
+            val it = appCache.keys.iterator()
+            while (it.hasNext() && n < MAX_APP_CACHE / 2) {
+                it.next()
+                it.remove()
+                n++
+            }
+        }
+        appCache[uid] = resolved
+        return resolved
     }
 
     private fun appendJournal(
@@ -377,7 +431,7 @@ class InteractiveFirewallEngine @Inject constructor(
             destPort = info.dstPort,
             protocolLabel = IpPacketParser.protocolLabel(info.protocol),
             verdict = verdict,
-            scope = scope,
+            ruleScope = scope,
             note = note,
         )
     }
@@ -389,7 +443,7 @@ class InteractiveFirewallEngine @Inject constructor(
         destPort: Int,
         protocolLabel: String,
         verdict: FirewallVerdict,
-        scope: FirewallRuleScope,
+        ruleScope: FirewallRuleScope,
         note: String,
     ) {
         val entry = FirewallJournalEntry(
@@ -402,13 +456,11 @@ class InteractiveFirewallEngine @Inject constructor(
             destPort = destPort,
             protocolLabel = protocolLabel,
             verdict = verdict,
-            scope = scope,
+            scope = ruleScope,
             note = note,
         )
-        _journal.updateAndGet { list ->
-            (listOf(entry) + list).take(MAX_JOURNAL)
-        }
-        this.scope.launch { rulesStore.appendJournal(entry) }
+        // Non-blocking: DROP_OLDEST if journal writer is behind (TUN must never wait).
+        journalChannel.trySend(entry)
     }
 
     private fun flowKey(info: IpPacketInfo): String =
@@ -419,30 +471,21 @@ class InteractiveFirewallEngine @Inject constructor(
 
     private data class AppIdentity(val packageName: String, val label: String)
 
-    private class PendingPrompt(val request: FirewallConnectionInfo) {
-        private val latch = CountDownLatch(1)
-        @Volatile var verdict: FirewallVerdict = FirewallVerdict.DENY
-        @Volatile var timedOut: Boolean = false
-
-        fun await(timeoutSec: Int): FirewallVerdict {
-            val ok = latch.await(timeoutSec.toLong(), TimeUnit.SECONDS)
-            if (!ok) {
-                timedOut = true
-                verdict = FirewallVerdict.DENY
-            }
-            return verdict
-        }
-
-        fun complete(verdict: FirewallVerdict, timedOut: Boolean) {
-            this.verdict = verdict
-            this.timedOut = timedOut
-            latch.countDown()
-        }
-    }
+    private class QueuedPrompt(
+        val request: FirewallConnectionInfo,
+        val flowKey: String,
+        val app: AppIdentity,
+        val ruleKey: String,
+    )
 
     companion object {
         private const val UNKNOWN_UID = -1
         private const val MAX_JOURNAL = 200
+        private const val JOURNAL_CHANNEL_CAP = 64
+        private const val MAX_QUEUE = 64
+        private const val MAX_FLOW_CACHE = 8_000
+        private const val MAX_DECISION_CACHE = 4_000
+        private const val MAX_APP_CACHE = 512
     }
 }
 

@@ -1,16 +1,23 @@
 package ltechnologies.onionphone.onionvpn.core.dnscrypt.lifecycle
 
+import java.net.ConnectException
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
 import java.net.InetSocketAddress
+import java.net.PortUnreachableException
 import java.net.Socket
+import java.net.SocketTimeoutException
 import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
+import timber.log.Timber
 
 /**
  * Package `lifecycle` — local DNSCrypt listener / upstream readiness probes (no process spawn).
  *
  * Used by [ltechnologies.onionphone.onionvpn.core.dnscrypt.DnsCryptProcessManager] steps 4–5.
+ *
+ * Probe failures are classified in logs (timeout vs refused vs unreachable) so start
+ * timeouts can explain *why* the stub was not ready.
  */
 internal object DnsCryptReadiness {
     /** TCP connect to loopback stub. */
@@ -19,7 +26,8 @@ internal object DnsCryptReadiness {
             socket.connect(InetSocketAddress(TunnelEndpoints.LOOPBACK, port), 1_000)
         }
         true
-    } catch (_: Exception) {
+    } catch (error: Exception) {
+        logProbe("tcp", port, error)
         false
     }
 
@@ -40,7 +48,8 @@ internal object DnsCryptReadiness {
             socket.receive(response)
             response.length > 0
         }
-    } catch (_: Exception) {
+    } catch (error: Exception) {
+        logProbe("udp-listen", port, error)
         false
     }
 
@@ -65,7 +74,8 @@ internal object DnsCryptReadiness {
                 (response.data[3].toInt() and 0x0f) == 0 &&
                 (((response.data[6].toInt() and 0xff) shl 8) or (response.data[7].toInt() and 0xff)) > 0
         }
-    } catch (_: Exception) {
+    } catch (error: Exception) {
+        logProbe("udp-upstream", port, error)
         false
     }
 
@@ -79,6 +89,16 @@ internal object DnsCryptReadiness {
         val server = line.contains("live servers:") ||
             (line.contains("[NOTICE]") && line.contains("OK") && line.contains("ms"))
         return listener to server
+    }
+
+    private fun logProbe(kind: String, port: Int, error: Exception) {
+        val label = when (error) {
+            is SocketTimeoutException -> "timeout"
+            is ConnectException -> "refused"
+            is PortUnreachableException -> "port-unreachable"
+            else -> error.javaClass.simpleName
+        }
+        Timber.d("DNSCrypt probe %s:%d → %s (%s)", kind, port, label, error.message)
     }
 
     private fun exampleComQuery(id: Int): ByteArray = byteArrayOf(

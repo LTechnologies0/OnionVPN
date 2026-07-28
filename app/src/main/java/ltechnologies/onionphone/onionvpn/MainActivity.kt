@@ -15,7 +15,6 @@ import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material3.Icon
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
@@ -35,6 +34,7 @@ import ltechnologies.onionphone.onionvpn.ui.FirewallScreen
 import ltechnologies.onionphone.onionvpn.ui.LogsScreen
 import ltechnologies.onionphone.onionvpn.ui.SettingsScreen
 import ltechnologies.onionphone.onionvpn.ui.StatusScreen
+import ltechnologies.onionphone.onionvpn.ui.theme.OnionVpnTheme
 
 @AndroidEntryPoint
 class MainActivity : ComponentActivity() {
@@ -60,7 +60,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
-            MaterialTheme {
+            OnionVpnTheme {
                 val snapshot by viewModel.snapshot.collectAsStateWithLifecycle()
                 val preferences by viewModel.preferences.collectAsStateWithLifecycle()
                 OnionVpnApp(
@@ -154,7 +154,7 @@ private fun OnionVpnApp(
                     onStop = onStop,
                     onNewNym = onNewNym,
                 )
-                1 -> FirewallScreen(engine = firewallEngine)
+                1 -> FirewallScreen(engine = firewallEngine, preferences = preferences)
                 2 -> LogsScreen()
                 else -> SettingsScreen(
                     preferences = preferences,

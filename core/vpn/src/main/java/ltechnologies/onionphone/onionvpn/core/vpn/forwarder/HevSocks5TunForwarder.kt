@@ -2,6 +2,7 @@ package ltechnologies.onionphone.onionvpn.core.vpn.forwarder
 
 import android.content.Context
 import android.os.ParcelFileDescriptor
+import android.system.ErrnoException
 import android.system.Os
 import android.system.OsConstants
 import java.io.File
@@ -11,9 +12,11 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancelChildren
 import kotlinx.coroutines.launch
 import ltechnologies.onionphone.onionvpn.core.model.DnsResolverMode
 import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
+import ltechnologies.onionphone.onionvpn.core.model.TunnelFailure
 import ltechnologies.onionphone.onionvpn.core.vpn.profile.TunForwarder
 import timber.log.Timber
 
@@ -28,7 +31,8 @@ class HevSocks5TunForwarder(
     private val dnsMode: DnsResolverMode = DnsResolverMode.DNSCRYPT_MUX,
     private val onFatal: ((Throwable) -> Unit)? = null,
 ) : TunForwarder {
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val supervisor = SupervisorJob()
+    private val scope = CoroutineScope(supervisor + Dispatchers.IO)
     private val worker = AtomicReference<Job?>(null)
     private var tunDup: ParcelFileDescriptor? = null
     private var dnsMux: TunDnsMux? = null
@@ -66,7 +70,12 @@ class HevSocks5TunForwarder(
                 hev.sockstun.TProxyService.TProxyStartService(configFile.absolutePath, hevEnd.fd)
             } catch (error: Exception) {
                 Timber.e(error, "hev-socks5-tunnel (mux) exited")
-                onFatal?.invoke(error)
+                onFatal?.invoke(
+                    TunnelFailure.ForwarderDead(
+                        "hev-socks5-tunnel exited: ${error.message}",
+                        error,
+                    ),
+                )
             }
         }
         worker.set(job)
@@ -78,6 +87,10 @@ class HevSocks5TunForwarder(
             dnsCryptPort = dnsCryptPort,
             vpnDnsAddress = TunnelEndpoints.VPN_DNS_ADDRESS,
             divertDnsToDnsCrypt = divertDns,
+            onFatal = { error ->
+                Timber.e(error, "TunDnsMux died")
+                onFatal?.invoke(error)
+            },
         )
         dnsMux = mux
         mux.start()
@@ -92,6 +105,8 @@ class HevSocks5TunForwarder(
             Timber.w(error, "Failed to stop hev-socks5-tunnel")
         }
         worker.getAndSet(null)?.cancel()
+        // Cancel children; keep supervisor alive for subsequent start().
+        supervisor.cancelChildren()
         tunDup?.close()
         tunDup = null
     }
@@ -136,7 +151,14 @@ class HevSocks5TunForwarder(
         fun createPacketSocketPair(): Array<ParcelFileDescriptor> {
             val fd0 = FileDescriptor()
             val fd1 = FileDescriptor()
-            Os.socketpair(OsConstants.AF_UNIX, OsConstants.SOCK_DGRAM, 0, fd0, fd1)
+            try {
+                Os.socketpair(OsConstants.AF_UNIX, OsConstants.SOCK_DGRAM, 0, fd0, fd1)
+            } catch (error: ErrnoException) {
+                throw TunnelFailure.ForwarderDead(
+                    "socketpair failed errno=${error.errno}: ${error.message}",
+                    error,
+                )
+            }
             runCatching {
                 val buf = 1024 * 1024
                 Os.setsockoptInt(fd0, OsConstants.SOL_SOCKET, OsConstants.SO_SNDBUF, buf)

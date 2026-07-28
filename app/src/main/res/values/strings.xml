@@ -6,7 +6,11 @@
     <string name="notification_starting">Starting Tor, DNSCrypt and VPN…</string>
     <string name="notification_connected">Tunnel active — traffic routed via Tor</string>
     <string name="notification_blocking">Kill switch active — traffic blocked</string>
-    <string name="notification_error">Tunnel error — traffic blocked</string>
+    <string name="notification_error">Tunnel error — check Status for details</string>
     <string name="notification_stopping">Stopping tunnel…</string>
     <string name="action_stop">Stop</string>
+    <string name="firewall_prompt_channel_name">Firewall prompts</string>
+    <string name="firewall_prompt_channel_desc">Connection allow/deny requests (full-screen when needed)</string>
+    <string name="firewall_prompt_notif_title">Connection request</string>
+    <string name="firewall_prompt_notif_text">%1$s wants %2$s %3$s:%4$d</string>
 </resources>

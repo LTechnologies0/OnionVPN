@@ -41,7 +41,6 @@ class TunnelPreferencesStore @Inject constructor(
         val firewallEnabled = booleanPreferencesKey("firewall_enabled")
         val firewallDefault = stringPreferencesKey("firewall_default")
         val firewallTempMin = intPreferencesKey("firewall_temp_min")
-        val firewallPromptSec = intPreferencesKey("firewall_prompt_sec")
     }
 
     val preferences: Flow<TunnelPreferences> = context.tunnelDataStore.data.map { prefs ->
@@ -68,7 +67,6 @@ class TunnelPreferencesStore @Inject constructor(
             prefs[Keys.firewallEnabled] = next.firewallEnabled
             prefs[Keys.firewallDefault] = next.firewallDefaultAction.name
             prefs[Keys.firewallTempMin] = next.firewallTempMinutes
-            prefs[Keys.firewallPromptSec] = next.firewallPromptTimeoutSec
         }
     }
 
@@ -87,13 +85,12 @@ class TunnelPreferencesStore @Inject constructor(
         torMaxCircuitDirtinessSec = this[Keys.maxDirtiness] ?: 180,
         dnsCryptRequireNoLog = this[Keys.requireNoLog] ?: true,
         dnsCryptRequireNoFilter = this[Keys.requireNoFilter] ?: false,
-            dnsCryptForceTcp = this[Keys.forceTcp] ?: true,
-            dnsCryptRequireDnssec = this[Keys.requireDnssec] ?: true,
-            firewallEnabled = this[Keys.firewallEnabled] ?: false,
+        dnsCryptForceTcp = this[Keys.forceTcp] ?: true,
+        dnsCryptRequireDnssec = this[Keys.requireDnssec] ?: true,
+        firewallEnabled = this[Keys.firewallEnabled] ?: false,
         firewallDefaultAction = this[Keys.firewallDefault]
             ?.let { runCatching { FirewallDefaultAction.valueOf(it) }.getOrNull() }
             ?: FirewallDefaultAction.ASK,
         firewallTempMinutes = this[Keys.firewallTempMin] ?: 5,
-        firewallPromptTimeoutSec = this[Keys.firewallPromptSec] ?: 15,
     )
 }

@@ -27,6 +27,4 @@ data class TunnelPreferences(
     val firewallDefaultAction: FirewallDefaultAction = FirewallDefaultAction.ASK,
     /** Temporary allow/deny TTL in minutes. */
     val firewallTempMinutes: Int = 5,
-    /** Prompt timeout before default DENY (seconds). */
-    val firewallPromptTimeoutSec: Int = 15,
 )

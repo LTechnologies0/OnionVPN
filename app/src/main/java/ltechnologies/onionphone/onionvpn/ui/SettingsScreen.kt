@@ -1,5 +1,6 @@
 package ltechnologies.onionphone.onionvpn.ui
 
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -8,6 +9,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.FilterChip
@@ -22,6 +24,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 import ltechnologies.onionphone.onionvpn.core.dnscrypt.config.DnsCryptConfigWriter
 import ltechnologies.onionphone.onionvpn.core.model.DnsResolverMode
@@ -84,7 +87,10 @@ fun SettingsScreen(
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(
+            modifier = Modifier.horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
             FilterChip(
                 selected = local.dnsResolverMode == DnsResolverMode.FAKE_IP_SOCKS5A,
                 onClick = { local = local.copy(dnsResolverMode = DnsResolverMode.FAKE_IP_SOCKS5A) },
@@ -98,9 +104,16 @@ fun SettingsScreen(
         }
 
         PrefSwitch(
-            label = "Route all traffic through Tor",
+            label = "Prefer IPv4+IPv6 VPN families (API 29+)",
             checked = local.routeAllTrafficThroughTor,
             onChecked = { local = local.copy(routeAllTrafficThroughTor = it) },
+        )
+        Text(
+            text = "Always installs a full default route (0.0.0.0/0 + ::/0). " +
+                "When on (Android 10+), also calls allowFamily for IPv4 and IPv6. " +
+                "Off does not enable split-tunnel.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         PrefSwitch(
             label = "Kill switch",
@@ -118,7 +131,8 @@ fun SettingsScreen(
         Text("Interactive firewall", style = MaterialTheme.typography.titleMedium)
         Text(
             text = "OpenSnitch-style prompts for new outbound connections on the TUN. " +
-                "Allow / deny permanently or for a few minutes. Timeout = deny.",
+                "Requests wait in a FIFO queue (one popup at a time) until you answer — no timeout. " +
+                "A full-screen notification is used when Android blocks background activities.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -128,21 +142,34 @@ fun SettingsScreen(
             onChecked = { local = local.copy(firewallEnabled = it) },
         )
         Text("Default when no rule", style = MaterialTheme.typography.labelLarge)
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(
+            modifier = Modifier.horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
             FilterChip(
                 selected = local.firewallDefaultAction == FirewallDefaultAction.ASK,
                 onClick = { local = local.copy(firewallDefaultAction = FirewallDefaultAction.ASK) },
+                enabled = local.firewallEnabled,
                 label = { Text("Ask") },
             )
             FilterChip(
                 selected = local.firewallDefaultAction == FirewallDefaultAction.DENY,
                 onClick = { local = local.copy(firewallDefaultAction = FirewallDefaultAction.DENY) },
+                enabled = local.firewallEnabled,
                 label = { Text("Deny") },
             )
             FilterChip(
                 selected = local.firewallDefaultAction == FirewallDefaultAction.ALLOW,
                 onClick = { local = local.copy(firewallDefaultAction = FirewallDefaultAction.ALLOW) },
+                enabled = local.firewallEnabled,
                 label = { Text("Allow") },
+            )
+        }
+        if (!local.firewallEnabled) {
+            Text(
+                text = "Default action is ignored while the firewall is off.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
         OutlinedTextField(
@@ -151,14 +178,7 @@ fun SettingsScreen(
                 it.toIntOrNull()?.let { v -> local = local.copy(firewallTempMinutes = v.coerceIn(1, 1440)) }
             },
             label = { Text("Temporary rule (minutes)") },
-            modifier = Modifier.fillMaxWidth(),
-        )
-        OutlinedTextField(
-            value = local.firewallPromptTimeoutSec.toString(),
-            onValueChange = {
-                it.toIntOrNull()?.let { v -> local = local.copy(firewallPromptTimeoutSec = v.coerceIn(5, 120)) }
-            },
-            label = { Text("Prompt timeout (seconds)") },
+            enabled = local.firewallEnabled,
             modifier = Modifier.fillMaxWidth(),
         )
 
@@ -205,7 +225,9 @@ fun SettingsScreen(
         OutlinedTextField(
             value = local.torNewCircuitPeriodSec.toString(),
             onValueChange = {
-                it.toIntOrNull()?.let { v -> local = local.copy(torNewCircuitPeriodSec = v) }
+                it.toIntOrNull()?.let { v ->
+                    local = local.copy(torNewCircuitPeriodSec = v.coerceIn(10, 86_400))
+                }
             },
             label = { Text("NewCircuitPeriod (sec)") },
             modifier = Modifier.fillMaxWidth(),
@@ -219,7 +241,9 @@ fun SettingsScreen(
         OutlinedTextField(
             value = local.torMaxCircuitDirtinessSec.toString(),
             onValueChange = {
-                it.toIntOrNull()?.let { v -> local = local.copy(torMaxCircuitDirtinessSec = v) }
+                it.toIntOrNull()?.let { v ->
+                    local = local.copy(torMaxCircuitDirtinessSec = v.coerceIn(60, 86_400))
+                }
             },
             label = { Text("MaxCircuitDirtiness (sec)") },
             modifier = Modifier.fillMaxWidth(),
@@ -235,7 +259,10 @@ fun SettingsScreen(
         }
 
         Text("DNSCrypt", style = MaterialTheme.typography.titleMedium)
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(
+            modifier = Modifier.horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
             DnsCryptConfigWriter.knownServers.keys.forEach { name ->
                 FilterChip(
                     selected = local.dnsCryptServerName == name,
@@ -245,22 +272,22 @@ fun SettingsScreen(
             }
         }
         PrefSwitch(
-            label = "require_nolog",
+            label = "Require no-log resolvers",
             checked = local.dnsCryptRequireNoLog,
             onChecked = { local = local.copy(dnsCryptRequireNoLog = it) },
         )
         PrefSwitch(
-            label = "require_nofilter",
+            label = "Require unfiltered resolvers",
             checked = local.dnsCryptRequireNoFilter,
             onChecked = { local = local.copy(dnsCryptRequireNoFilter = it) },
         )
         PrefSwitch(
-            label = "force_tcp",
+            label = "Force TCP to upstream",
             checked = local.dnsCryptForceTcp,
             onChecked = { local = local.copy(dnsCryptForceTcp = it) },
         )
         PrefSwitch(
-            label = "require_dnssec",
+            label = "Require DNSSEC",
             checked = local.dnsCryptRequireDnssec,
             onChecked = { local = local.copy(dnsCryptRequireDnssec = it) },
         )
@@ -281,7 +308,8 @@ fun SettingsScreen(
             Text("Save settings")
         }
         Text(
-            text = "Changes apply on next tunnel start (restart if already connected).",
+            text = "Saving restarts an active Connected tunnel so changes apply immediately. " +
+                "Otherwise they apply on the next Start.",
             style = MaterialTheme.typography.bodySmall,
         )
     }
@@ -294,12 +322,18 @@ private fun PrefSwitch(
     onChecked: (Boolean) -> Unit,
 ) {
     Row(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .toggleable(
+                value = checked,
+                role = Role.Switch,
+                onValueChange = onChecked,
+            ),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(label, modifier = Modifier.weight(1f))
-        Switch(checked = checked, onCheckedChange = onChecked)
+        Switch(checked = checked, onCheckedChange = null)
     }
 }
 

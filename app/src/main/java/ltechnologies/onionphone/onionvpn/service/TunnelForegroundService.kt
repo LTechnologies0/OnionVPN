@@ -7,6 +7,7 @@ import android.os.IBinder
 import android.os.PowerManager
 import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -26,6 +27,7 @@ import kotlinx.coroutines.withTimeout
 import ltechnologies.onionphone.onionvpn.core.dnscrypt.DnsCryptProcessManager
 import ltechnologies.onionphone.onionvpn.core.model.DnsResolverMode
 import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
+import ltechnologies.onionphone.onionvpn.core.model.TunnelFailure
 import ltechnologies.onionphone.onionvpn.core.model.TunnelPhase
 import ltechnologies.onionphone.onionvpn.core.model.TunnelPortAllocator
 import ltechnologies.onionphone.onionvpn.core.model.TunnelPreferences
@@ -111,7 +113,7 @@ class TunnelForegroundService : Service() {
                         Timber.e(err, "NEWNYM failed")
                         updateSnapshot(
                             _snapshot.value.phase,
-                            lastError = "NEWNYM failed: ${err.message}",
+                            lastError = TunnelFailure.userMessageOf(err, "newnym"),
                         )
                     }
                 }
@@ -170,9 +172,20 @@ class TunnelForegroundService : Service() {
         lifecycleMutex.withLock {
             try {
                 startTunnel()
+            } catch (error: CancellationException) {
+                throw error
             } catch (error: Exception) {
                 Timber.e(error, "Tunnel start crashed")
-                handleFailure(error.message ?: "Unexpected error", fromValidation = false)
+                val failure = TunnelFailure.fromThrowable(
+                    error,
+                    context = "tunnel.start",
+                    bootstrapProgress = tor.controlStatus.value.bootstrapProgress,
+                )
+                handleFailure(
+                    message = failure.userMessage,
+                    fromValidation = false,
+                    stopTorProcesses = failure.stopTor,
+                )
             }
         }
     }
@@ -216,7 +229,13 @@ class TunnelForegroundService : Service() {
             bootstrapUiJob.cancel()
         }
         if (torResult.isFailure) {
-            handleFailure(torResult.exceptionOrNull()?.message ?: "Tor failed", fromValidation = false)
+            val err = torResult.exceptionOrNull() ?: Exception("Tor failed")
+            val failure = TunnelFailure.fromThrowable(
+                err,
+                context = "tor.start",
+                bootstrapProgress = tor.controlStatus.value.bootstrapProgress,
+            )
+            handleFailure(failure.userMessage, fromValidation = false, stopTorProcesses = failure.stopTor)
             return
         }
 
@@ -225,9 +244,11 @@ class TunnelForegroundService : Service() {
         if (useDnsCrypt) {
             val dnsResult = dnsCrypt.start(preferences.dnsCryptServerName, ports, preferences)
             if (dnsResult.isFailure) {
+                val err = dnsResult.exceptionOrNull() ?: Exception("DNSCrypt failed")
+                val failure = TunnelFailure.fromThrowable(err, context = "dnscrypt.start")
                 // DNSCrypt down ≠ Tor down. Keep Tor; blackhole apps until user retries / FakeDNS.
                 handleFailure(
-                    message = dnsResult.exceptionOrNull()?.message ?: "DNSCrypt failed",
+                    message = failure.userMessage,
                     fromValidation = false,
                     stopTorProcesses = false,
                 )
@@ -242,7 +263,11 @@ class TunnelForegroundService : Service() {
         }
 
         if (VpnService.prepare(this) != null) {
-            handleFailure("VPN permission not granted", fromValidation = false, stopTorProcesses = false)
+            handleFailure(
+                TunnelFailure.VpnEstablish("VPN permission not granted — approve OnionVPN in system VPN dialog").userMessage,
+                fromValidation = false,
+                stopTorProcesses = false,
+            )
             return
         }
 
@@ -252,7 +277,13 @@ class TunnelForegroundService : Service() {
 
         val vpnReady = vpnBridge.waitForConnected(vpnGeneration, ports)
         if (!vpnReady) {
-            handleFailure("VPN interface not established", fromValidation = false, stopTorProcesses = false)
+            handleFailure(
+                TunnelFailure.VpnEstablish(
+                    "VPN interface not established (timeout or establish() null)",
+                ).userMessage,
+                fromValidation = false,
+                stopTorProcesses = false,
+            )
             return
         }
 
@@ -369,7 +400,20 @@ class TunnelForegroundService : Service() {
         updateSnapshot(TunnelPhase.Blocking, lastError = message, validations = validations)
         val gen = OnionVpnService.nextGeneration()
         vpnBridge.startBlocking(preferences, gen)
-        vpnBridge.waitForBlocking(gen)
+        if (!vpnBridge.waitForBlocking(gen)) {
+            Timber.e("Kill-switch Blocking TUN failed to establish — tearing down")
+            teardownModules(
+                resetSnapshot = false,
+                phase = TunnelPhase.Error,
+                lastError = TunnelFailure.VpnEstablish(
+                    "Kill-switch could not engage Blocking TUN after: $message",
+                ).userMessage,
+                validations = validations,
+            )
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
+            return
+        }
         if (stopTorProcesses) {
             dnsCrypt.stop()
             tor.stop()

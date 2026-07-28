@@ -2,14 +2,15 @@ package ltechnologies.onionphone.onionvpn.core.dnscrypt
 
 import android.content.Context
 import java.io.File
-import java.io.IOException
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import ltechnologies.onionphone.onionvpn.core.dnscrypt.config.DnsCryptConfigWriter
 import ltechnologies.onionphone.onionvpn.core.dnscrypt.lifecycle.DnsCryptReadiness
+import ltechnologies.onionphone.onionvpn.core.model.TunnelFailure
 import ltechnologies.onionphone.onionvpn.core.model.TunnelPreferences
 import ltechnologies.onionphone.onionvpn.core.model.TunnelRuntimePorts
 import timber.log.Timber
@@ -72,10 +73,13 @@ class DnsCryptProcessManager(
             waitForLiveServer()
             Timber.i("DNSCrypt listening on ${ports.dnsCryptListenPort}")
             Result.success(Unit)
+        } catch (error: CancellationException) {
+            stopInternal()
+            throw error
         } catch (error: Exception) {
             Timber.e(error, "DNSCrypt failed to start")
             stopInternal()
-            Result.failure(error)
+            Result.failure(TunnelFailure.fromThrowable(error, context = "dnscrypt.start"))
         }
     }
 
@@ -110,8 +114,10 @@ class DnsCryptProcessManager(
                         if (server) serverReady.set(true)
                     }
                 }
-            } catch (_: Exception) {
-                // Process stopped.
+            } catch (error: Exception) {
+                if (process?.isAlive == true) {
+                    Timber.w(error, "DNSCrypt log reader stopped unexpectedly")
+                }
             }
         }.apply {
             name = "dnscrypt-log"
@@ -127,10 +133,13 @@ class DnsCryptProcessManager(
         val deadline = System.currentTimeMillis() + timeoutMs
         while (System.currentTimeMillis() < deadline) {
             if (!kotlin.coroutines.coroutineContext.isActive) {
-                throw IOException("DNSCrypt server wait cancelled")
+                throw CancellationException("DNSCrypt server wait cancelled")
             }
             if (process?.isAlive != true) {
-                throw IOException("DNSCrypt process exited before upstream was ready")
+                throw TunnelFailure.DnsCrypt(
+                    "upstream",
+                    "DNSCrypt process exited before upstream was ready",
+                )
             }
             if (serverReady.get()) {
                 Timber.i("DNSCrypt upstream server ready")
@@ -144,7 +153,10 @@ class DnsCryptProcessManager(
             }
             delay(pollMs)
         }
-        throw IOException("DNSCrypt upstream server timed out (SafeSocks/proxy?)")
+        throw TunnelFailure.DnsCrypt(
+            "upstream",
+            "DNSCrypt upstream timed out after ${timeoutMs}ms (SafeSocks/Tor proxy?)",
+        )
     }
 
     private suspend fun waitForListener(
@@ -155,10 +167,13 @@ class DnsCryptProcessManager(
         val deadline = System.currentTimeMillis() + timeoutMs
         while (System.currentTimeMillis() < deadline) {
             if (!kotlin.coroutines.coroutineContext.isActive) {
-                throw IOException("DNSCrypt listener wait cancelled")
+                throw CancellationException("DNSCrypt listener wait cancelled")
             }
             if (process?.isAlive != true) {
-                throw IOException("DNSCrypt process exited before listener was ready")
+                throw TunnelFailure.DnsCrypt(
+                    "listen",
+                    "DNSCrypt process exited before listener was ready on port $port",
+                )
             }
             if (listenerReady.get() ||
                 DnsCryptReadiness.probeLocalDns(port) ||
@@ -168,15 +183,23 @@ class DnsCryptProcessManager(
             }
             delay(pollMs)
         }
-        throw IOException("DNSCrypt listener timed out on port $port")
+        throw TunnelFailure.DnsCrypt(
+            "listen",
+            "DNSCrypt listener timed out on port $port after ${timeoutMs}ms",
+        )
     }
 
     private fun ensureExecutable(file: File) {
         if (!file.exists()) {
-            throw IOException("Binary missing at ${file.absolutePath}")
+            throw TunnelFailure.DnsCrypt("start", "Binary missing at ${file.absolutePath}")
         }
         if (!file.canExecute()) {
-            file.setExecutable(true, false)
+            if (!file.setExecutable(true, false)) {
+                throw TunnelFailure.DnsCrypt(
+                    "start",
+                    "Cannot set executable bit on ${file.absolutePath}",
+                )
+            }
         }
     }
 

@@ -22,6 +22,7 @@ data class LogLine(
  */
 object TunnelLogBuffer {
     private const val CAPACITY = 500
+    private const val MAX_LINE_CHARS = 2_000
 
     private val appDeque = ArrayDeque<LogLine>(CAPACITY)
     private val dnsDeque = ArrayDeque<LogLine>(CAPACITY)
@@ -37,7 +38,12 @@ object TunnelLogBuffer {
     val torLogs: StateFlow<List<LogLine>> = _tor.asStateFlow()
 
     fun append(source: LogSource, text: String, isError: Boolean = false) {
-        val line = LogLine(System.currentTimeMillis(), text, isError = isError)
+        val clipped = if (text.length > MAX_LINE_CHARS) {
+            text.take(MAX_LINE_CHARS) + "…"
+        } else {
+            text
+        }
+        val line = LogLine(System.currentTimeMillis(), clipped, isError = isError)
         synchronized(lock) {
             when (source) {
                 LogSource.APP -> {

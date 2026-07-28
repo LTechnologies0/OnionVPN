@@ -24,10 +24,15 @@ object DnsCryptConfigWriter {
      * Known static server name → sdns:// stamp (native DNSCrypt; SafeSocks-compatible).
      */
     val knownServers: Map<String, String> = mapOf(
+        // Cloudflare publishes DoH only (no native DNSCrypt). dnscrypt-proxy accepts DoH stamps.
         "cloudflare" to
-            "sdns://AQMAAAAAAAAAETk0LjE0MC4xNC4xNDo1NDQzINErR_JS3PLCu_iZEIbq95zkSV2LFsigxDIuUso_OQhzIjIuZG5zY3J5cHQuZGVmYXVsdC5uczEuYWRndWFyZC5jb20",
+            "sdns://AgcAAAAAAAAABzEuMS4xLjEAEmRucy5jbG91ZGZsYXJlLmNvbQovZG5zLXF1ZXJ5",
+        // AdGuard native DNSCrypt (SafeSocks-friendly).
         "adguard" to
             "sdns://AQMAAAAAAAAAETk0LjE0MC4xNC4xNDo1NDQzINErR_JS3PLCu_iZEIbq95zkSV2LFsigxDIuUso_OQhzIjIuZG5zY3J5cHQuZGVmYXVsdC5uczEuYWRndWFyZC5jb20",
+        // Quad9 native DNSCrypt, no threat blocking.
+        "quad9" to
+            "sdns://AQcAAAAAAAAADTkuOS45LjEwOjg0NDMgZ8hHuMh1jNEgJFVDvnVnRt803x2EwAuMRwNo34Idhj4ZMi5kbnNjcnlwdC1jZXJ0LnF1YWQ5Lm5ldA",
     )
 
     /**

@@ -2,6 +2,7 @@ package ltechnologies.onionphone.onionvpn.core.tor.control
 
 import java.io.File
 import java.io.IOException
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -35,7 +36,10 @@ class TorControlClient {
     /** Live aggregated control status for UI / validation. */
     val status: StateFlow<TorControlStatus> = _status.asStateFlow()
 
-    private val _events = MutableSharedFlow<TorControlEvent>(extraBufferCapacity = 64)
+    private val _events = MutableSharedFlow<TorControlEvent>(
+        extraBufferCapacity = 64,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST,
+    )
     /** Async 650 events (skip BW in log sinks if noisy). */
     val events: SharedFlow<TorControlEvent> = _events.asSharedFlow()
 

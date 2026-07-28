@@ -7,6 +7,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.withContext
+import ltechnologies.onionphone.onionvpn.core.model.TunnelFailure
 import ltechnologies.onionphone.onionvpn.core.model.TunnelPreferences
 import ltechnologies.onionphone.onionvpn.core.model.TunnelRuntimePorts
 import ltechnologies.onionphone.onionvpn.core.tor.config.TorConfigWriter
@@ -111,7 +112,7 @@ class TorProcessManager(
             Timber.e(error, "Tor failed to start")
             stopInternal()
             runtimePorts = null
-            Result.failure(error)
+            Result.failure(TunnelFailure.fromThrowable(error, context = "tor.start"))
         }
     }
 
@@ -191,7 +192,7 @@ class TorProcessManager(
         val deadline = System.currentTimeMillis() + timeoutMs
         while (System.currentTimeMillis() < deadline) {
             if (process?.isAlive != true) {
-                throw IOException("Tor process exited before control socket")
+                throw TunnelFailure.TorBinary("Tor process exited before control socket appeared")
             }
             if (controlSocketFile.exists() && cookieFile.exists() && cookieFile.length() > 0) {
                 delay(150)
@@ -199,9 +200,10 @@ class TorProcessManager(
             }
             delay(100)
         }
-        throw IOException(
-            "Tor control socket/cookie not ready " +
-                "(sock=${controlSocketFile.exists()} cookie=${cookieFile.exists()})",
+        val sock = controlSocketFile.exists()
+        val cookie = cookieFile.exists() && cookieFile.length() > 0
+        throw TunnelFailure.TorControl(
+            "Tor control plane not ready (socket=$sock cookie=$cookie) after ${timeoutMs}ms",
         )
     }
 
@@ -215,7 +217,7 @@ class TorProcessManager(
         var lastError: Exception? = null
         while (System.currentTimeMillis() < deadline) {
             if (process?.isAlive != true) {
-                throw IOException("Tor process exited before bootstrap")
+                throw TunnelFailure.TorBinary("Tor process exited before bootstrap completed")
             }
             try {
                 control.refreshInfo()
@@ -242,10 +244,21 @@ class TorProcessManager(
                 }
             } catch (error: Exception) {
                 lastError = error
+                Timber.d(
+                    error,
+                    "Tor bootstrap poll: %s",
+                    error.message ?: error.javaClass.simpleName,
+                )
             }
             delay(pollMs)
         }
-        throw IOException("Tor bootstrap timed out", lastError)
+        val progress = control.status.value.bootstrapProgress
+        val summary = control.status.value.bootstrapSummary.ifBlank { "no summary" }
+        throw TunnelFailure.TorBootstrap(
+            progress = progress,
+            detail = "Tor bootstrap timed out at $progress% ($summary)",
+            cause = lastError,
+        )
     }
 
     private fun startLogPump(proc: Process) {
@@ -269,10 +282,12 @@ class TorProcessManager(
 
     private fun ensureExecutable(file: File) {
         if (!file.exists()) {
-            throw IOException("Binary missing at ${file.absolutePath}")
+            throw TunnelFailure.TorBinary("Binary missing at ${file.absolutePath}")
         }
         if (!file.canExecute()) {
-            file.setExecutable(true, false)
+            if (!file.setExecutable(true, false)) {
+                throw TunnelFailure.TorBinary("Cannot set executable bit on ${file.absolutePath}")
+            }
         }
     }
 

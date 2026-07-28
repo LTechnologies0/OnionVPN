@@ -11,6 +11,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import ltechnologies.onionphone.onionvpn.core.model.DnsResolverMode
 import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
+import ltechnologies.onionphone.onionvpn.core.model.TunnelFailure
 import ltechnologies.onionphone.onionvpn.core.model.TunnelPreferences
 import ltechnologies.onionphone.onionvpn.core.model.VpnEstablishResult
 import ltechnologies.onionphone.onionvpn.core.model.VpnProfileMode
@@ -190,12 +191,30 @@ class OnionVpnService : VpnService() {
         return try {
             val builder = VpnProfileBuilder.configure(this, preferences, mode)
             val tun = builder.establish()
-                ?: return VpnEstablishResult.Failure("VpnService.Builder.establish() returned null")
+                ?: return VpnEstablishResult.Failure(
+                    TunnelFailure.VpnEstablish(
+                        "VpnService.Builder.establish() returned null " +
+                            "(permission revoked or always-on conflict)",
+                    ).userMessage,
+                )
             tunInterface = tun
             VpnEstablishResult.Success(mode)
+        } catch (error: SecurityException) {
+            Timber.e(error, "VPN establish SecurityException")
+            VpnEstablishResult.Failure(
+                TunnelFailure.VpnEstablish("VPN security permission denied", error).userMessage,
+            )
+        } catch (error: IllegalStateException) {
+            Timber.e(error, "VPN establish IllegalStateException")
+            VpnEstablishResult.Failure(
+                TunnelFailure.VpnEstablish(
+                    "VPN establish illegal state (self-exclusion / builder): ${error.message}",
+                    error,
+                ).userMessage,
+            )
         } catch (error: Exception) {
             Timber.e(error, "VPN establish threw")
-            VpnEstablishResult.Failure(error.message ?: "establish failed")
+            VpnEstablishResult.Failure(TunnelFailure.fromThrowable(error, "vpn.establish").userMessage)
         }
     }
 

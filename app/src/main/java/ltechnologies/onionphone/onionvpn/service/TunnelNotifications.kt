@@ -66,8 +66,8 @@ internal class TunnelNotifications(
         )
         val phaseText = when (phase) {
             TunnelPhase.Connected -> service.getString(R.string.notification_connected)
-            TunnelPhase.Blocking -> service.getString(R.string.notification_blocking)
             TunnelPhase.Error -> service.getString(R.string.notification_error)
+            TunnelPhase.Blocking -> service.getString(R.string.notification_blocking)
             TunnelPhase.Stopping -> service.getString(R.string.notification_stopping)
             else -> service.getString(R.string.notification_starting)
         }

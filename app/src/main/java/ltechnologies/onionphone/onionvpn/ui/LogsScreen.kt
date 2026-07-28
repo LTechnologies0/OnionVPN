@@ -82,7 +82,7 @@ private fun LogList(lines: List<LogLine>) {
         }
     }
     val formatter = remember {
-        SimpleDateFormat("HH:mm:ss", Locale.US)
+        SimpleDateFormat("HH:mm:ss", Locale.getDefault())
     }
     LazyColumn(
         state = listState,
