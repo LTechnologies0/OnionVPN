@@ -1,5 +1,6 @@
 package ltechnologies.onionphone.onionvpn.ui
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -7,17 +8,24 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -27,7 +35,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
-import ltechnologies.onionphone.onionvpn.core.dnscrypt.config.DnsCryptConfigWriter
+import java.util.concurrent.atomic.AtomicReference
+import ltechnologies.onionphone.onionvpn.core.dnscrypt.config.DnsCryptPublicResolvers
 import ltechnologies.onionphone.onionvpn.core.model.DnsResolverMode
 import ltechnologies.onionphone.onionvpn.core.model.FirewallDefaultAction
 import ltechnologies.onionphone.onionvpn.core.model.TunnelPreferences
@@ -38,13 +47,31 @@ fun SettingsScreen(
     preferences: TunnelPreferences,
     onLoadTorrc: () -> String,
     onLoadDnsCryptToml: () -> String,
-    onSavePreferences: (TunnelPreferences) -> Unit,
+    onSavePreferences: (TunnelPreferences, restartIfConnected: Boolean) -> Unit,
     onSaveTorrc: (String) -> Unit,
     onSaveDnsCryptToml: (String) -> Unit,
 ) {
     var local by remember(preferences) { mutableStateOf(preferences) }
+    val latestLocal = remember { AtomicReference(local) }
+    val saveRef = remember { AtomicReference(onSavePreferences) }
+    SideEffect {
+        latestLocal.set(local)
+        saveRef.set(onSavePreferences)
+    }
+    // Persist draft when leaving Settings (tab switch / overlay permission / app background).
+    DisposableEffect(Unit) {
+        onDispose {
+            saveRef.get().invoke(latestLocal.get(), false)
+        }
+    }
+    fun commit(next: TunnelPreferences, restart: Boolean = false) {
+        local = next
+        latestLocal.set(next)
+        onSavePreferences(next, restart)
+    }
     var editingTorrc by remember { mutableStateOf(false) }
     var editingToml by remember { mutableStateOf(false) }
+    var pickingResolver by remember { mutableStateOf(false) }
     var torrcDraft by remember { mutableStateOf("") }
     var tomlDraft by remember { mutableStateOf("") }
 
@@ -94,12 +121,12 @@ fun SettingsScreen(
         PrefSwitch(
             label = "Require device lock to open app",
             checked = local.appLockEnabled,
-            onChecked = { local = local.copy(appLockEnabled = it) },
+            onChecked = { commit(local.copy(appLockEnabled = it)) },
         )
         PrefSwitch(
             label = "Allow screenshots",
             checked = local.allowScreenshots,
-            onChecked = { local = local.copy(allowScreenshots = it) },
+            onChecked = { commit(local.copy(allowScreenshots = it)) },
         )
         Text(
             text = "Off (recommended): FLAG_SECURE blocks screenshots, screen recording, " +
@@ -151,12 +178,12 @@ fun SettingsScreen(
         ) {
             FilterChip(
                 selected = local.dnsResolverMode == DnsResolverMode.FAKE_IP_SOCKS5A,
-                onClick = { local = local.copy(dnsResolverMode = DnsResolverMode.FAKE_IP_SOCKS5A) },
+                onClick = { commit(local.copy(dnsResolverMode = DnsResolverMode.FAKE_IP_SOCKS5A)) },
                 label = { Text("FakeDNS (Orbot)") },
             )
             FilterChip(
                 selected = local.dnsResolverMode == DnsResolverMode.DNSCRYPT_MUX,
-                onClick = { local = local.copy(dnsResolverMode = DnsResolverMode.DNSCRYPT_MUX) },
+                onClick = { commit(local.copy(dnsResolverMode = DnsResolverMode.DNSCRYPT_MUX)) },
                 label = { Text("DNSCrypt mux") },
             )
         }
@@ -164,7 +191,7 @@ fun SettingsScreen(
         PrefSwitch(
             label = "Prefer IPv4+IPv6 VPN families (API 29+)",
             checked = local.routeAllTrafficThroughTor,
-            onChecked = { local = local.copy(routeAllTrafficThroughTor = it) },
+            onChecked = { commit(local.copy(routeAllTrafficThroughTor = it)) },
         )
         Text(
             text = "Always installs a full default route (0.0.0.0/0 + ::/0). " +
@@ -176,7 +203,7 @@ fun SettingsScreen(
         PrefSwitch(
             label = "Kill switch",
             checked = local.killSwitchEnabled,
-            onChecked = { local = local.copy(killSwitchEnabled = it) },
+            onChecked = { commit(local.copy(killSwitchEnabled = it)) },
         )
         Text(
             text = "Kill switch drops only app packets that cannot go through Tor " +
@@ -197,7 +224,7 @@ fun SettingsScreen(
         PrefSwitch(
             label = "Enable firewall",
             checked = local.firewallEnabled,
-            onChecked = { local = local.copy(firewallEnabled = it) },
+            onChecked = { commit(local.copy(firewallEnabled = it)) },
         )
         if (local.firewallEnabled) {
             Text(
@@ -244,19 +271,19 @@ fun SettingsScreen(
         ) {
             FilterChip(
                 selected = local.firewallDefaultAction == FirewallDefaultAction.ASK,
-                onClick = { local = local.copy(firewallDefaultAction = FirewallDefaultAction.ASK) },
+                onClick = { commit(local.copy(firewallDefaultAction = FirewallDefaultAction.ASK)) },
                 enabled = local.firewallEnabled,
                 label = { Text("Ask") },
             )
             FilterChip(
                 selected = local.firewallDefaultAction == FirewallDefaultAction.DENY,
-                onClick = { local = local.copy(firewallDefaultAction = FirewallDefaultAction.DENY) },
+                onClick = { commit(local.copy(firewallDefaultAction = FirewallDefaultAction.DENY)) },
                 enabled = local.firewallEnabled,
                 label = { Text("Deny") },
             )
             FilterChip(
                 selected = local.firewallDefaultAction == FirewallDefaultAction.ALLOW,
-                onClick = { local = local.copy(firewallDefaultAction = FirewallDefaultAction.ALLOW) },
+                onClick = { commit(local.copy(firewallDefaultAction = FirewallDefaultAction.ALLOW)) },
                 enabled = local.firewallEnabled,
                 label = { Text("Allow") },
             )
@@ -271,7 +298,9 @@ fun SettingsScreen(
         OutlinedTextField(
             value = local.firewallTempMinutes.toString(),
             onValueChange = {
-                it.toIntOrNull()?.let { v -> local = local.copy(firewallTempMinutes = v.coerceIn(1, 1440)) }
+                it.toIntOrNull()?.let { v ->
+                    commit(local.copy(firewallTempMinutes = v.coerceIn(1, 1440)))
+                }
             },
             label = { Text("Temporary rule (minutes)") },
             enabled = local.firewallEnabled,
@@ -293,9 +322,11 @@ fun SettingsScreen(
                 selected = local.torNewCircuitPeriodSec == 30 &&
                     local.torMaxCircuitDirtinessSec == 180,
                 onClick = {
-                    local = local.copy(
-                        torNewCircuitPeriodSec = 30,
-                        torMaxCircuitDirtinessSec = 180,
+                    commit(
+                        local.copy(
+                            torNewCircuitPeriodSec = 30,
+                            torMaxCircuitDirtinessSec = 180,
+                        ),
                     )
                 },
                 label = { Text("Balanced") },
@@ -304,9 +335,11 @@ fun SettingsScreen(
                 selected = local.torNewCircuitPeriodSec == 15 &&
                     local.torMaxCircuitDirtinessSec == 60,
                 onClick = {
-                    local = local.copy(
-                        torNewCircuitPeriodSec = 15,
-                        torMaxCircuitDirtinessSec = 60,
+                    commit(
+                        local.copy(
+                            torNewCircuitPeriodSec = 15,
+                            torMaxCircuitDirtinessSec = 60,
+                        ),
                     )
                 },
                 label = { Text("Paranoid") },
@@ -378,18 +411,21 @@ fun SettingsScreen(
         Text("DNSCrypt", style = MaterialTheme.typography.titleMedium)
         Text(
             text = "Upstream forced through Tor SOCKS; bootstrap via Tor DNSPort; " +
-                "DoH/captive blocked. Prefer native DNSCrypt (AdGuard/Quad9) over Cloudflare DoH.",
+                "full public-resolvers catalog (${DnsCryptPublicResolvers.knownServers.size} IPv4). " +
+                "Auto uses every resolver matching the filters below.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         Button(
             onClick = {
-                local = local.copy(
-                    dnsCryptRequireNoLog = true,
-                    dnsCryptRequireDnssec = true,
-                    dnsCryptForceTcp = true,
-                    dnsCryptRequireNoFilter = false,
-                    dnsCryptServerName = "adguard",
+                commit(
+                    local.copy(
+                        dnsCryptRequireNoLog = true,
+                        dnsCryptRequireDnssec = true,
+                        dnsCryptForceTcp = true,
+                        dnsCryptRequireNoFilter = false,
+                        dnsCryptServerName = "adguard-dns",
+                    ),
                 )
             },
             modifier = Modifier.fillMaxWidth(),
@@ -400,33 +436,58 @@ fun SettingsScreen(
             modifier = Modifier.horizontalScroll(rememberScrollState()),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            DnsCryptConfigWriter.knownServers.keys.forEach { name ->
+            FilterChip(
+                selected = local.dnsCryptServerName == DnsCryptPublicResolvers.AUTO,
+                onClick = { commit(local.copy(dnsCryptServerName = DnsCryptPublicResolvers.AUTO)) },
+                label = { Text("Auto (all matching)") },
+            )
+            listOf("cloudflare", "adguard-dns", "quad9-dnscrypt-ip4-nofilter-pri").forEach { name ->
                 FilterChip(
                     selected = local.dnsCryptServerName == name,
-                    onClick = { local = local.copy(dnsCryptServerName = name) },
-                    label = { Text(name) },
+                    onClick = { commit(local.copy(dnsCryptServerName = name)) },
+                    label = { Text(name.substringBefore("-dns").substringBefore("-dnscrypt")) },
                 )
             }
+        }
+        Text(
+            text = "Selected: ${local.dnsCryptServerName}",
+            style = MaterialTheme.typography.bodyMedium,
+        )
+        Button(
+            onClick = { pickingResolver = true },
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Text("Browse all DNSCrypt resolvers…")
+        }
+        if (pickingResolver) {
+            DnsCryptResolverPickerDialog(
+                selected = local.dnsCryptServerName,
+                onSelect = {
+                    commit(local.copy(dnsCryptServerName = it))
+                    pickingResolver = false
+                },
+                onDismiss = { pickingResolver = false },
+            )
         }
         PrefSwitch(
             label = "Require no-log resolvers",
             checked = local.dnsCryptRequireNoLog,
-            onChecked = { local = local.copy(dnsCryptRequireNoLog = it) },
+            onChecked = { commit(local.copy(dnsCryptRequireNoLog = it)) },
         )
         PrefSwitch(
             label = "Require unfiltered resolvers",
             checked = local.dnsCryptRequireNoFilter,
-            onChecked = { local = local.copy(dnsCryptRequireNoFilter = it) },
+            onChecked = { commit(local.copy(dnsCryptRequireNoFilter = it)) },
         )
         PrefSwitch(
             label = "Force TCP to upstream",
             checked = local.dnsCryptForceTcp,
-            onChecked = { local = local.copy(dnsCryptForceTcp = it) },
+            onChecked = { commit(local.copy(dnsCryptForceTcp = it)) },
         )
         PrefSwitch(
             label = "Require DNSSEC",
             checked = local.dnsCryptRequireDnssec,
-            onChecked = { local = local.copy(dnsCryptRequireDnssec = it) },
+            onChecked = { commit(local.copy(dnsCryptRequireDnssec = it)) },
         )
         Button(
             onClick = {
@@ -439,17 +500,105 @@ fun SettingsScreen(
         }
 
         Button(
-            onClick = { onSavePreferences(local) },
+            onClick = { commit(local, restart = true) },
             modifier = Modifier.fillMaxWidth(),
         ) {
-            Text("Save settings")
+            Text("Apply & restart tunnel")
         }
         Text(
-            text = "Saving restarts an active Connected tunnel so changes apply immediately. " +
-                "Otherwise they apply on the next Start.",
+            text = "Toggles and chips save immediately (firewall stays on when you leave). " +
+                "Text fields flush when you leave Settings. “Apply & restart tunnel” reloads " +
+                "Tor/DNSCrypt while Connected; otherwise changes apply on the next Start.",
             style = MaterialTheme.typography.bodySmall,
         )
     }
+}
+
+@Composable
+private fun DnsCryptResolverPickerDialog(
+    selected: String,
+    onSelect: (String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var query by remember { mutableStateOf("") }
+    val resolvers = remember { DnsCryptPublicResolvers.all.filterNot { it.ipv6 } }
+    val filtered = remember(query) {
+        val q = query.trim()
+        if (q.isEmpty()) {
+            resolvers
+        } else {
+            resolvers.filter {
+                it.name.contains(q, ignoreCase = true) ||
+                    it.description.contains(q, ignoreCase = true)
+            }
+        }
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("DNSCrypt resolvers (${resolvers.size})") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedTextField(
+                    value = query,
+                    onValueChange = { query = it },
+                    label = { Text("Search") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                )
+                Text(
+                    text = "${filtered.size} match(es). Filters (no-log / DNSSEC / …) still apply.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                LazyColumn(modifier = Modifier.heightIn(max = 420.dp)) {
+                    item {
+                        Text(
+                            text = "Auto (all matching filters)",
+                            style = MaterialTheme.typography.titleSmall,
+                            color = if (selected == DnsCryptPublicResolvers.AUTO) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                MaterialTheme.colorScheme.onSurface
+                            },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { onSelect(DnsCryptPublicResolvers.AUTO) }
+                                .padding(vertical = 10.dp),
+                        )
+                    }
+                    items(filtered, key = { it.name }) { entry ->
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { onSelect(entry.name) }
+                                .padding(vertical = 8.dp),
+                        ) {
+                            Text(
+                                text = entry.name,
+                                style = MaterialTheme.typography.bodyLarge,
+                                color = if (entry.name == selected) {
+                                    MaterialTheme.colorScheme.primary
+                                } else {
+                                    MaterialTheme.colorScheme.onSurface
+                                },
+                            )
+                            if (entry.description.isNotBlank()) {
+                                Text(
+                                    text = entry.description,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 2,
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("Close") }
+        },
+    )
 }
 
 @Composable

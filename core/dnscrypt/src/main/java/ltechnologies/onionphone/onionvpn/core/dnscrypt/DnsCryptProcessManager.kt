@@ -9,6 +9,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import ltechnologies.onionphone.onionvpn.core.dnscrypt.config.DnsCryptConfigWriter
+import ltechnologies.onionphone.onionvpn.core.dnscrypt.config.DnsCryptPublicResolvers
 import ltechnologies.onionphone.onionvpn.core.dnscrypt.lifecycle.DnsCryptReadiness
 import ltechnologies.onionphone.onionvpn.core.model.TunnelFailure
 import ltechnologies.onionphone.onionvpn.core.model.TunnelPreferences
@@ -204,6 +205,7 @@ class DnsCryptProcessManager(
     }
 
     private fun writeConfig(serverName: String, ports: TunnelRuntimePorts) {
+        seedPublicResolversCache()
         configFile.writeText(
             DnsCryptConfigWriter.write(
                 configDirectory = configDirectory.absolutePath,
@@ -217,6 +219,24 @@ class DnsCryptProcessManager(
         File(configDirectory, DnsCryptConfigWriter.BLOCKED_NAMES_FILE).writeText(
             DnsCryptConfigWriter.blockedNamesFileContent(),
         )
+    }
+
+    /** Seed offline public-resolvers cache (+ minisig) so sources work before Tor refresh. */
+    private fun seedPublicResolversCache() {
+        val names = listOf(
+            DnsCryptPublicResolvers.SOURCE_CACHE_FILE,
+            "${DnsCryptPublicResolvers.SOURCE_CACHE_FILE}.minisig",
+        )
+        for (name in names) {
+            val dest = File(configDirectory, name)
+            runCatching {
+                context.assets.open(name).use { input ->
+                    dest.outputStream().use { output -> input.copyTo(output) }
+                }
+            }.onFailure { err ->
+                Timber.w(err, "Failed to seed DNSCrypt asset %s", name)
+            }
+        }
     }
 
     companion object {

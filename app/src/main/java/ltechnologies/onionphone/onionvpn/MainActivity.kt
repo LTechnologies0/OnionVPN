@@ -139,7 +139,10 @@ private fun OnionVpnApp(
     onStart: () -> Unit,
     onStop: () -> Unit,
     onNewNym: () -> Unit,
-    onSavePreferences: (ltechnologies.onionphone.onionvpn.core.model.TunnelPreferences) -> Unit,
+    onSavePreferences: (
+        prefs: ltechnologies.onionphone.onionvpn.core.model.TunnelPreferences,
+        restartIfConnected: Boolean,
+    ) -> Unit,
     onLoadTorrc: () -> String,
     onLoadDnsCryptToml: () -> String,
     onSaveTorrc: (String) -> Unit,
