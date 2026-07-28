@@ -26,6 +26,7 @@ import timber.log.Timber
 class UnderlyingNetworkTracker(
     private val context: Context,
     private val vpnService: VpnService,
+    private val onUnderlyingChanged: (() -> Unit)? = null,
 ) {
     private var callback: ConnectivityManager.NetworkCallback? = null
 
@@ -81,6 +82,7 @@ class UnderlyingNetworkTracker(
             } else {
                 Timber.w("No underlying non-VPN network — setUnderlyingNetworks(null)")
             }
+            onUnderlyingChanged?.invoke()
         } catch (error: Exception) {
             Timber.e(error, "setUnderlyingNetworks failed")
         }

@@ -46,4 +46,11 @@ class TunnelOrchestrator @Inject constructor(
             Intent(context, TunnelForegroundService::class.java).setAction(TunnelForegroundService.ACTION_STOP),
         )
     }
+
+    fun newNym() {
+        context.startService(
+            Intent(context, TunnelForegroundService::class.java)
+                .setAction(TunnelForegroundService.ACTION_NEWNYM),
+        )
+    }
 }

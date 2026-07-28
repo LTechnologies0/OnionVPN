@@ -25,6 +25,7 @@ fun StatusScreen(
     isBusy: Boolean,
     onStart: () -> Unit,
     onStop: () -> Unit,
+    onNewNym: (() -> Unit)? = null,
 ) {
     Column(
         modifier = Modifier
@@ -38,6 +39,22 @@ fun StatusScreen(
         Text(text = "Tor: ${if (snapshot.torRunning) "up" else "down"}")
         Text(text = "DNSCrypt: ${if (snapshot.dnsCryptRunning) "up" else "down"}")
         Text(text = "VPN: ${if (snapshot.vpnEstablished) "up" else "down"}")
+        if (snapshot.torControlConnected || snapshot.torBootstrapProgress > 0) {
+            Text(
+                text = "Control: ${if (snapshot.torControlConnected) "up" else "…"}  " +
+                    "bootstrap ${snapshot.torBootstrapProgress}%  " +
+                    "circuits=${snapshot.torBuiltCircuits}" +
+                    if (snapshot.torCircuitEstablished) " (established)" else "",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            if (snapshot.torBootstrapSummary.isNotBlank() && snapshot.torBootstrapProgress < 100) {
+                Text(
+                    text = snapshot.torBootstrapSummary,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
         if (snapshot.phase == TunnelPhase.Connected && snapshot.throughputText.isNotBlank()) {
             Text(
                 text = snapshot.throughputText,
@@ -67,6 +84,15 @@ fun StatusScreen(
                     else -> "Start tunnel"
                 },
             )
+        }
+        if (snapshot.phase == TunnelPhase.Connected && onNewNym != null) {
+            Button(
+                onClick = onNewNym,
+                modifier = Modifier.fillMaxWidth(),
+                enabled = snapshot.torControlConnected,
+            ) {
+                Text("New identity (NEWNYM)")
+            }
         }
 
         if (snapshot.validations.isNotEmpty()) {

@@ -49,6 +49,10 @@ class MainViewModel @Inject constructor(
         orchestrator.stop()
     }
 
+    fun newNym() {
+        orchestrator.newNym()
+    }
+
     fun savePreferences(prefs: TunnelPreferences, restartIfConnected: Boolean = true) {
         viewModelScope.launch {
             preferencesStore.update { prefs }

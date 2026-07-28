@@ -127,8 +127,14 @@ data class TunnelSnapshot(
     val vpnEstablished: Boolean = false,
     val validations: List<ValidationCheck> = emptyList(),
     val lastError: String? = null,
-    /** Live Tor clearnet bandwidth (UID TrafficStats), e.g. "Tor ▼ 12 KB/s  ▲ 3 KB/s". */
+    /** Live Tor bandwidth text (control GETINFO preferred, UID TrafficStats fallback). */
     val throughputText: String = "",
+    /** Tor control-spec bootstrap 0–100. */
+    val torBootstrapProgress: Int = 0,
+    val torBootstrapSummary: String = "",
+    val torControlConnected: Boolean = false,
+    val torBuiltCircuits: Int = 0,
+    val torCircuitEstablished: Boolean = false,
 ) {
     val isBusy: Boolean
         get() = when (phase) {

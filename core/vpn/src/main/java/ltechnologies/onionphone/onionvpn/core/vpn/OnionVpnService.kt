@@ -208,7 +208,11 @@ class OnionVpnService : VpnService() {
 
     private fun startUnderlyingTracking() {
         if (underlyingTracker == null) {
-            underlyingTracker = UnderlyingNetworkTracker(applicationContext, this)
+            underlyingTracker = UnderlyingNetworkTracker(
+                applicationContext,
+                this,
+                onUnderlyingChanged = { onUnderlyingNetworkChanged?.invoke() },
+            )
         }
         underlyingTracker?.start()
     }
@@ -279,6 +283,10 @@ class OnionVpnService : VpnService() {
         const val EXTRA_DNS_MODE = "dns_mode"
 
         private val generationSeq = AtomicInteger(0)
+
+        /** Invoked when Wi‑Fi/cell underlying network changes — wake Tor (SIGNAL ACTIVE). */
+        @Volatile
+        var onUnderlyingNetworkChanged: (() -> Unit)? = null
 
         /** Call before [ACTION_START] so waiters ignore a previous establish. */
         fun nextGeneration(): Int {

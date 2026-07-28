@@ -85,6 +85,9 @@ class TunnelForegroundService : Service() {
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
+        OnionVpnService.onUnderlyingNetworkChanged = {
+            tor.signalActive()
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -102,6 +105,23 @@ class TunnelForegroundService : Service() {
             ACTION_STOP -> {
                 scope.launch { runStopSequence(userInitiated = true) }
                 return START_NOT_STICKY
+            }
+            ACTION_NEWNYM -> {
+                scope.launch {
+                    val result = tor.newNym()
+                    result.onSuccess {
+                        Timber.i("NEWNYM via control port")
+                        updateSnapshot(_snapshot.value.phase)
+                    }
+                    result.onFailure { err ->
+                        Timber.e(err, "NEWNYM failed")
+                        updateSnapshot(
+                            _snapshot.value.phase,
+                            lastError = "NEWNYM failed: ${err.message}",
+                        )
+                    }
+                }
+                return START_STICKY
             }
             ACTION_REVOKED -> {
                 Timber.w("VPN revoked by system — fail-closed teardown")
@@ -145,6 +165,7 @@ class TunnelForegroundService : Service() {
     }
 
     override fun onDestroy() {
+        OnionVpnService.onUnderlyingNetworkChanged = null
         throughputJob?.cancel()
         scope.cancel()
         releaseBootstrapWakeLock()
@@ -189,7 +210,17 @@ class TunnelForegroundService : Service() {
                 "dnscrypt=${ports.dnsCryptListenPort} dnsMode=${preferences.dnsResolverMode}",
         )
 
-        val torResult = tor.start(ports, preferences)
+        val bootstrapUiJob = scope.launch {
+            while (isActive) {
+                delay(500)
+                updateSnapshot(TunnelPhase.StartingTor, torRunning = tor.isRunning())
+            }
+        }
+        val torResult = try {
+            tor.start(ports, preferences)
+        } finally {
+            bootstrapUiJob.cancel()
+        }
         if (torResult.isFailure) {
             handleFailure(torResult.exceptionOrNull()?.message ?: "Tor failed", fromValidation = false)
             return
@@ -348,7 +379,8 @@ class TunnelForegroundService : Service() {
             dnsCrypt.stop()
             tor.stop()
         } else {
-            Timber.i("Kill-switch Blocking TUN only — Tor/DNSCrypt kept for recovery")
+            tor.signalDormant()
+            Timber.i("Kill-switch Blocking TUN only — Tor dormant, kept for recovery")
         }
         updateSnapshot(
             phase = TunnelPhase.Blocking,
@@ -564,15 +596,46 @@ class TunnelForegroundService : Service() {
         throughputJob?.cancel()
         bandwidthSampler.reset()
         throughputText = ""
+        var lastRead = 0L
+        var lastWrite = 0L
+        var lastTs = 0L
         throughputJob = scope.launch {
+            // Push bootstrap / circuit status into snapshot while connected.
             while (isActive) {
                 delay(THROUGHPUT_INTERVAL_MS)
-                if (_snapshot.value.phase != TunnelPhase.Connected) continue
-                val sample = bandwidthSampler.sample()
-                throughputText = sample.displayText
-                _snapshot.value = _snapshot.value.copy(throughputText = throughputText)
-                updateNotification(TunnelPhase.Connected)
+                val phase = _snapshot.value.phase
+                if (phase != TunnelPhase.Connected && phase != TunnelPhase.StartingTor) continue
+                tor.refreshControlInfo()
+                val st = tor.controlStatus.value
+                if (phase == TunnelPhase.Connected && st.connected) {
+                    val now = System.currentTimeMillis()
+                    if (lastTs > 0L) {
+                        val dt = (now - lastTs).coerceAtLeast(1) / 1000.0
+                        val down = ((st.readBytes - lastRead).coerceAtLeast(0) / dt).toLong()
+                        val up = ((st.writeBytes - lastWrite).coerceAtLeast(0) / dt).toLong()
+                        throughputText = "Tor ▼ ${formatRate(down)}  ▲ ${formatRate(up)}  " +
+                            "circ=${st.builtCircuits}"
+                    } else {
+                        val sample = bandwidthSampler.sample()
+                        throughputText = sample.displayText
+                    }
+                    lastRead = st.readBytes
+                    lastWrite = st.writeBytes
+                    lastTs = now
+                } else if (phase == TunnelPhase.Connected) {
+                    val sample = bandwidthSampler.sample()
+                    throughputText = sample.displayText
+                }
+                updateSnapshot(phase)
             }
+        }
+    }
+
+    private fun formatRate(bytesPerSec: Long): String {
+        return when {
+            bytesPerSec >= 1_000_000 -> "%.1f MB/s".format(bytesPerSec / 1_000_000.0)
+            bytesPerSec >= 1_000 -> "%.0f KB/s".format(bytesPerSec / 1_000.0)
+            else -> "$bytesPerSec B/s"
         }
     }
 
@@ -684,6 +747,7 @@ class TunnelForegroundService : Service() {
         vpnEstablished: Boolean = _snapshot.value.vpnEstablished,
         lastError: String? = _snapshot.value.lastError,
     ) {
+        val st = tor.controlStatus.value
         _snapshot.value = TunnelSnapshot(
             phase = phase,
             killSwitchEnabled = preferences.killSwitchEnabled,
@@ -693,6 +757,11 @@ class TunnelForegroundService : Service() {
             validations = validations,
             lastError = lastError,
             throughputText = if (phase == TunnelPhase.Connected) throughputText else "",
+            torBootstrapProgress = st.bootstrapProgress,
+            torBootstrapSummary = st.bootstrapSummary,
+            torControlConnected = st.connected,
+            torBuiltCircuits = st.builtCircuits,
+            torCircuitEstablished = st.circuitEstablished,
         )
         updateNotification(phase)
     }
@@ -700,6 +769,7 @@ class TunnelForegroundService : Service() {
         companion object {
         const val ACTION_START = "ltechnologies.onionphone.onionvpn.tunnel.START"
         const val ACTION_STOP = "ltechnologies.onionphone.onionvpn.tunnel.STOP"
+        const val ACTION_NEWNYM = "ltechnologies.onionphone.onionvpn.tunnel.NEWNYM"
         const val ACTION_REVOKED = "ltechnologies.onionphone.onionvpn.tunnel.REVOKED"
         const val ACTION_ALWAYS_ON = "ltechnologies.onionphone.onionvpn.tunnel.ALWAYS_ON"
         const val EXTRA_ROUTE_ALL = "route_all"

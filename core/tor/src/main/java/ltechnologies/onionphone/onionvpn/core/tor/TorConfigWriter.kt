@@ -3,6 +3,7 @@ package ltechnologies.onionphone.onionvpn.core.tor
 import ltechnologies.onionphone.onionvpn.core.model.DnsResolverMode
 import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
 import ltechnologies.onionphone.onionvpn.core.model.TunnelPreferences
+import java.io.File
 
 /**
  * Tor client config aligned with:
@@ -25,6 +26,9 @@ import ltechnologies.onionphone.onionvpn.core.model.TunnelPreferences
  * TLS/DNSCrypt end-to-end still required. Bridges mitigate ISP fingerprinting of Tor.
  */
 object TorConfigWriter {
+    const val CONTROL_SOCKET_NAME = "control.sock"
+    const val COOKIE_FILE_NAME = "control_auth_cookie"
+
     /** Full isolation flags for maximal stream/circuit separation (path-spec + man). */
     const val SOCKS_ISOLATION_MAX =
         "IsolateClientAddr IsolateClientProtocol IsolateDestAddr IsolateDestPort IsolateSOCKSAuth"
@@ -76,7 +80,11 @@ object TorConfigWriter {
         appendLine("VirtualAddrNetwork 10.192.0.0/10")
         appendLine("TransPort 0")
         appendLine("HTTPTunnelPort 0")
+        // Control plane: Unix socket + cookie in DataDirectory (no TCP ControlPort).
         appendLine("ControlPort 0")
+        appendLine("CookieAuthentication 1")
+        appendLine("CookieAuthFile ${File(dataDirectory, COOKIE_FILE_NAME).absolutePath}")
+        appendLine("ControlSocket ${File(dataDirectory, CONTROL_SOCKET_NAME).absolutePath}")
 
         // Local / private-network MITM: refuse SOCKS to RFC1918/link-local unless Automap.
         appendLine("ClientRejectInternalAddresses 1")

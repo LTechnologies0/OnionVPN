@@ -52,6 +52,7 @@ object TorPathValidator {
         val rejectInternal = config.contains("ClientRejectInternalAddresses 1")
         val safeLogging = config.contains("SafeLogging 1")
         val refuseUnknownExits = config.contains("RefuseUnknownExits 1")
+        val controlSocket = config.contains("ControlSocket ") && config.contains("CookieAuthentication 1")
         val socksIsolation = config.contains("IsolateDestAddr") &&
             config.contains("IsolateDestPort") &&
             config.contains("IsolateSOCKSAuth") &&
@@ -68,15 +69,15 @@ object TorPathValidator {
         val ok = hasSocks && hasDns && safeSocksSet && clientOnly &&
             entryGuards && socksIsolation && socksPolicy && multiSocks &&
             hasProbeGroup && noKeepAliveOnApps && rejectInternal && safeLogging &&
-            refuseUnknownExits
+            refuseUnknownExits && controlSocket
         return ValidationCheck(
             id = "tor.config.content",
             label = "Tor torrc (runtime)",
             status = if (ok) ValidationStatus.Pass else ValidationStatus.Fail,
             detail = "$source: socks=$hasSocks dns=$hasDns multiSocks=$multiSocks " +
                 "probeGroup=$hasProbeGroup noKeepAliveApps=$noKeepAliveOnApps " +
-                "RejectInternal=$rejectInternal SafeLogging=$safeLogging " +
-                "RefuseUnknownExits=$refuseUnknownExits " +
+                "ControlSocket=$controlSocket RejectInternal=$rejectInternal " +
+                "SafeLogging=$safeLogging RefuseUnknownExits=$refuseUnknownExits " +
                 "SocksPolicy=$socksPolicy EntryGuards=$entryGuards Isolation=$socksIsolation" +
                 (if (socksPort != null) " ports=$socksPort/$dnsPort" else ""),
         )

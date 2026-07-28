@@ -57,5 +57,9 @@ class TorConfigWriterTest {
         assertTrue(torrc.contains("ClientPreferIPv6ORPort 0"))
         assertTrue(torrc.contains("RejectPlaintextPorts 23,109"))
         assertFalse(torrc.contains("GeoIPExcludeUnknown"))
+        assertTrue(torrc.contains("CookieAuthentication 1"))
+        assertTrue(torrc.contains("ControlSocket "))
+        assertTrue(torrc.contains(TorConfigWriter.CONTROL_SOCKET_NAME))
+        assertTrue(torrc.contains(TorConfigWriter.COOKIE_FILE_NAME))
     }
 }

@@ -69,6 +69,7 @@ class MainActivity : ComponentActivity() {
                     firewallEngine = firewallEngine,
                     onStart = ::requestNotificationsThenStart,
                     onStop = viewModel::stopTunnel,
+                    onNewNym = viewModel::newNym,
                     onSavePreferences = viewModel::savePreferences,
                     onLoadTorrc = viewModel::readTorrc,
                     onLoadDnsCryptToml = viewModel::readDnsCryptToml,
@@ -110,6 +111,7 @@ private fun OnionVpnApp(
     firewallEngine: InteractiveFirewallEngine,
     onStart: () -> Unit,
     onStop: () -> Unit,
+    onNewNym: () -> Unit,
     onSavePreferences: (ltechnologies.onionphone.onionvpn.core.model.TunnelPreferences) -> Unit,
     onLoadTorrc: () -> String,
     onLoadDnsCryptToml: () -> String,
@@ -150,6 +152,7 @@ private fun OnionVpnApp(
                     isBusy = snapshot.isBusy,
                     onStart = onStart,
                     onStop = onStop,
+                    onNewNym = onNewNym,
                 )
                 1 -> FirewallScreen(engine = firewallEngine)
                 2 -> LogsScreen()
