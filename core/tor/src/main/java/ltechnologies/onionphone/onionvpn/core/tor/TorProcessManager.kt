@@ -128,6 +128,10 @@ class TorProcessManager(
 
     fun isRunning(): Boolean = process?.isAlive == true
 
+    /** Probe SocksPort while Tor is up; used for reputation list downloads. */
+    fun currentProbeSocksPort(): Int? =
+        runtimePorts?.torProbeSocksPort?.takeIf { isRunning() }
+
     /** SIGNAL NEWNYM + CLEARDNSCACHE (user “new identity”). */
     fun newNym(): Result<Unit> {
         if (!control.isConnected) return Result.failure(IOException("control not connected"))

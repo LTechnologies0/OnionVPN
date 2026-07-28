@@ -35,16 +35,22 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import java.util.concurrent.atomic.AtomicReference
 import ltechnologies.onionphone.onionvpn.core.dnscrypt.config.DnsCryptPublicResolvers
 import ltechnologies.onionphone.onionvpn.core.model.DnsResolverMode
 import ltechnologies.onionphone.onionvpn.core.model.FirewallDefaultAction
 import ltechnologies.onionphone.onionvpn.core.model.TunnelPreferences
+import ltechnologies.onionphone.onionvpn.threat.DomainReputationRepository
 import ltechnologies.onionphone.onionvpn.util.SystemSecurityIntents
 
 @Composable
 fun SettingsScreen(
     preferences: TunnelPreferences,
+    domainReputation: DomainReputationRepository,
     onLoadTorrc: () -> String,
     onLoadDnsCryptToml: () -> String,
     onSavePreferences: (TunnelPreferences, restartIfConnected: Boolean) -> Unit,
@@ -269,6 +275,42 @@ fun SettingsScreen(
             enabled = local.firewallEnabled,
             modifier = Modifier.fillMaxWidth(),
         )
+
+        Text("Domain threat lists", style = MaterialTheme.typography.titleMedium)
+        Text(
+            text = "HaGeZi lists colour firewall prompts: orange = ads/tracking/telemetry " +
+                "(Light + Native Tracker), red = malware/C2 (TIF mini). " +
+                "Updates prefer Tor when the tunnel is up.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        val reputation by domainReputation.status.collectAsStateWithLifecycle()
+        val lastUpdate = if (reputation.lastSuccessEpochMs > 0L) {
+            SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault())
+                .format(Date(reputation.lastSuccessEpochMs))
+        } else {
+            "never"
+        }
+        Text(
+            text = "Tracking: ${reputation.trackingEntries} · Malware: ${reputation.malwareEntries} · " +
+                "Last update: $lastUpdate",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        if (reputation.lastError != null) {
+            Text(
+                text = "Last error: ${reputation.lastError}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+            )
+        }
+        Button(
+            onClick = { domainReputation.requestUpdate() },
+            enabled = !reputation.updating,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Text(if (reputation.updating) "Updating…" else "Update domain lists")
+        }
 
         Text("Tor", style = MaterialTheme.typography.titleMedium)
         Text(

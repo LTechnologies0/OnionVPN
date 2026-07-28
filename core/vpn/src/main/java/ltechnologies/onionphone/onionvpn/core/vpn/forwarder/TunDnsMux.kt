@@ -11,6 +11,8 @@ import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.locks.LockSupport
+import ltechnologies.onionphone.onionvpn.core.vpn.dns.DnsHostnameCache
+import ltechnologies.onionphone.onionvpn.core.vpn.dns.DnsPacketParser
 import ltechnologies.onionphone.onionvpn.core.vpn.firewall.FirewallBridge
 import timber.log.Timber
 
@@ -82,6 +84,7 @@ class TunDnsMux(
                             continue
                         }
                         divertDnsToDnsCrypt && isDnsQueryToVpnDns(buf, n, vpnDns) -> {
+                            snoopDnsOutbound(buf, n)
                             val packet = borrowPacket(buf, n)
                             dnsExecutor.execute {
                                 try {
@@ -92,6 +95,8 @@ class TunDnsMux(
                             }
                         }
                         isDnsQueryToVpnDns(buf, n, vpnDns) -> {
+                            // FakeDNS path — still learn QNAME before hev mapdns.
+                            snoopDnsOutbound(buf, n)
                             writeHev(localHevOut, buf, n)
                         }
                         !FirewallBridge.engine.allowOutbound(buf, n) -> {
@@ -125,9 +130,13 @@ class TunDnsMux(
                             LockSupport.parkNanos(EMPTY_READ_PARK_NS)
                             continue
                         }
-                        else -> synchronized(tunWriteLock) {
-                            if (!running.get()) return@synchronized
-                            localTunOut.write(buf, 0, n)
+                        else -> {
+                            // FakeDNS / hev replies: attribute Fake-IP → hostname.
+                            snoopDnsInbound(buf, n)
+                            synchronized(tunWriteLock) {
+                                if (!running.get()) return@synchronized
+                                localTunOut.write(buf, 0, n)
+                            }
                         }
                     }
                 }
@@ -207,6 +216,73 @@ class TunDnsMux(
         return destPort == 53
     }
 
+    /** Learn QNAME from outbound DNS queries (DNSCrypt divert or FakeDNS). */
+    private fun snoopDnsOutbound(packet: ByteArray, length: Int) {
+        val payload = udpDnsPayload(packet, length, expectDestPort53 = true) ?: return
+        val parsed = DnsPacketParser.parse(packet, payload.first, payload.second) ?: return
+        val qname = parsed.qname ?: return
+        // Pending map by query id helps FakeDNS responses that omit useful ANSWER names.
+        if (!parsed.isResponse && parsed.queryId >= 0) {
+            pendingQnames[parsed.queryId] = qname
+            if (pendingQnames.size > PENDING_QNAME_CAP) {
+                val it = pendingQnames.keys.iterator()
+                var n = 0
+                while (it.hasNext() && n < 64) {
+                    it.next()
+                    it.remove()
+                    n++
+                }
+            }
+        }
+    }
+
+    /** Learn IP→host from inbound DNS replies (hev FakeDNS → TUN). */
+    private fun snoopDnsInbound(packet: ByteArray, length: Int) {
+        val payload = udpDnsPayload(packet, length, expectDestPort53 = false) ?: return
+        // Source port 53 = DNS response toward the client.
+        val ihl = (packet[0].toInt() and 0x0f) * 4
+        val srcPort = ((packet[ihl].toInt() and 0xff) shl 8) or (packet[ihl + 1].toInt() and 0xff)
+        if (srcPort != 53) return
+        learnFromDnsPayload(packet, payload.first, payload.second)
+    }
+
+    private fun learnFromDnsPayload(buf: ByteArray, offset: Int, length: Int) {
+        val parsed = DnsPacketParser.parse(buf, offset, length) ?: return
+        if (!parsed.isResponse) return
+        val host = parsed.qname
+            ?: pendingQnames.remove(parsed.queryId)
+            ?: return
+        pendingQnames.remove(parsed.queryId)
+        for (ip in parsed.aRecords) {
+            DnsHostnameCache.put(ip, host)
+        }
+    }
+
+    /**
+     * @return Pair(dnsOffset, dnsLength) for UDP/53 payloads, or null.
+     * @param expectDestPort53 true for client→resolver, false to skip dest-port check.
+     */
+    private fun udpDnsPayload(
+        packet: ByteArray,
+        length: Int,
+        expectDestPort53: Boolean,
+    ): Pair<Int, Int>? {
+        if (length < 28) return null
+        val version = (packet[0].toInt() ushr 4) and 0x0f
+        if (version != 4) return null
+        val ihl = (packet[0].toInt() and 0x0f) * 4
+        if (length < ihl + 8) return null
+        if (packet[9].toInt() and 0xff != PROTO_UDP) return null
+        if (expectDestPort53) {
+            val destPort = ((packet[ihl + 2].toInt() and 0xff) shl 8) or (packet[ihl + 3].toInt() and 0xff)
+            if (destPort != 53) return null
+        }
+        val dnsOffset = ihl + 8
+        val dnsLen = length - dnsOffset
+        if (dnsLen < 12) return null
+        return dnsOffset to dnsLen
+    }
+
     private fun handleDnsQuery(packet: ByteArray, length: Int, tunOut: FileOutputStream) {
         if (!running.get()) return
         try {
@@ -228,6 +304,9 @@ class TunDnsMux(
             )
             val response = DatagramPacket(scratch.responseBuf, scratch.responseBuf.size)
             socket.receive(response)
+
+            // Attribute resolved A records → QNAME for firewall prompts.
+            learnFromDnsPayload(scratch.responseBuf, 0, response.length)
 
             val replyLen = buildDnsReplyInto(
                 request = packet,
@@ -333,7 +412,12 @@ class TunDnsMux(
             Runtime.getRuntime().availableProcessors().coerceIn(2, 4)
         private val DNS_MAX_THREADS = (DNS_CORE_THREADS + 2).coerceAtMost(6)
         private const val DNS_QUEUE_CAP = 64
+        private const val PENDING_QNAME_CAP = 512
 
         private val dnsScratch = ThreadLocal.withInitial { DnsScratch() }
+
+        /** queryId → QNAME for FakeDNS responses that rely on query correlation. */
+        private val pendingQnames =
+            java.util.concurrent.ConcurrentHashMap<Int, String>(64)
     }
 }

@@ -46,10 +46,11 @@ internal class FirewallPromptNotifier(
 
     fun show(info: FirewallConnectionInfo) {
         ensureChannel()
+        val dest = info.displayDestination()
         val content = appContext.getString(
             R.string.firewall_prompt_notif_text,
             info.protocolLabel,
-            info.destIp,
+            dest,
             info.destPort,
         )
         val openPending = detailPendingIntent(info.requestId)

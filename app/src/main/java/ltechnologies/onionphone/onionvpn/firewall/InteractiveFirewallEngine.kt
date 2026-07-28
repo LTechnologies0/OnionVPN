@@ -20,6 +20,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import ltechnologies.onionphone.onionvpn.core.model.DomainThreatCategory
 import ltechnologies.onionphone.onionvpn.core.model.FirewallConnectionInfo
 import ltechnologies.onionphone.onionvpn.core.model.FirewallDefaultAction
 import ltechnologies.onionphone.onionvpn.core.model.FirewallJournalEntry
@@ -27,11 +28,13 @@ import ltechnologies.onionphone.onionvpn.core.model.FirewallRule
 import ltechnologies.onionphone.onionvpn.core.model.FirewallRuleScope
 import ltechnologies.onionphone.onionvpn.core.model.FirewallVerdict
 import ltechnologies.onionphone.onionvpn.core.model.TunnelPreferences
+import ltechnologies.onionphone.onionvpn.core.vpn.dns.DnsHostnameCache
 import ltechnologies.onionphone.onionvpn.core.vpn.firewall.ConnectionOwnerResolver
 import ltechnologies.onionphone.onionvpn.core.vpn.firewall.IpPacketInfo
 import ltechnologies.onionphone.onionvpn.core.vpn.firewall.IpPacketParser
 import ltechnologies.onionphone.onionvpn.core.vpn.firewall.PacketFirewall
 import ltechnologies.onionphone.onionvpn.prefs.TunnelPreferencesStore
+import ltechnologies.onionphone.onionvpn.threat.DomainReputationRepository
 import timber.log.Timber
 
 /**
@@ -49,6 +52,7 @@ class InteractiveFirewallEngine @Inject constructor(
     @ApplicationContext private val context: Context,
     private val rulesStore: FirewallRulesStore,
     private val preferencesStore: TunnelPreferencesStore,
+    private val domainReputation: DomainReputationRepository,
 ) : PacketFirewall {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val ownerResolver = ConnectionOwnerResolver(context)
@@ -200,6 +204,8 @@ class InteractiveFirewallEngine @Inject constructor(
         ruleKey: String,
         decisionKey: Long,
     ): Boolean {
+        val destHost = DnsHostnameCache.lookup(info.dstIp)
+        val threat = domainReputation.classify(destHost)
         val request = FirewallConnectionInfo(
             requestId = UUID.randomUUID().toString(),
             uid = uid,
@@ -209,6 +215,8 @@ class InteractiveFirewallEngine @Inject constructor(
             destPort = info.dstPort,
             protocol = info.protocol,
             protocolLabel = IpPacketParser.protocolLabel(info.protocol),
+            destHost = destHost,
+            threatCategory = threat,
         )
         val queued = QueuedPrompt(request, flowKey, app, ruleKey, decisionKey)
         synchronized(queueLock) {
@@ -312,6 +320,8 @@ class InteractiveFirewallEngine @Inject constructor(
             uid = answered.request.uid,
             app = answered.app,
             destIp = answered.request.destIp,
+            destHost = answered.request.destHost,
+            threatCategory = answered.request.threatCategory,
             destPort = answered.request.destPort,
             protocolLabel = answered.request.protocolLabel,
             verdict = verdict,
@@ -407,10 +417,13 @@ class InteractiveFirewallEngine @Inject constructor(
         scope: FirewallRuleScope,
         note: String,
     ) {
+        val destHost = DnsHostnameCache.lookup(info.dstIp)
         appendJournal(
             uid = uid,
             app = app,
             destIp = info.dstIp,
+            destHost = destHost,
+            threatCategory = domainReputation.classify(destHost),
             destPort = info.dstPort,
             protocolLabel = IpPacketParser.protocolLabel(info.protocol),
             verdict = verdict,
@@ -423,6 +436,8 @@ class InteractiveFirewallEngine @Inject constructor(
         uid: Int,
         app: AppIdentity,
         destIp: String,
+        destHost: String?,
+        threatCategory: DomainThreatCategory,
         destPort: Int,
         protocolLabel: String,
         verdict: FirewallVerdict,
@@ -441,6 +456,8 @@ class InteractiveFirewallEngine @Inject constructor(
             verdict = verdict,
             scope = ruleScope,
             note = note,
+            destHost = destHost,
+            threatCategory = threatCategory,
         )
         // Non-blocking: DROP_OLDEST if journal writer is behind (TUN must never wait).
         journalChannel.trySend(entry)

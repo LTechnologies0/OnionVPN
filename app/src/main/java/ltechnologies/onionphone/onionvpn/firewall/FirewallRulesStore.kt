@@ -15,6 +15,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
+import ltechnologies.onionphone.onionvpn.core.model.DomainThreatCategory
 import ltechnologies.onionphone.onionvpn.core.model.FirewallJournalEntry
 import ltechnologies.onionphone.onionvpn.core.model.FirewallRule
 import ltechnologies.onionphone.onionvpn.core.model.FirewallRuleScope
@@ -150,6 +151,8 @@ class FirewallRulesStore @Inject constructor(
                     .put("packageName", e.packageName)
                     .put("appLabel", e.appLabel)
                     .put("destIp", e.destIp)
+                    .put("destHost", e.destHost.orEmpty())
+                    .put("threatCategory", e.threatCategory.name)
                     .put("destPort", e.destPort)
                     .put("protocolLabel", e.protocolLabel)
                     .put("verdict", e.verdict.name)
@@ -180,6 +183,10 @@ class FirewallRulesStore @Inject constructor(
                             verdict = FirewallVerdict.valueOf(o.getString("verdict")),
                             scope = FirewallRuleScope.valueOf(o.getString("scope")),
                             note = o.optString("note"),
+                            destHost = o.optString("destHost").takeIf { it.isNotBlank() },
+                            threatCategory = runCatching {
+                                DomainThreatCategory.valueOf(o.optString("threatCategory", "NONE"))
+                            }.getOrDefault(DomainThreatCategory.NONE),
                         ),
                     )
                 }

@@ -72,6 +72,19 @@ data class FirewallRule(
     }
 }
 
+/**
+ * Reputation of a destination hostname from local blocklist databases.
+ *
+ * - [TRACKING]: ads / tracking / telemetry → orange in the UI
+ * - [MALWARE]: malware / C2 / phishing → red in the UI
+ * - [NONE]: unknown or not listed
+ */
+enum class DomainThreatCategory {
+    NONE,
+    TRACKING,
+    MALWARE,
+}
+
 data class FirewallConnectionInfo(
     val requestId: String,
     val uid: Int,
@@ -81,8 +94,14 @@ data class FirewallConnectionInfo(
     val destPort: Int,
     val protocol: Int,
     val protocolLabel: String,
+    /** Resolved hostname from DNS snooping, when available. */
+    val destHost: String? = null,
+    val threatCategory: DomainThreatCategory = DomainThreatCategory.NONE,
     val timestampEpochMs: Long = System.currentTimeMillis(),
-)
+) {
+    /** Prefer hostname for display; fall back to IP. */
+    fun displayDestination(): String = destHost?.takeIf { it.isNotBlank() } ?: destIp
+}
 
 data class FirewallJournalEntry(
     val id: String,
@@ -96,4 +115,6 @@ data class FirewallJournalEntry(
     val verdict: FirewallVerdict,
     val scope: FirewallRuleScope,
     val note: String = "",
+    val destHost: String? = null,
+    val threatCategory: DomainThreatCategory = DomainThreatCategory.NONE,
 )

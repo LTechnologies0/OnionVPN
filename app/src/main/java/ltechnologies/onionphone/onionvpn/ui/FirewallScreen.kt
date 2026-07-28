@@ -16,10 +16,12 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.graphics.Color
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import ltechnologies.onionphone.onionvpn.core.model.DomainThreatCategory
 import ltechnologies.onionphone.onionvpn.core.model.FirewallJournalEntry
 import ltechnologies.onionphone.onionvpn.core.model.FirewallRule
 import ltechnologies.onionphone.onionvpn.core.model.FirewallRuleScope
@@ -27,6 +29,9 @@ import ltechnologies.onionphone.onionvpn.core.model.FirewallVerdict
 import ltechnologies.onionphone.onionvpn.core.model.TunnelPreferences
 import ltechnologies.onionphone.onionvpn.firewall.FirewallPromptContent
 import ltechnologies.onionphone.onionvpn.firewall.InteractiveFirewallEngine
+
+private val ThreatOrange = Color(0xFFE65100)
+private val ThreatRed = Color(0xFFC62828)
 
 @Composable
 fun FirewallScreen(
@@ -143,13 +148,20 @@ private fun JournalRow(entry: FirewallJournalEntry) {
             },
         )
         Text(
-            "${entry.protocolLabel} ${entry.destIp}:${entry.destPort}" +
+            "${entry.protocolLabel} ${journalDest(entry)}:${entry.destPort}" +
                 if (entry.note.isNotBlank()) " · ${entry.note}" else "",
             style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            color = when (entry.threatCategory) {
+                DomainThreatCategory.MALWARE -> ThreatRed
+                DomainThreatCategory.TRACKING -> ThreatOrange
+                DomainThreatCategory.NONE -> MaterialTheme.colorScheme.onSurfaceVariant
+            },
         )
     }
 }
+
+private fun journalDest(entry: FirewallJournalEntry): String =
+    entry.destHost?.takeIf { it.isNotBlank() } ?: entry.destIp
 
 private fun destLabel(rule: FirewallRule): String {
     val host = rule.destHost.ifEmpty { "*" }
