@@ -78,7 +78,7 @@ fun FirewallPromptContent(
         }
 
         Text(
-            "${info.protocolLabel} → ${info.displayDestination()}:${info.destPort}",
+            "${info.protocolLabel} → ${info.threatCategory.notificationEmoji()} ${info.displayDestination()}:${info.destPort}",
             style = MaterialTheme.typography.titleMedium,
             color = destColor,
             fontWeight = if (info.threatCategory != DomainThreatCategory.NONE) {

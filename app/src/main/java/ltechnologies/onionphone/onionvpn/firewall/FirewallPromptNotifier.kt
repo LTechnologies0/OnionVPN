@@ -47,8 +47,8 @@ internal class FirewallPromptNotifier(
 
     fun show(info: FirewallConnectionInfo) {
         ensureChannel()
-        // Notification body text cannot reliably use coloured spans across OEMs —
-        // always prefix the destination with 🟢 / 🟠 / 🔴.
+        // Coloured spans are unreliable on OEMs — emoji next to the domain:
+        // 🟢 sûr (pas tracking/malware) · 🟠 tracking · 🔴 malware
         val dest = "${info.threatCategory.notificationEmoji()} ${info.displayDestination()}"
         val base = appContext.getString(
             R.string.firewall_prompt_notif_text,
