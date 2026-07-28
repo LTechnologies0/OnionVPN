@@ -27,9 +27,12 @@ fun threatLabelOrNull(category: DomainThreatCategory): String? = when (category)
     DomainThreatCategory.NONE -> null
 }
 
-/** Notification-safe marker — coloured spans are unreliable on Android OEMs. */
-fun DomainThreatCategory.notificationEmojiOrNull(): String? = when (this) {
-    DomainThreatCategory.NONE -> null
+/**
+ * Notification-safe marker next to the domain (coloured spans are unreliable on OEMs).
+ * Always returns an emoji so the destination line is never unmarked.
+ */
+fun DomainThreatCategory.notificationEmoji(): String = when (this) {
+    DomainThreatCategory.NONE -> "🟢"
     DomainThreatCategory.TRACKING -> "🟠"
     DomainThreatCategory.MALWARE -> "🔴"
 }

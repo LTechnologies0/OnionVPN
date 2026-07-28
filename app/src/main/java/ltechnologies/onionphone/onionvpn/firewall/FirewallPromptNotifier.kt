@@ -47,14 +47,9 @@ internal class FirewallPromptNotifier(
 
     fun show(info: FirewallConnectionInfo) {
         ensureChannel()
-        // Notification body text cannot reliably use coloured spans across OEMs.
-        // Prefix only known threats (unknown stays unmarked — never imply "safe").
-        val emoji = info.threatCategory.notificationEmojiOrNull()
-        val dest = if (emoji != null) {
-            "$emoji ${info.displayDestination()}"
-        } else {
-            info.displayDestination()
-        }
+        // Notification body text cannot reliably use coloured spans across OEMs —
+        // always prefix the destination with 🟢 / 🟠 / 🔴.
+        val dest = "${info.threatCategory.notificationEmoji()} ${info.displayDestination()}"
         val base = appContext.getString(
             R.string.firewall_prompt_notif_text,
             info.protocolLabel,
