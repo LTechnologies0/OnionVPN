@@ -143,10 +143,7 @@ private fun JournalRow(entry: FirewallJournalEntry) {
     val time = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
         .format(Date(entry.timestampEpochMs))
     val threatLabel = threatLabelOrNull(entry.threatCategory)
-    val destColor = when (entry.threatCategory) {
-        DomainThreatCategory.NONE -> MaterialTheme.colorScheme.onSurfaceVariant
-        else -> threatTextColor(entry.threatCategory)
-    }
+    val destColor = threatTextColor(entry.threatCategory)
     Column(modifier = Modifier.fillMaxWidth()) {
         Text(
             "$time  ${verdictLabel(entry.verdict)}  ${entry.appLabel}",

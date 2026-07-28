@@ -7,8 +7,15 @@ import androidx.compose.ui.res.stringResource
 import ltechnologies.onionphone.onionvpn.R
 import ltechnologies.onionphone.onionvpn.core.model.DomainThreatCategory
 
-/** Shared threat colours for Compose firewall surfaces (prompt + journal). */
+/**
+ * Threat colours for firewall surfaces.
+ *
+ * - Green = sûr (pas listé tracking/malware)
+ * - Orange = tracking / pubs / télémétrie
+ * - Red = malware / C2
+ */
 object ThreatColors {
+    val Green = Color(0xFF2E7D32)
     val Orange = Color(0xFFE65100)
     val Red = Color(0xFFC62828)
 }
@@ -17,7 +24,7 @@ object ThreatColors {
 fun threatTextColor(category: DomainThreatCategory): Color = when (category) {
     DomainThreatCategory.MALWARE -> ThreatColors.Red
     DomainThreatCategory.TRACKING -> ThreatColors.Orange
-    DomainThreatCategory.NONE -> MaterialTheme.colorScheme.onSurface
+    DomainThreatCategory.NONE -> ThreatColors.Green
 }
 
 @Composable
@@ -28,8 +35,12 @@ fun threatLabelOrNull(category: DomainThreatCategory): String? = when (category)
 }
 
 /**
- * Notification-safe marker next to the domain (coloured spans are unreliable on OEMs).
- * Always returns an emoji so the destination line is never unmarked.
+ * Emoji next to the domain in the connection-request notification
+ * (coloured spans are unreliable on Android OEMs).
+ *
+ * - 🟢 domaine sûr (pas tagué tracking/malware)
+ * - 🟠 tracking / pubs / télémétrie
+ * - 🔴 malware / C2
  */
 fun DomainThreatCategory.notificationEmoji(): String = when (this) {
     DomainThreatCategory.NONE -> "🟢"
