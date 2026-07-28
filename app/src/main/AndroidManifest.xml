@@ -7,9 +7,7 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
-    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <uses-permission android:name="android.permission.USE_BIOMETRIC" />
-    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
     <!-- Resolve firewall app labels (package visibility on API 30+). -->
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
 
@@ -50,6 +48,10 @@
             android:taskAffinity=""
             android:theme="@style/Theme.OnionVPN"
             android:turnScreenOn="true" />
+
+        <receiver
+            android:name=".firewall.FirewallPromptActionReceiver"
+            android:exported="false" />
 
         <service
             android:name=".service.TunnelForegroundService"

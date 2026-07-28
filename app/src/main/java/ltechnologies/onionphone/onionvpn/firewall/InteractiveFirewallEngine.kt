@@ -55,13 +55,7 @@ class InteractiveFirewallEngine @Inject constructor(
     private val appUidResolver = AppUidResolver(context)
     private val mainHandler = Handler(Looper.getMainLooper())
     private val ownUid = android.os.Process.myUid()
-    private val promptNotifier = FirewallPromptNotifier(
-        context = context,
-        answerHandler = { requestId, verdict, scope ->
-            answerPrompt(requestId, verdict, scope)
-        },
-        tempMinutesProvider = { preferences.get().firewallTempMinutes },
-    )
+    private val promptNotifier = FirewallPromptNotifier(context)
 
     private val preferences = AtomicReference(TunnelPreferences())
     private val rules = AtomicReference<List<FirewallRule>>(emptyList())
