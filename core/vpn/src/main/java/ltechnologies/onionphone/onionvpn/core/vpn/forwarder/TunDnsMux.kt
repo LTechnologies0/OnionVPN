@@ -285,13 +285,13 @@ class TunDnsMux(
     }
 
     companion object {
-        private const val MTU = 1500
+        private const val MTU = 1280
         private const val PROTO_UDP = 17
         private const val DNS_TIMEOUT_MS = 8_000
         private const val DNS_RESPONSE_CAP = 2048
         private val DNS_CORE_THREADS =
             Runtime.getRuntime().availableProcessors().coerceIn(2, 4)
-        private val DNS_MAX_THREADS = DNS_CORE_THREADS
-        private const val DNS_QUEUE_CAP = 32
+        private val DNS_MAX_THREADS = (DNS_CORE_THREADS + 2).coerceAtMost(6)
+        private const val DNS_QUEUE_CAP = 64
     }
 }

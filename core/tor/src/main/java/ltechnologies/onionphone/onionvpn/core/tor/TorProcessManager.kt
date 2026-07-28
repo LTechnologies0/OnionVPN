@@ -135,22 +135,34 @@ class TorProcessManager(
     fun signalDormant(): Result<Unit> = control.setDormant()
 
     /**
-     * Underlying Android network changed — Orbot-style recovery:
-     * DROPTIMEOUTS → ACTIVE → CLEARDNSCACHE → refreshInfo.
+     * Underlying Android network changed (Wi‑Fi ↔ cell, loss, validated flip).
+     *
+     * Orbot-style recovery without flooding ControlPort:
+     * DROPTIMEOUTS → DisableNetwork bounce → ACTIVE → CLEARDNSCACHE.
+     * Skips heavy circuit-status GETINFO (use SETEVENTS + periodic lite refresh).
      */
     fun onNetworkChanged(): Result<Unit> {
         if (!control.isConnected) return Result.failure(IOException("control not connected"))
         control.dropTimeouts().onFailure { Timber.w(it, "DROPTIMEOUTS failed") }
+        // Bounce DisableNetwork so Tor rebinds sockets on the new underlying path
+        // (helps after MITM captive portals / handoffs stalling ORCONNs).
+        control.setDisableNetwork(true).onFailure { Timber.w(it, "DisableNetwork=1 failed") }
+        control.setDisableNetwork(false).onFailure { Timber.w(it, "DisableNetwork=0 failed") }
         val active = control.setActive()
         control.clearDnsCache().onFailure { Timber.w(it, "CLEARDNSCACHE failed") }
-        control.refreshInfo()
+        control.refreshHealthLite()
         return active.also {
-            it.onSuccess { Timber.i("Tor network recovery: DROPTIMEOUTS+ACTIVE+CLEARDNSCACHE") }
+            it.onSuccess {
+                Timber.i("Tor network recovery: DROPTIMEOUTS+DisableNetwork bounce+ACTIVE+CLEARDNSCACHE")
+            }
         }
     }
 
     /** Convenience: refresh GETINFO into [controlStatus]. */
     fun refreshControlInfo() = control.refreshInfo()
+
+    /** Lightweight health poll (no circuit-status dump). */
+    fun refreshControlHealthLite() = control.refreshHealthLite()
 
     /** Live SETCONF bridges from multiline preference text. */
     fun setBridgesLive(bridgeText: String): Result<Unit> {

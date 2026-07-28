@@ -82,7 +82,12 @@ class TunnelForegroundService : Service() {
         super.onCreate()
         notifications.createChannel()
         OnionVpnService.onUnderlyingNetworkChanged = {
-            tor.onNetworkChanged()
+            // Never block the main looper with ControlPort I/O.
+            scope.launch(Dispatchers.IO) {
+                tor.onNetworkChanged().onFailure {
+                    Timber.w(it, "Tor network recovery failed")
+                }
+            }
         }
     }
 
@@ -560,35 +565,32 @@ class TunnelForegroundService : Service() {
         throughputJob?.cancel()
         bandwidthSampler.reset()
         throughputText = ""
-        var lastRead = 0L
-        var lastWrite = 0L
-        var lastTs = 0L
+        var ticks = 0
         throughputJob = scope.launch {
-            // Push bootstrap / circuit status into snapshot while connected.
             while (isActive) {
                 delay(THROUGHPUT_INTERVAL_MS)
                 val phase = _snapshot.value.phase
                 if (phase != TunnelPhase.Connected && phase != TunnelPhase.StartingTor) continue
-                tor.refreshControlInfo()
+                // Prefer live BW events from ControlPort (zero GETINFO cost).
+                // Full refreshInfo only every ~30s for circuit/stream counters.
+                ticks++
+                if (ticks % FULL_CONTROL_REFRESH_TICKS == 0 || phase == TunnelPhase.StartingTor) {
+                    tor.refreshControlInfo()
+                } else if (ticks % LITE_CONTROL_REFRESH_TICKS == 0) {
+                    tor.refreshControlHealthLite()
+                }
                 val st = tor.controlStatus.value
                 if (phase == TunnelPhase.Connected && st.connected) {
-                    val now = System.currentTimeMillis()
-                    if (lastTs > 0L) {
-                        val dt = (now - lastTs).coerceAtLeast(1) / 1000.0
-                        val down = ((st.readBytes - lastRead).coerceAtLeast(0) / dt).toLong()
-                        val up = ((st.writeBytes - lastWrite).coerceAtLeast(0) / dt).toLong()
-                        throughputText = "Tor ▼ ${TunnelSnapshotBuilder.formatRate(down)}  ▲ ${TunnelSnapshotBuilder.formatRate(up)}  " +
+                    val down = st.lastBwReadPerSec
+                    val up = st.lastBwWritePerSec
+                    throughputText = if (down > 0L || up > 0L) {
+                        "Tor ▼ ${TunnelSnapshotBuilder.formatRate(down)}  ▲ ${TunnelSnapshotBuilder.formatRate(up)}  " +
                             "circ=${st.builtCircuits}"
                     } else {
-                        val sample = bandwidthSampler.sample()
-                        throughputText = sample.displayText
+                        bandwidthSampler.sample().displayText
                     }
-                    lastRead = st.readBytes
-                    lastWrite = st.writeBytes
-                    lastTs = now
                 } else if (phase == TunnelPhase.Connected) {
-                    val sample = bandwidthSampler.sample()
-                    throughputText = sample.displayText
+                    throughputText = bandwidthSampler.sample().displayText
                 }
                 updateSnapshot(phase)
             }
@@ -661,11 +663,15 @@ class TunnelForegroundService : Service() {
         const val EXTRA_DNS_DNSSEC = "dns_dnssec"
 
         private const val BOOTSTRAP_WAKELOCK_TIMEOUT_MS = 3 * 60 * 1000L
-        /** Faster than 2 min — catch route hijacks / forwarder death sooner. */
-        private const val VALIDATION_INTERVAL_MS = 30_000L
-        /** Exit IP check via Tor SOCKS can take ~25s; keep headroom for full suite. */
+        /** Leak checks — less aggressive once Connected to save battery/thermal. */
+        private const val VALIDATION_INTERVAL_MS = 90_000L
         private const val VALIDATION_TIMEOUT_MS = 60_000L
-        private const val THROUGHPUT_INTERVAL_MS = 3_000L
+        /** UI throughput tick; BW events fill rates without GETINFO each tick. */
+        private const val THROUGHPUT_INTERVAL_MS = 2_000L
+        /** Every N ticks → lite GETINFO (dormant / liveness). */
+        private const val LITE_CONTROL_REFRESH_TICKS = 5
+        /** Every N ticks → full GETINFO (circuits/streams). ~30s at 2s ticks. */
+        private const val FULL_CONTROL_REFRESH_TICKS = 15
 
         private val _snapshot = MutableStateFlow(TunnelSnapshot())
         val snapshot: StateFlow<TunnelSnapshot> = _snapshot.asStateFlow()

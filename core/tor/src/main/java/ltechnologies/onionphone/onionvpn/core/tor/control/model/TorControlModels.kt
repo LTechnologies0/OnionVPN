@@ -53,6 +53,10 @@ data class TorControlStatus(
     val readBytes: Long = 0L,
     /** GETINFO traffic/written (bytes). */
     val writeBytes: Long = 0L,
+    /** Last BW event read bytes/sec (control-spec). */
+    val lastBwReadPerSec: Long = 0L,
+    /** Last BW event written bytes/sec (control-spec). */
+    val lastBwWritePerSec: Long = 0L,
     /** Last control-plane error message, if any. */
     val lastError: String? = null,
 )

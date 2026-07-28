@@ -13,4 +13,6 @@
     <string name="firewall_prompt_channel_desc">Connection allow/deny requests (full-screen when needed)</string>
     <string name="firewall_prompt_notif_title">Connection request</string>
     <string name="firewall_prompt_notif_text">%1$s wants %2$s %3$s:%4$d</string>
+    <string name="firewall_action_open">Open</string>
+    <string name="firewall_overlay_permission">Allow overlay for firewall popups</string>
 </resources>

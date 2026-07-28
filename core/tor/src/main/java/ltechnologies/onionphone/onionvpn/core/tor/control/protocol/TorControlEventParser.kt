@@ -74,11 +74,16 @@ internal object TorControlEventParser {
         payload.startsWith("BW ") -> {
             val parts = payload.split(' ')
             if (parts.size >= 3) {
+                val read = parts[1].toLongOrNull() ?: 0L
+                val written = parts[2].toLongOrNull() ?: 0L
                 Result(
-                    TorControlEvent.Bandwidth(
-                        parts[1].toLongOrNull() ?: 0L,
-                        parts[2].toLongOrNull() ?: 0L,
-                    ),
+                    event = TorControlEvent.Bandwidth(read, written),
+                    statusPatch = { status ->
+                        status.copy(
+                            lastBwReadPerSec = read,
+                            lastBwWritePerSec = written,
+                        )
+                    },
                 )
             } else {
                 Result()

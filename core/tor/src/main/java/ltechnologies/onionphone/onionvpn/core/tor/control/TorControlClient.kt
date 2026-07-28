@@ -186,6 +186,29 @@ class TorControlClient {
         }
     }
 
+    /**
+     * Cheap health poll for network recovery / periodic keep-alive.
+     * Avoids circuit-status / stream-status dumps that serialize the control channel.
+     */
+    fun refreshHealthLite() {
+        if (!transport.isOpen) return
+        runCatching {
+            val circEst = ops.getInfo("status/circuit-established") == "1"
+            val dormant = (ops.getInfo("dormant").toIntOrNull() ?: 0) != 0
+            val live = runCatching { ops.getInfo("network-liveness") }.getOrDefault("")
+                .equals("up", ignoreCase = true)
+            _status.update {
+                it.copy(
+                    circuitEstablished = circEst,
+                    networkLive = live,
+                    dormant = dormant,
+                )
+            }
+        }.onFailure { err ->
+            Timber.w(err, "Tor GETINFO health-lite failed")
+        }
+    }
+
     private fun onAsyncPayload(payload: String) {
         val parsed = TorControlEventParser.parseAsyncPayload(payload)
         _status.update(parsed.statusPatch)

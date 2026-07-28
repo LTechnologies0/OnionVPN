@@ -199,6 +199,44 @@ fun SettingsScreen(
             checked = local.firewallEnabled,
             onChecked = { local = local.copy(firewallEnabled = it) },
         )
+        if (local.firewallEnabled) {
+            Text(
+                text = "For popups over the launcher (not only inside OnionVPN), grant " +
+                    "“Display over other apps” and keep notifications allowed. " +
+                    "Full-screen intent helps when the screen is off.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Button(
+                onClick = {
+                    val intent = android.content.Intent(
+                        android.provider.Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                        android.net.Uri.parse("package:${context.packageName}"),
+                    ).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                    runCatching { context.startActivity(intent) }
+                },
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("Grant overlay permission (system popup)")
+            }
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                Button(
+                    onClick = {
+                        runCatching {
+                            context.startActivity(
+                                android.content.Intent(
+                                    android.provider.Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT,
+                                ).setData(android.net.Uri.parse("package:${context.packageName}"))
+                                    .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK),
+                            )
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text("Allow full-screen firewall alerts")
+                }
+            }
+        }
         Text("Default when no rule", style = MaterialTheme.typography.labelLarge)
         Row(
             modifier = Modifier.horizontalScroll(rememberScrollState()),

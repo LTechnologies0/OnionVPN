@@ -7,7 +7,6 @@ import android.os.Process
 import android.system.OsConstants
 import java.io.File
 import java.net.InetSocketAddress
-import java.util.concurrent.locks.LockSupport
 import timber.log.Timber
 
 /**
@@ -16,8 +15,8 @@ import timber.log.Timber
  * API 29+: [ConnectivityManager.getConnectionOwnerUid] (must be called while this app's
  * [android.net.VpnService] is the active VPN — SecurityException otherwise).
  *
- * First SYN often races the kernel connection table → [Process.INVALID_UID]. We retry
- * briefly (NetGuard / PCAPdroid pattern) before giving up.
+ * Hot path uses a **single** attempt — never parks the TUN reader thread. First SYN
+ * races are acceptable as "unknown" and re-checked on the next SYN.
  *
  * Older: best-effort `/proc/net/tcp|udp` scan (blocked on API 29+ for normal apps).
  */
@@ -28,32 +27,9 @@ class ConnectionOwnerResolver(context: Context) {
 
     fun resolveUid(info: IpPacketInfo): Int {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            return resolveApi29WithRetry(info)
+            return resolveApi29Once(info)
         }
         return resolveProcNet(info)
-    }
-
-    private fun resolveApi29WithRetry(info: IpPacketInfo): Int {
-        var last = Process.INVALID_UID
-        repeat(MAX_ATTEMPTS) { attempt ->
-            last = resolveApi29Once(info)
-            if (isValidUid(last)) return last
-            if (attempt < MAX_ATTEMPTS - 1) {
-                LockSupport.parkNanos(RETRY_PARK_NS)
-            }
-        }
-        if (last == Process.INVALID_UID) {
-            Timber.d(
-                "getConnectionOwnerUid miss %s %s:%d → %s:%d after %d tries",
-                IpPacketParser.protocolLabel(info.protocol),
-                info.srcIp,
-                info.srcPort,
-                info.dstIp,
-                info.dstPort,
-                MAX_ATTEMPTS,
-            )
-        }
-        return last
     }
 
     private fun resolveApi29Once(info: IpPacketInfo): Int {
@@ -68,7 +44,6 @@ class ConnectionOwnerResolver(context: Context) {
             @Suppress("NewApi")
             connectivity.getConnectionOwnerUid(protocol, local, remote)
         } catch (error: SecurityException) {
-            // Caller is not the active VpnService for this user.
             Timber.w(error, "getConnectionOwnerUid denied — VPN not active owner?")
             Process.INVALID_UID
         } catch (error: Exception) {
@@ -77,10 +52,6 @@ class ConnectionOwnerResolver(context: Context) {
         }
     }
 
-    /**
-     * Very rough fallback: match remote address:port in /proc/net tables.
-     * Local port matching preferred when present.
-     */
     private fun resolveProcNet(info: IpPacketInfo): Int {
         val file = when (info.protocol) {
             IpPacketParser.PROTO_TCP -> File("/proc/net/tcp")
@@ -111,7 +82,6 @@ class ConnectionOwnerResolver(context: Context) {
         }
     }
 
-    /** Linux /proc: little-endian hex IP + port. */
     private fun ipv4PortHex(ip: String, port: Int): String {
         val octets = ip.split('.').mapNotNull { it.toIntOrNull() }
         if (octets.size != 4) return ""
@@ -127,10 +97,6 @@ class ConnectionOwnerResolver(context: Context) {
     }
 
     companion object {
-        private const val MAX_ATTEMPTS = 10
-        /** ~2ms between retries; total budget ~20ms on a cold SYN miss. */
-        private const val RETRY_PARK_NS = 2_000_000L
-
         fun isValidUid(uid: Int): Boolean =
             uid != Process.INVALID_UID && uid >= 0
     }
