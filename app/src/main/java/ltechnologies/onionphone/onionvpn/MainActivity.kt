@@ -4,7 +4,6 @@ import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
-import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
@@ -20,27 +19,35 @@ import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.core.content.ContextCompat
+import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
 import ltechnologies.onionphone.onionvpn.firewall.InteractiveFirewallEngine
+import ltechnologies.onionphone.onionvpn.security.AppLockAuthenticator
+import ltechnologies.onionphone.onionvpn.security.AppLockManager
 import ltechnologies.onionphone.onionvpn.ui.FirewallScreen
 import ltechnologies.onionphone.onionvpn.ui.LogsScreen
 import ltechnologies.onionphone.onionvpn.ui.SettingsScreen
 import ltechnologies.onionphone.onionvpn.ui.StatusScreen
+import ltechnologies.onionphone.onionvpn.ui.applock.AppLockGate
 import ltechnologies.onionphone.onionvpn.ui.theme.OnionVpnTheme
+import ltechnologies.onionphone.onionvpn.util.WindowSecureHelper
 
 @AndroidEntryPoint
-class MainActivity : ComponentActivity() {
+class MainActivity : FragmentActivity() {
     private val viewModel: MainViewModel by viewModels()
 
     @Inject lateinit var firewallEngine: InteractiveFirewallEngine
+    @Inject lateinit var appLockManager: AppLockManager
+    @Inject lateinit var appLockAuthenticator: AppLockAuthenticator
 
     private val vpnPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult(),
@@ -53,7 +60,6 @@ class MainActivity : ComponentActivity() {
     private val notificationPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) {
-        // Continue start regardless — FGS still works; notification may be silent if denied.
         launchVpnOrStart()
     }
 
@@ -63,21 +69,42 @@ class MainActivity : ComponentActivity() {
             OnionVpnTheme {
                 val snapshot by viewModel.snapshot.collectAsStateWithLifecycle()
                 val preferences by viewModel.preferences.collectAsStateWithLifecycle()
-                OnionVpnApp(
-                    snapshot = snapshot,
-                    preferences = preferences,
-                    firewallEngine = firewallEngine,
-                    onStart = ::requestNotificationsThenStart,
-                    onStop = viewModel::stopTunnel,
-                    onNewNym = viewModel::newNym,
-                    onSavePreferences = viewModel::savePreferences,
-                    onLoadTorrc = viewModel::readTorrc,
-                    onLoadDnsCryptToml = viewModel::readDnsCryptToml,
-                    onSaveTorrc = viewModel::saveTorrc,
-                    onSaveDnsCryptToml = viewModel::saveDnsCryptToml,
-                )
+
+                LaunchedEffect(preferences.appLockEnabled) {
+                    appLockManager.enabled = preferences.appLockEnabled
+                }
+                LaunchedEffect(preferences.allowScreenshots) {
+                    WindowSecureHelper.apply(this@MainActivity, preferences.allowScreenshots)
+                }
+
+                AppLockGate(
+                    appLockManager = appLockManager,
+                    authenticator = appLockAuthenticator,
+                ) {
+                    OnionVpnApp(
+                        snapshot = snapshot,
+                        preferences = preferences,
+                        firewallEngine = firewallEngine,
+                        onStart = ::requestNotificationsThenStart,
+                        onStop = viewModel::stopTunnel,
+                        onNewNym = viewModel::newNym,
+                        onSavePreferences = viewModel::savePreferences,
+                        onLoadTorrc = viewModel::readTorrc,
+                        onLoadDnsCryptToml = viewModel::readDnsCryptToml,
+                        onSaveTorrc = viewModel::saveTorrc,
+                        onSaveDnsCryptToml = viewModel::saveDnsCryptToml,
+                    )
+                }
             }
         }
+    }
+
+    override fun onStop() {
+        // Re-lock UI when leaving foreground; tunnel keeps running.
+        if (!isChangingConfigurations) {
+            appLockManager.lock()
+        }
+        super.onStop()
     }
 
     private fun requestNotificationsThenStart() {

@@ -24,12 +24,14 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 import ltechnologies.onionphone.onionvpn.core.dnscrypt.config.DnsCryptConfigWriter
 import ltechnologies.onionphone.onionvpn.core.model.DnsResolverMode
 import ltechnologies.onionphone.onionvpn.core.model.FirewallDefaultAction
 import ltechnologies.onionphone.onionvpn.core.model.TunnelPreferences
+import ltechnologies.onionphone.onionvpn.util.SystemSecurityIntents
 
 @Composable
 fun SettingsScreen(
@@ -80,6 +82,62 @@ fun SettingsScreen(
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
+        val context = LocalContext.current
+
+        Text("App security", style = MaterialTheme.typography.titleMedium)
+        Text(
+            text = "Uses the Android / GrapheneOS screen lock (PIN, pattern, biometric). " +
+                "The VPN tunnel and kill switch keep running while the UI is locked.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        PrefSwitch(
+            label = "Require device lock to open app",
+            checked = local.appLockEnabled,
+            onChecked = { local = local.copy(appLockEnabled = it) },
+        )
+        PrefSwitch(
+            label = "Allow screenshots",
+            checked = local.allowScreenshots,
+            onChecked = { local = local.copy(allowScreenshots = it) },
+        )
+        Text(
+            text = "Off (recommended): FLAG_SECURE blocks screenshots, screen recording, " +
+                "and recents thumbnails of firewall/rules/logs.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+
+        Text("System leak protection", style = MaterialTheme.typography.titleMedium)
+        Text(
+            text = "GrapheneOS improves VPN leak blocking when Always-on VPN + " +
+                "“Block connections without VPN” are on. OnionVPN cannot flip those itself.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Button(
+            onClick = { SystemSecurityIntents.openVpnSettings(context) },
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Text("Open VPN settings (Always-on / lockdown)")
+        }
+        Button(
+            onClick = { SystemSecurityIntents.openPrivateDnsSettings(context) },
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Text("Open network settings (set Private DNS Off)")
+        }
+        Text(
+            text = "Checklist:\n" +
+                "1. Always-on VPN → OnionVPN ON\n" +
+                "2. Block connections without VPN ON\n" +
+                "3. Private DNS → Off (DoT bypasses tunnel DNS)\n" +
+                "4. Stop other VPNs\n" +
+                "5. Prefer Vanadium; disable WebRTC if possible",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+
         Text("DNS mode", style = MaterialTheme.typography.titleMedium)
         Text(
             text = "FakeDNS (Orbot): apps see fake 100.64.x IPs; hostname resolved at Tor exit.\n" +
@@ -182,19 +240,40 @@ fun SettingsScreen(
             modifier = Modifier.fillMaxWidth(),
         )
 
-        Text("System leak checklist", style = MaterialTheme.typography.titleMedium)
+        Text("Tor", style = MaterialTheme.typography.titleMedium)
         Text(
-            text = "TUN alone is not enough on Android:\n" +
-                "1. Settings → Network → VPN → OnionVPN → Always-on ON\n" +
-                "2. Block connections without VPN ON\n" +
-                "3. Private DNS → Off (DoT can bypass tunnel DNS)\n" +
-                "4. Stop other VPNs (InviZible/Orbot)\n" +
-                "5. WebRTC/STUN is browser-side — Vanadium/Mull, not the VPN",
+            text = "Circuit rotation presets (tor-spec path-spec / MaxCircuitDirtiness). " +
+                "Vanguards-lite, padding, ClientOnly, SafeLogging already forced in torrc.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-
-        Text("Tor", style = MaterialTheme.typography.titleMedium)
+        Row(
+            modifier = Modifier.horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            FilterChip(
+                selected = local.torNewCircuitPeriodSec == 30 &&
+                    local.torMaxCircuitDirtinessSec == 180,
+                onClick = {
+                    local = local.copy(
+                        torNewCircuitPeriodSec = 30,
+                        torMaxCircuitDirtinessSec = 180,
+                    )
+                },
+                label = { Text("Balanced") },
+            )
+            FilterChip(
+                selected = local.torNewCircuitPeriodSec == 15 &&
+                    local.torMaxCircuitDirtinessSec == 60,
+                onClick = {
+                    local = local.copy(
+                        torNewCircuitPeriodSec = 15,
+                        torMaxCircuitDirtinessSec = 60,
+                    )
+                },
+                label = { Text("Paranoid") },
+            )
+        }
         OutlinedTextField(
             value = local.torBridges,
             onValueChange = { local = local.copy(torBridges = it) },
@@ -259,6 +338,26 @@ fun SettingsScreen(
         }
 
         Text("DNSCrypt", style = MaterialTheme.typography.titleMedium)
+        Text(
+            text = "Upstream forced through Tor SOCKS; bootstrap via Tor DNSPort; " +
+                "DoH/captive blocked. Prefer native DNSCrypt (AdGuard/Quad9) over Cloudflare DoH.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Button(
+            onClick = {
+                local = local.copy(
+                    dnsCryptRequireNoLog = true,
+                    dnsCryptRequireDnssec = true,
+                    dnsCryptForceTcp = true,
+                    dnsCryptRequireNoFilter = false,
+                    dnsCryptServerName = "adguard",
+                )
+            },
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Text("Apply hardened DNSCrypt profile")
+        }
         Row(
             modifier = Modifier.horizontalScroll(rememberScrollState()),
             horizontalArrangement = Arrangement.spacedBy(8.dp),

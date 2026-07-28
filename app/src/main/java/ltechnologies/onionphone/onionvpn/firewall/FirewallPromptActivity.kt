@@ -15,6 +15,7 @@ import kotlinx.coroutines.delay
 import ltechnologies.onionphone.onionvpn.core.model.TunnelPreferences
 import ltechnologies.onionphone.onionvpn.prefs.TunnelPreferencesStore
 import ltechnologies.onionphone.onionvpn.ui.theme.OnionVpnTheme
+import ltechnologies.onionphone.onionvpn.util.WindowSecureHelper
 
 @AndroidEntryPoint
 class FirewallPromptActivity : ComponentActivity() {
@@ -28,24 +29,16 @@ class FirewallPromptActivity : ComponentActivity() {
             setTurnScreenOn(true)
         }
         setContent {
+            val prefs by preferencesStore.preferences.collectAsState(initial = TunnelPreferences())
+            WindowSecureHelper.apply(this, prefs.allowScreenshots)
             OnionVpnTheme {
                 Surface {
                     val prompt by engine.pendingPrompt.collectAsStateWithLifecycle()
-                    val prefs by preferencesStore.preferences.collectAsState(
-                        initial = TunnelPreferences(),
-                    )
                     val wantedId = intent?.getStringExtra(EXTRA_REQUEST_ID)
                     LaunchedEffect(prompt, wantedId) {
                         if (prompt == null) {
-                            // Avoid finishing on a brief null flicker when promoting the queue.
                             delay(400)
                             if (engine.pendingPrompt.value == null) finish()
-                            return@LaunchedEffect
-                        }
-                        // Stale notification for an already-answered request: ignore and wait
-                        // for the live pending head (or finish if queue emptied).
-                        if (wantedId != null && prompt!!.requestId != wantedId) {
-                            // Still show current pending — FIFO head is what the user must answer.
                         }
                     }
                     val current = prompt

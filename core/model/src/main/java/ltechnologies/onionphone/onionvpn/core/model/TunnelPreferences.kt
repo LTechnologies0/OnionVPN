@@ -27,4 +27,11 @@ data class TunnelPreferences(
     val firewallDefaultAction: FirewallDefaultAction = FirewallDefaultAction.ASK,
     /** Temporary allow/deny TTL in minutes. */
     val firewallTempMinutes: Int = 5,
+    /**
+     * Gate the UI with the Android device lock (PIN / biometric).
+     * Tunnel / kill-switch keep running while locked.
+     */
+    val appLockEnabled: Boolean = true,
+    /** When false, [android.view.WindowManager.LayoutParams.FLAG_SECURE] blocks screenshots. */
+    val allowScreenshots: Boolean = false,
 )
