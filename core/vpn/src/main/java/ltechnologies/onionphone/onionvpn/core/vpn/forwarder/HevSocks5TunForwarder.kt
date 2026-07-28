@@ -125,8 +125,9 @@ class HevSocks5TunForwarder(
         appendLine("  address: '$socksHost'")
         // Force UDP associate over TCP — no clearnet UDP side-channel.
         appendLine("  udp: 'tcp'")
-        // IsolateSOCKSAuth token for hev (static — hev has no per-stream auth).
-        // Per-destination circuits come from Tor IsolateDestAddr/IsolateDestPort.
+        // Shared IsolateSOCKSAuth token (hev has no per-stream auth).
+        // Circuit diversity for apps comes from TorStreamIsolationMode on the
+        // apps SocksPort + MaxCircuitDirtiness — not from this static credential.
         appendLine("  username: '${TunnelEndpoints.SOCKS_ISOLATION_USER}'")
         appendLine("  password: '${TunnelEndpoints.SOCKS_ISOLATION_PASS}'")
         if (useMapDns) {

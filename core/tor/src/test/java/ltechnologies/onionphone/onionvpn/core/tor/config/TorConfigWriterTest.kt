@@ -1,5 +1,6 @@
 package ltechnologies.onionphone.onionvpn.core.tor.config
 
+import ltechnologies.onionphone.onionvpn.core.model.TorStreamIsolationMode
 import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
 import ltechnologies.onionphone.onionvpn.core.model.TunnelPreferences
 import org.junit.Assert.assertFalse
@@ -8,14 +9,17 @@ import org.junit.Test
 
 class TorConfigWriterTest {
     @Test
-    fun streamIsolation_maxFlags_threeSocksPorts_noKeepAliveOnApps() {
+    fun streamIsolation_balancedApps_noDestIsolation_noKeepAliveOnApps() {
         val torrc = TorConfigWriter.write(
             dataDirectory = "/tmp/tor",
             socksPort = 1111,
             dnsCryptSocksPort = 2222,
             probeSocksPort = 3333,
             dnsPort = 4444,
-            preferences = TunnelPreferences(torMaxCircuitDirtinessSec = 180),
+            preferences = TunnelPreferences(
+                torMaxCircuitDirtinessSec = 600,
+                torStreamIsolation = TorStreamIsolationMode.BALANCED,
+            ),
         )
 
         assertTrue(torrc.contains("SOCKSPort ${TunnelEndpoints.LOOPBACK}:1111"))
@@ -24,18 +28,21 @@ class TorConfigWriterTest {
         assertTrue(torrc.contains("SessionGroup=${TunnelEndpoints.SESSION_GROUP_APPS}"))
         assertTrue(torrc.contains("SessionGroup=${TunnelEndpoints.SESSION_GROUP_DNSCRYPT}"))
         assertTrue(torrc.contains("SessionGroup=${TunnelEndpoints.SESSION_GROUP_PROBE}"))
-        assertTrue(torrc.contains("IsolateClientAddr"))
-        assertTrue(torrc.contains("IsolateClientProtocol"))
-        assertTrue(torrc.contains("IsolateDestAddr"))
-        assertTrue(torrc.contains("IsolateDestPort"))
         assertTrue(torrc.contains("IsolateSOCKSAuth"))
-        assertTrue(torrc.contains("MaxClientCircuitsPending 128"))
-        assertTrue(torrc.contains("MaxCircuitDirtiness 180"))
+        assertTrue(torrc.contains("MaxClientCircuitsPending 32"))
+        assertTrue(torrc.contains("MaxCircuitDirtiness 600"))
+        assertTrue(torrc.contains("CircuitStreamTimeout 30"))
+        assertTrue(torrc.contains("ReducedConnectionPadding 1"))
+        assertTrue(torrc.contains("ReducedCircuitPadding 1"))
 
         val appLine = torrc.lineSequence().first {
             it.startsWith("SOCKSPort ") &&
                 it.contains("SessionGroup=${TunnelEndpoints.SESSION_GROUP_APPS}")
         }
+        assertFalse(
+            "Balanced apps SocksPort must not pin destinations (Orbot-like)",
+            appLine.contains("IsolateDestAddr") || appLine.contains("IsolateDestPort"),
+        )
         assertFalse(
             "KeepAliveIsolateSOCKSAuth on app SocksPort would pin shared hev auth circuits",
             appLine.contains("KeepAliveIsolateSOCKSAuth"),
@@ -45,6 +52,24 @@ class TorConfigWriterTest {
                 it.contains("SessionGroup=${TunnelEndpoints.SESSION_GROUP_DNSCRYPT}")
         }
         assertTrue(dnsCryptLine.contains("KeepAliveIsolateSOCKSAuth"))
+        assertTrue(dnsCryptLine.contains("IsolateDestAddr"))
+    }
+
+    @Test
+    fun streamIsolation_strictApps_hasDestIsolation() {
+        val torrc = TorConfigWriter.write(
+            dataDirectory = "/tmp/tor",
+            preferences = TunnelPreferences(
+                torStreamIsolation = TorStreamIsolationMode.STRICT,
+            ),
+        )
+        val appLine = torrc.lineSequence().first {
+            it.startsWith("SOCKSPort ") &&
+                it.contains("SessionGroup=${TunnelEndpoints.SESSION_GROUP_APPS}")
+        }
+        assertTrue(appLine.contains("IsolateDestAddr"))
+        assertTrue(appLine.contains("IsolateDestPort"))
+        assertFalse(appLine.contains("KeepAliveIsolateSOCKSAuth"))
     }
 
     @Test

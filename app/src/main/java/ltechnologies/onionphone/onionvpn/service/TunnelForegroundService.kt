@@ -26,6 +26,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeout
 import ltechnologies.onionphone.onionvpn.core.dnscrypt.DnsCryptProcessManager
 import ltechnologies.onionphone.onionvpn.core.model.DnsResolverMode
+import ltechnologies.onionphone.onionvpn.core.model.TorStreamIsolationMode
 import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
 import ltechnologies.onionphone.onionvpn.core.model.TunnelFailure
 import ltechnologies.onionphone.onionvpn.core.model.TunnelPhase
@@ -676,6 +677,7 @@ class TunnelForegroundService : Service() {
         const val EXTRA_TOR_EXCLUDE = "tor_exclude"
         const val EXTRA_TOR_NEW_CIRCUIT = "tor_new_circuit"
         const val EXTRA_TOR_MAX_DIRTINESS = "tor_max_dirtiness"
+        const val EXTRA_TOR_STREAM_ISOLATION = "tor_stream_isolation"
         const val EXTRA_DNS_NOLOG = "dns_nolog"
         const val EXTRA_DNS_NOFILTER = "dns_nofilter"
         const val EXTRA_DNS_FORCE_TCP = "dns_force_tcp"
@@ -709,7 +711,10 @@ class TunnelForegroundService : Service() {
             torExitNodes = intent.getStringExtra(EXTRA_TOR_EXIT).orEmpty(),
             torExcludeNodes = intent.getStringExtra(EXTRA_TOR_EXCLUDE).orEmpty(),
             torNewCircuitPeriodSec = intent.getIntExtra(EXTRA_TOR_NEW_CIRCUIT, 30),
-            torMaxCircuitDirtinessSec = intent.getIntExtra(EXTRA_TOR_MAX_DIRTINESS, 180),
+            torMaxCircuitDirtinessSec = intent.getIntExtra(EXTRA_TOR_MAX_DIRTINESS, 600),
+            torStreamIsolation = intent.getStringExtra(EXTRA_TOR_STREAM_ISOLATION)
+                ?.let { runCatching { TorStreamIsolationMode.valueOf(it) }.getOrNull() }
+                ?: TorStreamIsolationMode.BALANCED,
             dnsCryptRequireNoLog = intent.getBooleanExtra(EXTRA_DNS_NOLOG, true),
             dnsCryptRequireNoFilter = intent.getBooleanExtra(EXTRA_DNS_NOFILTER, false),
             dnsCryptForceTcp = intent.getBooleanExtra(EXTRA_DNS_FORCE_TCP, true),

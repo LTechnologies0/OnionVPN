@@ -12,7 +12,6 @@ class TorControlCatalogTest {
         listOf(
             "STATUS_CLIENT",
             "CIRC",
-            "STREAM",
             "ORCONN",
             "BW",
             "ADDRMAP",
@@ -23,6 +22,7 @@ class TorControlCatalogTest {
         ).forEach { name ->
             assertTrue("$name missing from CLIENT_EVENTS", events.contains(name))
         }
+        assertFalse("STREAM must stay optional (control flood under browse storms)", events.contains("STREAM"))
         assertFalse("PT events must not be in core SETEVENTS", events.contains("PT_LOG"))
         assertFalse(events.contains("TRANSPORT_LAUNCHED"))
         assertFalse(events.contains("CIRC_MINOR"))
@@ -39,6 +39,7 @@ class TorControlCatalogTest {
         assertTrue(optional.intersect(pt).isEmpty())
         assertTrue(pt.containsAll(listOf("TRANSPORT_LAUNCHED", "PT_LOG", "PT_STATUS")))
         assertTrue(optional.contains("CIRC_MINOR"))
+        assertTrue(optional.contains("STREAM"))
     }
 
     @Test

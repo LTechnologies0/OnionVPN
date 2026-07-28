@@ -33,6 +33,7 @@ class TunnelOrchestrator @Inject constructor(
                 putExtra(TunnelForegroundService.EXTRA_TOR_EXCLUDE, preferences.torExcludeNodes)
                 putExtra(TunnelForegroundService.EXTRA_TOR_NEW_CIRCUIT, preferences.torNewCircuitPeriodSec)
                 putExtra(TunnelForegroundService.EXTRA_TOR_MAX_DIRTINESS, preferences.torMaxCircuitDirtinessSec)
+                putExtra(TunnelForegroundService.EXTRA_TOR_STREAM_ISOLATION, preferences.torStreamIsolation.name)
                 putExtra(TunnelForegroundService.EXTRA_DNS_NOLOG, preferences.dnsCryptRequireNoLog)
                 putExtra(TunnelForegroundService.EXTRA_DNS_NOFILTER, preferences.dnsCryptRequireNoFilter)
                 putExtra(TunnelForegroundService.EXTRA_DNS_FORCE_TCP, preferences.dnsCryptForceTcp)

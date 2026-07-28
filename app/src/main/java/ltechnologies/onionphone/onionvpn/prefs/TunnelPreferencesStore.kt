@@ -15,6 +15,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import ltechnologies.onionphone.onionvpn.core.model.DnsResolverMode
 import ltechnologies.onionphone.onionvpn.core.model.FirewallDefaultAction
+import ltechnologies.onionphone.onionvpn.core.model.TorStreamIsolationMode
 import ltechnologies.onionphone.onionvpn.core.model.TunnelPreferences
 
 private val Context.tunnelDataStore: DataStore<Preferences> by preferencesDataStore(name = "tunnel_prefs")
@@ -34,6 +35,7 @@ class TunnelPreferencesStore @Inject constructor(
         val torExclude = stringPreferencesKey("tor_exclude")
         val newCircuit = intPreferencesKey("tor_new_circuit")
         val maxDirtiness = intPreferencesKey("tor_max_dirtiness")
+        val streamIsolation = stringPreferencesKey("tor_stream_isolation")
         val requireNoLog = booleanPreferencesKey("dns_nolog")
         val requireNoFilter = booleanPreferencesKey("dns_nofilter")
         val forceTcp = booleanPreferencesKey("dns_force_tcp")
@@ -62,6 +64,7 @@ class TunnelPreferencesStore @Inject constructor(
             prefs[Keys.torExclude] = next.torExcludeNodes
             prefs[Keys.newCircuit] = next.torNewCircuitPeriodSec
             prefs[Keys.maxDirtiness] = next.torMaxCircuitDirtinessSec
+            prefs[Keys.streamIsolation] = next.torStreamIsolation.name
             prefs[Keys.requireNoLog] = next.dnsCryptRequireNoLog
             prefs[Keys.requireNoFilter] = next.dnsCryptRequireNoFilter
             prefs[Keys.forceTcp] = next.dnsCryptForceTcp
@@ -86,7 +89,10 @@ class TunnelPreferencesStore @Inject constructor(
         torExitNodes = this[Keys.torExit].orEmpty(),
         torExcludeNodes = this[Keys.torExclude].orEmpty(),
         torNewCircuitPeriodSec = this[Keys.newCircuit] ?: 30,
-        torMaxCircuitDirtinessSec = this[Keys.maxDirtiness] ?: 180,
+        torMaxCircuitDirtinessSec = this[Keys.maxDirtiness] ?: 600,
+        torStreamIsolation = this[Keys.streamIsolation]
+            ?.let { runCatching { TorStreamIsolationMode.valueOf(it) }.getOrNull() }
+            ?: TorStreamIsolationMode.BALANCED,
         dnsCryptRequireNoLog = this[Keys.requireNoLog] ?: true,
         dnsCryptRequireNoFilter = this[Keys.requireNoFilter] ?: false,
         dnsCryptForceTcp = this[Keys.forceTcp] ?: true,

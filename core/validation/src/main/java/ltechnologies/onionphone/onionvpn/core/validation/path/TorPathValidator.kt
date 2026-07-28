@@ -53,11 +53,18 @@ object TorPathValidator {
         val safeLogging = config.contains("SafeLogging 1")
         val refuseUnknownExits = config.contains("RefuseUnknownExits 1")
         val controlSocket = config.contains("ControlSocket ") && config.contains("CookieAuthentication 1")
-        val socksIsolation = config.contains("IsolateDestAddr") &&
-            config.contains("IsolateDestPort") &&
-            config.contains("IsolateSOCKSAuth") &&
-            config.contains("IsolateClientAddr") &&
-            config.contains("IsolateClientProtocol")
+        // Apps may be BALANCED (no IsolateDest*) or STRICT; DNSCrypt/probe keep dest isolation.
+        val hasAppsAuthIsolation = config.lineSequence().any {
+            it.startsWith("SOCKSPort ") &&
+                it.contains("SessionGroup=${TunnelEndpoints.SESSION_GROUP_APPS}") &&
+                it.contains("IsolateSOCKSAuth")
+        }
+        val dnsCryptIsolated = config.lineSequence().any {
+            it.startsWith("SOCKSPort ") &&
+                it.contains("SessionGroup=${TunnelEndpoints.SESSION_GROUP_DNSCRYPT}") &&
+                it.contains("IsolateDestAddr") &&
+                it.contains("KeepAliveIsolateSOCKSAuth")
+        }
         val socksPolicy = config.contains("SocksPolicy accept 127.0.0.1") &&
             config.contains("SocksPolicy reject *")
         // Apps + DNSCrypt + probe SocksPorts (path-spec proxy-address isolation).
@@ -66,6 +73,7 @@ object TorPathValidator {
         val noKeepAliveOnApps = !config.lineSequence()
             .filter { it.startsWith("SOCKSPort ") && it.contains("SessionGroup=${TunnelEndpoints.SESSION_GROUP_APPS}") }
             .any { it.contains("KeepAliveIsolateSOCKSAuth") }
+        val socksIsolation = hasAppsAuthIsolation && dnsCryptIsolated
         val ok = hasSocks && hasDns && safeSocksSet && clientOnly &&
             entryGuards && socksIsolation && socksPolicy && multiSocks &&
             hasProbeGroup && noKeepAliveOnApps && rejectInternal && safeLogging &&
