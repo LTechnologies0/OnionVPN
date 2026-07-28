@@ -99,7 +99,8 @@ object TorControlCatalog {
     enum class Event(val wire: String, val tier: EventTier) {
         CIRC("CIRC", EventTier.CORE),
         CIRC_MINOR("CIRC_MINOR", EventTier.OPTIONAL),
-        STREAM("STREAM", EventTier.CORE),
+        // STREAM floods the control reader under browse storms; keep optional.
+        STREAM("STREAM", EventTier.OPTIONAL),
         ORCONN("ORCONN", EventTier.CORE),
         BW("BW", EventTier.CORE),
         NOTICE("NOTICE", EventTier.CORE),
@@ -134,7 +135,7 @@ object TorControlCatalog {
     private fun eventsOf(tier: EventTier): String =
         Event.entries.filter { it.tier == tier }.joinToString(" ") { it.wire }
 
-    /** Core SETEVENTS — Orbot-like; must be accepted by stock Tor. */
+    /** Core SETEVENTS — lean set (STREAM is optional to avoid control floods). */
     val CLIENT_EVENTS: String get() = eventsOf(EventTier.CORE)
 
     /** Optional extras tried after core succeeds (best-effort, incremental). */

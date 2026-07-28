@@ -15,8 +15,11 @@ data class TunnelPreferences(
     val torEntryNodes: String = "",
     val torExitNodes: String = "",
     val torExcludeNodes: String = "",
+    /** Tor default-ish; was 30/180 and caused excess circuit churn vs Orbot. */
     val torNewCircuitPeriodSec: Int = 30,
-    val torMaxCircuitDirtinessSec: Int = 180,
+    val torMaxCircuitDirtinessSec: Int = 600,
+    /** Apps SocksPort isolation — see [TorStreamIsolationMode]. */
+    val torStreamIsolation: TorStreamIsolationMode = TorStreamIsolationMode.BALANCED,
     val dnsCryptRequireNoLog: Boolean = true,
     val dnsCryptRequireNoFilter: Boolean = false,
     val dnsCryptForceTcp: Boolean = true,

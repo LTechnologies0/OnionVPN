@@ -50,6 +50,13 @@ class TunDnsMux(
     private val dnsCryptAddress: InetAddress = InetAddress.getByName(dnsCryptHost)
     private val packetPool = ArrayBlockingQueue<ByteArray>(DNS_QUEUE_CAP)
 
+    /** Per-mux (not static) — avoids FD leaks / QNAME cross-talk across reconnects. */
+    private val dnsScratch = ThreadLocal.withInitial { DnsScratch() }
+    private val pendingQnames = java.util.concurrent.ConcurrentHashMap<Int, String>(64)
+    private val liveDnsSockets = java.util.Collections.newSetFromMap(
+        java.util.concurrent.ConcurrentHashMap<DatagramSocket, Boolean>(),
+    )
+
     private val dnsExecutor = ThreadPoolExecutor(
         DNS_CORE_THREADS,
         DNS_MAX_THREADS,
@@ -179,6 +186,10 @@ class TunDnsMux(
         // FakeDNS IPs are reused across sessions — drop stale IP→host bindings.
         pendingQnames.clear()
         DnsHostnameCache.clear()
+        // Close ThreadLocal DNSCrypt sockets so reconnects do not leak FDs.
+        liveDnsSockets.toList().forEach { runCatching { it.close() } }
+        liveDnsSockets.clear()
+        dnsScratch.remove()
         runCatching {
             if (!dnsExecutor.awaitTermination(2, TimeUnit.SECONDS)) {
                 Timber.w("DNS executor did not terminate cleanly")
@@ -390,7 +401,7 @@ class TunDnsMux(
         return sum.inv() and 0xffff
     }
 
-    private class DnsScratch {
+    private inner class DnsScratch {
         val responseBuf = ByteArray(DNS_RESPONSE_CAP)
         val replyBuf = ByteArray(MTU)
         private var socket: DatagramSocket? = null
@@ -401,6 +412,7 @@ class TunDnsMux(
             return DatagramSocket().also {
                 it.soTimeout = DNS_TIMEOUT_MS
                 socket = it
+                liveDnsSockets.add(it)
             }
         }
     }
@@ -410,17 +422,12 @@ class TunDnsMux(
         private const val PROTO_UDP = 17
         private const val DNS_TIMEOUT_MS = 8_000
         private const val DNS_RESPONSE_CAP = 2048
-        private const val EMPTY_READ_PARK_NS = 200_000L // 0.2ms
+        /** Avoid near-spin if the TUN fd ever returns 0-length reads. */
+        private const val EMPTY_READ_PARK_NS = 1_000_000L // 1ms
         private val DNS_CORE_THREADS =
             Runtime.getRuntime().availableProcessors().coerceIn(2, 4)
         private val DNS_MAX_THREADS = (DNS_CORE_THREADS + 2).coerceAtMost(6)
         private const val DNS_QUEUE_CAP = 64
         private const val PENDING_QNAME_CAP = 512
-
-        private val dnsScratch = ThreadLocal.withInitial { DnsScratch() }
-
-        /** queryId → QNAME for FakeDNS responses that rely on query correlation. */
-        private val pendingQnames =
-            java.util.concurrent.ConcurrentHashMap<Int, String>(64)
     }
 }

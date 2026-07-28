@@ -40,9 +40,9 @@ object TunnelEndpoints {
 
     /**
      * SOCKS5 credentials for hev → Tor IsolateSOCKSAuth (app traffic circuits).
-     * hev uses one token for all TUN streams — circuit separation relies on
-     * IsolateDestAddr/IsolateDestPort (path-spec); KeepAliveIsolateSOCKSAuth is
-     * intentionally off on the app SocksPort so MaxCircuitDirtiness rotates.
+     * hev uses one token for all TUN streams — IsolateSOCKSAuth alone cannot
+     * separate apps. Circuit policy is [TorStreamIsolationMode] on the apps
+     * SocksPort; KeepAliveIsolateSOCKSAuth stays off so MaxCircuitDirtiness rotates.
      */
     const val SOCKS_ISOLATION_USER = "onionvpn"
     const val SOCKS_ISOLATION_PASS = "stream"
@@ -74,6 +74,23 @@ object TunnelEndpoints {
 enum class DnsResolverMode {
     DNSCRYPT_MUX,
     FAKE_IP_SOCKS5A,
+}
+
+/**
+ * How aggressively Tor isolates app (hev) streams.
+ *
+ * - [BALANCED]: Orbot-like — no IsolateDestAddr/Port on the apps SocksPort.
+ *   Same-host bursts (e.g. Obtainium → api.github.com) can use multiple circuits
+ *   as Tor builds them, which spreads exit-IP rate limits and cuts circuit thrash.
+ * - [STRICT]: IsolateDestAddr + IsolateDestPort — one circuit per destination.
+ *   Stronger unlinkability between hosts, but pins APIs to a single exit and is slower.
+ *
+ * hev uses one static SOCKS user/pass, so IsolateSOCKSAuth alone cannot separate
+ * apps; SessionGroup still keeps apps ⟂ DNSCrypt ⟂ probes.
+ */
+enum class TorStreamIsolationMode {
+    BALANCED,
+    STRICT,
 }
 
 /**

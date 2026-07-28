@@ -45,6 +45,7 @@ import ltechnologies.onionphone.onionvpn.R
 import ltechnologies.onionphone.onionvpn.core.dnscrypt.config.DnsCryptPublicResolvers
 import ltechnologies.onionphone.onionvpn.core.model.DnsResolverMode
 import ltechnologies.onionphone.onionvpn.core.model.FirewallDefaultAction
+import ltechnologies.onionphone.onionvpn.core.model.TorStreamIsolationMode
 import ltechnologies.onionphone.onionvpn.core.model.TunnelPreferences
 import ltechnologies.onionphone.onionvpn.threat.DomainReputationRepository
 import ltechnologies.onionphone.onionvpn.util.SystemSecurityIntents
@@ -330,8 +331,41 @@ fun SettingsScreen(
 
         Text("Tor", style = MaterialTheme.typography.titleMedium)
         Text(
-            text = "Circuit rotation presets (tor-spec path-spec / MaxCircuitDirtiness). " +
-                "Vanguards-lite, padding, ClientOnly, SafeLogging already forced in torrc.",
+            text = "Stream isolation (apps → hev → Tor). Balanced matches Orbot: " +
+                "no IsolateDest* so same-host bursts (e.g. GitHub APIs) can spread across " +
+                "circuits. Strict pins one circuit per destination IP:port (slower, " +
+                "worse for API rate limits). Requires tunnel restart.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Row(
+            modifier = Modifier.horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            FilterChip(
+                selected = local.torStreamIsolation == TorStreamIsolationMode.BALANCED,
+                onClick = {
+                    commit(
+                        local.copy(torStreamIsolation = TorStreamIsolationMode.BALANCED),
+                        restart = true,
+                    )
+                },
+                label = { Text("Isolation: Balanced") },
+            )
+            FilterChip(
+                selected = local.torStreamIsolation == TorStreamIsolationMode.STRICT,
+                onClick = {
+                    commit(
+                        local.copy(torStreamIsolation = TorStreamIsolationMode.STRICT),
+                        restart = true,
+                    )
+                },
+                label = { Text("Isolation: Strict") },
+            )
+        }
+        Text(
+            text = "Circuit rotation presets (tor-spec MaxCircuitDirtiness). " +
+                "Vanguards-lite, reduced padding, ClientOnly, SafeLogging forced in torrc.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -341,6 +375,20 @@ fun SettingsScreen(
         ) {
             FilterChip(
                 selected = local.torNewCircuitPeriodSec == 30 &&
+                    local.torMaxCircuitDirtinessSec == 600,
+                onClick = {
+                    commit(
+                        local.copy(
+                            torNewCircuitPeriodSec = 30,
+                            torMaxCircuitDirtinessSec = 600,
+                        ),
+                        restart = true,
+                    )
+                },
+                label = { Text("Rotation: Orbot-like") },
+            )
+            FilterChip(
+                selected = local.torNewCircuitPeriodSec == 30 &&
                     local.torMaxCircuitDirtinessSec == 180,
                 onClick = {
                     commit(
@@ -348,9 +396,10 @@ fun SettingsScreen(
                             torNewCircuitPeriodSec = 30,
                             torMaxCircuitDirtinessSec = 180,
                         ),
+                        restart = true,
                     )
                 },
-                label = { Text("Balanced") },
+                label = { Text("Rotation: Faster") },
             )
             FilterChip(
                 selected = local.torNewCircuitPeriodSec == 15 &&
@@ -361,9 +410,10 @@ fun SettingsScreen(
                             torNewCircuitPeriodSec = 15,
                             torMaxCircuitDirtinessSec = 60,
                         ),
+                        restart = true,
                     )
                 },
-                label = { Text("Paranoid") },
+                label = { Text("Rotation: Paranoid") },
             )
         }
         OutlinedTextField(

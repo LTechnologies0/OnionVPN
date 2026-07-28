@@ -2,6 +2,7 @@ package ltechnologies.onionphone.onionvpn.core.tor.config
 
 import java.io.File
 import ltechnologies.onionphone.onionvpn.core.model.DnsResolverMode
+import ltechnologies.onionphone.onionvpn.core.model.TorStreamIsolationMode
 import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
 import ltechnologies.onionphone.onionvpn.core.model.TunnelPreferences
 
@@ -17,8 +18,9 @@ import ltechnologies.onionphone.onionvpn.core.model.TunnelPreferences
  * and MITM hardening.
  *
  * Isolation model:
- * 1. Apps/hev — SessionGroup apps, IsolateDestAddr+Port, no KeepAliveIsolateSOCKSAuth
- * 2. DNSCrypt — own SessionGroup + KeepAliveIsolateSOCKSAuth
+ * 1. Apps/hev — SessionGroup apps; [TorStreamIsolationMode] controls IsolateDest*;
+ *    never KeepAliveIsolateSOCKSAuth (shared hev auth must not pin circuits forever)
+ * 2. DNSCrypt — own SessionGroup + KeepAliveIsolateSOCKSAuth + dest isolation
  * 3. Probes — dedicated SocksPort (never share circuits with user traffic)
  * 4. DNSPort — Automap / bootstrap SessionGroup
  *
@@ -38,11 +40,21 @@ object TorConfigWriter {
     const val COOKIE_FILE_NAME = "control_auth_cookie"
 
     /**
-     * Maximal SOCKS isolation flags (path-spec + Tor man).
-     * Applied to every SocksPort; apps omit KeepAliveIsolateSOCKSAuth separately.
+     * Full dest isolation (path-spec). Used for DNSCrypt/probe and apps in STRICT mode.
      */
-    const val SOCKS_ISOLATION_MAX =
+    const val SOCKS_ISOLATION_STRICT =
         "IsolateClientAddr IsolateClientProtocol IsolateDestAddr IsolateDestPort IsolateSOCKSAuth"
+
+    /**
+     * Orbot-like apps isolation: auth/client flags only — no IsolateDest*.
+     * Lets Tor attach same-host streams to different circuits over time (rate-limit
+     * spreading) and avoids circuit storms under multi-host browsing.
+     */
+    const val SOCKS_ISOLATION_BALANCED =
+        "IsolateClientAddr IsolateClientProtocol IsolateSOCKSAuth"
+
+    /** @deprecated Use [SOCKS_ISOLATION_STRICT]. Kept for call-site compatibility. */
+    const val SOCKS_ISOLATION_MAX = SOCKS_ISOLATION_STRICT
 
     /**
      * @param dataDirectory absolute Tor DataDirectory path
@@ -70,18 +82,22 @@ object TorConfigWriter {
         appendLine("SocksPolicy accept 127.0.0.1")
         appendLine("SocksPolicy reject *")
 
+        val appsIsolation = when (preferences.torStreamIsolation) {
+            TorStreamIsolationMode.BALANCED -> SOCKS_ISOLATION_BALANCED
+            TorStreamIsolationMode.STRICT -> SOCKS_ISOLATION_STRICT
+        }
         appendLine(
             "SOCKSPort ${TunnelEndpoints.LOOPBACK}:$socksPort " +
-                "SessionGroup=${TunnelEndpoints.SESSION_GROUP_APPS} $SOCKS_ISOLATION_MAX",
+                "SessionGroup=${TunnelEndpoints.SESSION_GROUP_APPS} $appsIsolation",
         )
         appendLine(
             "SOCKSPort ${TunnelEndpoints.LOOPBACK}:$dnsCryptSocksPort " +
-                "SessionGroup=${TunnelEndpoints.SESSION_GROUP_DNSCRYPT} $SOCKS_ISOLATION_MAX " +
+                "SessionGroup=${TunnelEndpoints.SESSION_GROUP_DNSCRYPT} $SOCKS_ISOLATION_STRICT " +
                 "KeepAliveIsolateSOCKSAuth",
         )
         appendLine(
             "SOCKSPort ${TunnelEndpoints.LOOPBACK}:$probeSocksPort " +
-                "SessionGroup=${TunnelEndpoints.SESSION_GROUP_PROBE} $SOCKS_ISOLATION_MAX",
+                "SessionGroup=${TunnelEndpoints.SESSION_GROUP_PROBE} $SOCKS_ISOLATION_STRICT",
         )
         appendLine(
             "DNSPort ${TunnelEndpoints.LOOPBACK}:$dnsPort " +
@@ -120,15 +136,18 @@ object TorConfigWriter {
         appendLine("EnforceDistinctSubnets 1")
         appendLine("StrictNodes 0")
 
-        appendLine("MaxClientCircuitsPending 128")
+        // Orbot-scale pending budget — 128 + IsolateDest* caused circuit storms.
+        appendLine("MaxClientCircuitsPending 32")
         appendLine("CircuitBuildTimeout 60")
         appendLine("LearnCircuitBuildTimeout 1")
         appendLine("SocksTimeout 120")
+        appendLine("CircuitStreamTimeout 30")
 
+        // Orbot defaults: reduced padding (less battery/bandwidth overhead).
         appendLine("ConnectionPadding auto")
-        appendLine("ReducedConnectionPadding 0")
+        appendLine("ReducedConnectionPadding 1")
         appendLine("CircuitPadding 1")
-        appendLine("ReducedCircuitPadding 0")
+        appendLine("ReducedCircuitPadding 1")
 
         appendLine("WarnPlaintextPorts 23,109,110,143")
         appendLine("RejectPlaintextPorts 23,109")
