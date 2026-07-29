@@ -14,7 +14,6 @@ import ltechnologies.onionphone.onionvpn.core.validation.leak.SystemLeakInspecto
 import ltechnologies.onionphone.onionvpn.core.validation.path.DnsCryptPathValidator
 import ltechnologies.onionphone.onionvpn.core.validation.path.ExitIpValidator
 import ltechnologies.onionphone.onionvpn.core.validation.path.TorPathValidator
-import ltechnologies.onionphone.onionvpn.core.vpn.OnionVpnService
 import ltechnologies.onionphone.onionvpn.core.vpn.forwarder.LeakPacketFilter
 import ltechnologies.onionphone.onionvpn.core.vpn.profile.VpnProfileBuilder
 
@@ -54,7 +53,7 @@ object TunnelValidator {
                     )
                 }
                 addAll(DnsCryptPathValidator.validate(listenPort = runtimePorts.dnsCryptListenPort))
-                add(validateUidForwarderWiring(torConfigFile, runtimePorts, dnsResolverMode))
+                add(validateHevForwarderWiring(hevConfigFile, runtimePorts, dnsResolverMode))
                 add(validateDnsCryptTorWiring(dnsCryptConfigFile, runtimePorts))
                 add(validateDnsModeLeakProperties(dnsResolverMode, hevConfigFile))
                 add(validateUdpBlackholePolicy())
@@ -156,36 +155,8 @@ object TunnelValidator {
 
 
     /**
-     * Mode A: mapdns FakeDNS on 10.8.0.1:53 + fake-IP pool outside VPN subnet.
-     * Mode B: no mapdns — TunDnsMux forwards UDP/53 to DNSCrypt; hev socks → Tor only.
+     * hev yaml must point at the live Tor SOCKS; TunDnsMux handles DNSCrypt divert.
      */
-    private fun validateUidForwarderWiring(
-        torConfigFile: File?,
-        ports: TunnelRuntimePorts,
-        dnsMode: DnsResolverMode,
-    ): ValidationCheck {
-        val torrc = torConfigFile?.takeIf { it.exists() }?.readText().orEmpty()
-        val appSocks = torrc.lineSequence().firstOrNull {
-            it.startsWith("SOCKSPort ") &&
-                it.contains("SessionGroup=${TunnelEndpoints.SESSION_GROUP_APPS}")
-        }.orEmpty()
-        val portOk = appSocks.contains(":${ports.torSocksPort}") ||
-            appSocks.contains("SOCKSPort ${TunnelEndpoints.LOOPBACK}:${ports.torSocksPort}")
-        val isolateOk = appSocks.contains("IsolateSOCKSAuth")
-        val keepAliveOk = appSocks.contains("KeepAliveIsolateSOCKSAuth")
-        val forwarderAlive = OnionVpnService.tunForwarderAlive.value
-        val ok = portOk && isolateOk && keepAliveOk && forwarderAlive
-        return ValidationCheck(
-            id = "uid.forwarder.wiring",
-            label = "Per-app SOCKS IsolateSOCKSAuth (u{uid})",
-            status = if (ok) ValidationStatus.Pass else ValidationStatus.Fail,
-            detail = "mode=$dnsMode socksPort=$portOk isolate=$isolateOk " +
-                "keepAlive=$keepAliveOk forwarderAlive=$forwarderAlive " +
-                "(expect apps SOCKS ${ports.torSocksPort})",
-            tripsKillSwitch = true,
-        )
-    }
-
     private fun validateHevForwarderWiring(
         hevConfigFile: File?,
         ports: TunnelRuntimePorts,
@@ -196,8 +167,9 @@ object TunnelValidator {
             ?: return ValidationCheck(
                 id = "hev.config.missing",
                 label = "hev-socks5 DNS + Tor SOCKS wiring",
-                status = ValidationStatus.Skipped,
-                detail = "hev-socks5-tunnel.yaml not used (UID SOCKS forwarder)",
+                status = ValidationStatus.Fail,
+                detail = "hev-socks5-tunnel.yaml missing — forwarder not started?",
+                tripsKillSwitch = true,
             )
 
         val socksBlock = config.substringAfter("socks5:", "")
@@ -213,10 +185,14 @@ object TunnelValidator {
             -> {
                 ValidationCheck(
                     id = "hev.forwarder.wiring",
-                    label = "Legacy hev yaml (unused)",
-                    status = ValidationStatus.Skipped,
-                    detail = "UID forwarder + DNSCrypt divert active; hev yaml ignored " +
-                        "socksPortOk=$socksPortOk mode=$dnsMode",
+                    label = "hev-socks5 ↔ Tor SOCKS wiring",
+                    status = if (socksPortOk && socksAddrOk) {
+                        ValidationStatus.Pass
+                    } else {
+                        ValidationStatus.Fail
+                    },
+                    detail = "socksPortOk=$socksPortOk socksAddrOk=$socksAddrOk mode=$dnsMode",
+                    tripsKillSwitch = true,
                 )
             }
         }
@@ -323,7 +299,7 @@ object TunnelValidator {
             label = "DNSCrypt-over-Tor (no clearnet DNS)",
             status = ValidationStatus.Pass,
             detail = "mode=$dnsMode: any UDP/53 diverted to DNSCrypt via Tor SOCKS; " +
-                "TCP via per-UID SOCKS",
+                "TCP via hev-socks5-tunnel",
             tripsKillSwitch = false,
         )
     }

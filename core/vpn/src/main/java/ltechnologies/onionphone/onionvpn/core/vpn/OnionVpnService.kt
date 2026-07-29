@@ -15,19 +15,19 @@ import ltechnologies.onionphone.onionvpn.core.model.TunnelFailure
 import ltechnologies.onionphone.onionvpn.core.model.TunnelPreferences
 import ltechnologies.onionphone.onionvpn.core.model.VpnEstablishResult
 import ltechnologies.onionphone.onionvpn.core.model.VpnProfileMode
-import ltechnologies.onionphone.onionvpn.core.vpn.forwarder.UidIsolatingTunForwarder
+import ltechnologies.onionphone.onionvpn.core.vpn.forwarder.HevSocks5TunForwarder
 import ltechnologies.onionphone.onionvpn.core.vpn.net.UnderlyingNetworkTracker
 import ltechnologies.onionphone.onionvpn.core.vpn.profile.TunForwarder
 import ltechnologies.onionphone.onionvpn.core.vpn.profile.VpnProfileBuilder
 import timber.log.Timber
 
 /**
- * Android [VpnService] data plane — builds TUN profiles and runs UID-isolating SOCKS forwarder.
+ * Android [VpnService] data plane — builds TUN profiles and runs hev-socks5-tunnel.
  *
  * Sequential applyProfile:
  * 1. Parse intent prefs/mode/ports/generation
  * 2. [VpnProfileBuilder.configure] + establish TUN (before closing old)
- * 3. Optionally start [UidIsolatingTunForwarder]
+ * 3. Start [HevSocks5TunForwarder] (TunDnsMux + hev TCP/UDP↔SOCKS)
  * 4. [UnderlyingNetworkTracker] for SIGNAL ACTIVE on net change
  *
  * Coordinator: [ltechnologies.onionphone.onionvpn.service.TunnelForegroundService].
@@ -226,12 +226,9 @@ class OnionVpnService : VpnService() {
         dnsMode: DnsResolverMode,
     ) {
         val tun = tunInterface ?: return
-        val forwarder = UidIsolatingTunForwarder(
+        val forwarder = HevSocks5TunForwarder(
             context = applicationContext,
             dnsMode = dnsMode,
-            protectSocket = { socket ->
-                runCatching { protect(socket) }.getOrDefault(false)
-            },
             onFatal = { error ->
                 Timber.e(error, "TUN forwarder died — signalling fail-closed")
                 forwarderAlive.value = false

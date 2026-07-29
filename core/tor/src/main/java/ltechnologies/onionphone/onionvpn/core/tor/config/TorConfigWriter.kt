@@ -106,8 +106,7 @@ object TorConfigWriter {
         appendLine("AutomapHostsOnResolve 1")
         appendLine("AutomapHostsSuffixes .onion,.exit")
 
-        // UID SOCKS forwarder does CONNECT by IPv4 (DNSCrypt supplies real A records).
-        // SafeSocks would reject those — keep off. Hostname SOCKS5A is for probes only.
+        // hev CONNECTs by IPv4 (DNSCrypt supplies real A records). SafeSocks would reject.
         appendLine("SafeSocks 0")
         appendLine("TestSocks 0")
         appendLine("VirtualAddrNetwork 10.192.0.0/10")

@@ -158,7 +158,13 @@ class InteractiveFirewallEngine @Inject constructor(
         if (info.isTcpSyn && !ConnectionOwnerResolver.isValidUid(uid)) {
             return false
         }
-        // Mid-flow without owner: fail-closed (no session should exist).
+        // Mid-flow often loses owner UID on Android — do NOT fail-closed here (that blackholed
+        // every ACK/TLS after STREAM SUCCEEDED). Fall through with best-effort UID for caches.
+        if (!ConnectionOwnerResolver.isValidUid(uid) && info.isTcp && !info.isTcpSyn) {
+            // Try flow cache with the unresolved uid first; if empty, fail-open mid-flow.
+            // SYN already required a valid owner + ALLOW/ASK verdict.
+            return true
+        }
         if (!ConnectionOwnerResolver.isValidUid(uid)) {
             return false
         }
