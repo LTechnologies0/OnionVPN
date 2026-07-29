@@ -1,0 +1,145 @@
+package ltechnologies.onionphone.onionvpn.core.vpn.pac
+
+import java.io.BufferedReader
+import java.io.InputStreamReader
+import java.io.OutputStreamWriter
+import java.net.InetAddress
+import java.net.ServerSocket
+import java.net.Socket
+import java.net.SocketException
+import java.nio.charset.StandardCharsets
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
+import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
+import timber.log.Timber
+
+/**
+ * Loopback HTTP server for a stable PAC URL + owns the DNSCrypt→Tor SOCKS bridge.
+ *
+ * PAC body always returns [TunnelEndpoints.PAC_BRIDGE_SOCKS_PORT] (not raw Tor SOCKS),
+ * so name resolution goes through DNSCrypt.
+ */
+class PacProxyServer(
+    private val listenPort: Int = TunnelEndpoints.PAC_LISTEN_PORT,
+) {
+    private val running = AtomicBoolean(false)
+    private val bridgeUp = AtomicBoolean(false)
+    private val serverRef = AtomicReference<ServerSocket?>(null)
+    private var acceptThread: Thread? = null
+    private val socksBridge = DnsCryptSocksBridge()
+
+    val pacUrl: String get() = TunnelEndpoints.pacUrl()
+
+    fun updateUpstream(torSocksPort: Int, dnsCryptListenPort: Int) {
+        socksBridge.updateUpstream(torSocksPort, dnsCryptListenPort)
+        bridgeUp.set(torSocksPort > 0 && dnsCryptListenPort > 0)
+        Timber.i(
+            "PAC upstream torSocks=%d dnsCrypt=%d bridge=%s url=%s",
+            torSocksPort,
+            dnsCryptListenPort,
+            TunnelEndpoints.pacSocksBridge(),
+            pacUrl,
+        )
+    }
+
+    fun start() {
+        if (!running.compareAndSet(false, true)) return
+        socksBridge.start()
+        val server = try {
+            ServerSocket(listenPort, 8, InetAddress.getByName(TunnelEndpoints.LOOPBACK))
+        } catch (e: Exception) {
+            running.set(false)
+            runCatching { socksBridge.stop() }
+            Timber.e(e, "PAC listen failed on ${TunnelEndpoints.LOOPBACK}:$listenPort")
+            throw e
+        }
+        serverRef.set(server)
+        acceptThread = Thread({
+            Timber.i("PAC server listening %s", pacUrl)
+            while (running.get()) {
+                try {
+                    val client = server.accept()
+                    Thread({ handleClient(client) }, "onionvpn-pac-req").apply {
+                        isDaemon = true
+                        start()
+                    }
+                } catch (_: SocketException) {
+                    if (!running.get()) break
+                } catch (e: Exception) {
+                    if (running.get()) Timber.d(e, "PAC accept error")
+                }
+            }
+        }, "onionvpn-pac-accept").apply {
+            isDaemon = true
+            start()
+        }
+    }
+
+    fun stop() {
+        if (!running.compareAndSet(true, false)) return
+        bridgeUp.set(false)
+        runCatching { socksBridge.stop() }
+        runCatching { serverRef.getAndSet(null)?.close() }
+        acceptThread?.interrupt()
+        acceptThread = null
+        Timber.i("PAC server stopped")
+    }
+
+    private fun handleClient(socket: Socket) {
+        socket.use { sock ->
+            sock.soTimeout = 5_000
+            val reader = BufferedReader(InputStreamReader(sock.getInputStream(), StandardCharsets.US_ASCII))
+            val requestLine = reader.readLine() ?: return
+            while (true) {
+                val line = reader.readLine() ?: break
+                if (line.isEmpty()) break
+            }
+            val path = requestLine.substringAfter(' ').substringBefore(' ').trim()
+            val writer = OutputStreamWriter(sock.getOutputStream(), StandardCharsets.UTF_8)
+            when {
+                path == TunnelEndpoints.PAC_PATH ||
+                    path == "/proxy.pac" ||
+                    path == "/wpad.dat" ||
+                    path == "/" -> {
+                    val body = PacScript.build(bridgeUp = bridgeUp.get())
+                    val bytes = body.toByteArray(StandardCharsets.UTF_8)
+                    writer.write("HTTP/1.1 200 OK\r\n")
+                    writer.write("Content-Type: application/x-ns-proxy-autoconfig\r\n")
+                    writer.write("Cache-Control: no-store, max-age=0\r\n")
+                    writer.write("Connection: close\r\n")
+                    writer.write("Content-Length: ${bytes.size}\r\n")
+                    writer.write("\r\n")
+                    writer.flush()
+                    sock.getOutputStream().write(bytes)
+                    sock.getOutputStream().flush()
+                }
+                path == "/health" -> {
+                    val ok = bridgeUp.get()
+                    val msg = if (ok) {
+                        "ok bridge=${TunnelEndpoints.pacSocksBridge()} dns=dnscrypt"
+                    } else {
+                        "down"
+                    }
+                    writePlain(writer, if (ok) 200 else 503, msg)
+                }
+                else -> writePlain(writer, 404, "not found")
+            }
+        }
+    }
+
+    private fun writePlain(writer: OutputStreamWriter, code: Int, body: String) {
+        val reason = when (code) {
+            200 -> "OK"
+            503 -> "Service Unavailable"
+            else -> "Not Found"
+        }
+        val bytes = body.toByteArray(StandardCharsets.UTF_8)
+        writer.write("HTTP/1.1 $code $reason\r\n")
+        writer.write("Content-Type: text/plain; charset=utf-8\r\n")
+        writer.write("Connection: close\r\n")
+        writer.write("Content-Length: ${bytes.size}\r\n")
+        writer.write("\r\n")
+        writer.write(body)
+        writer.flush()
+    }
+}

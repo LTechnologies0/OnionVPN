@@ -1,7 +1,6 @@
 package ltechnologies.onionphone.onionvpn.core.tor.config
 
 import java.io.File
-import ltechnologies.onionphone.onionvpn.core.model.DnsResolverMode
 import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
 import ltechnologies.onionphone.onionvpn.core.model.TunnelPreferences
 
@@ -16,13 +15,16 @@ import ltechnologies.onionphone.onionvpn.core.model.TunnelPreferences
  * Builds OnionVPN client `torrc` text: multi-SocksPort isolation, ControlSocket cookie auth,
  * and MITM hardening.
  *
- * Isolation model:
- * 1. Apps/hev — SessionGroup apps, IsolateDestAddr+Port, no KeepAliveIsolateSOCKSAuth
+ * Isolation model (path-spec + Privacy Guides / Tor Browser / Whonix lessons):
+ * 1. Apps — SessionGroup + IsolateSOCKSAuth + KeepAliveIsolateSOCKSAuth (per-UID tokens).
+ *    No IsolateDestPort on apps: DestAddr+DestPort explode circuit count on mobile
+ *    (Whonix ticket #3455; TBB uses SOCKS-auth isolation instead).
  * 2. DNSCrypt — own SessionGroup + KeepAliveIsolateSOCKSAuth
  * 3. Probes — dedicated SocksPort (never share circuits with user traffic)
  * 4. DNSPort — Automap / bootstrap SessionGroup
  *
  * @see <a href="https://spec.torproject.org/path-spec/stream-isolation.html">path-spec stream isolation</a>
+ * @see <a href="https://spec.torproject.org/proposals/368-cdt-rethink.html">prop 368 CDT / KeepAliveIsolateSOCKSAuth</a>
  */
 object TorConfigWriter {
     /**
@@ -38,25 +40,35 @@ object TorConfigWriter {
     const val COOKIE_FILE_NAME = "control_auth_cookie"
 
     /**
-     * Maximal SOCKS isolation flags (path-spec + Tor man).
-     * Applied to every SocksPort; apps omit KeepAliveIsolateSOCKSAuth separately.
+     * Full SOCKS isolation (DestAddr+DestPort) — probes / DNSCrypt only.
+     * Apps use [SOCKS_ISOLATION_APPS] to avoid circuit storms.
      */
     const val SOCKS_ISOLATION_MAX =
         "IsolateClientAddr IsolateClientProtocol IsolateDestAddr IsolateDestPort IsolateSOCKSAuth"
+
+    /**
+     * Apps SocksPort: UID tokens ([KeepAliveIsolateSOCKSAuth]) are the primary
+     * isolation axis. Keep IsolateDestAddr for same-UID host separation without
+     * per-port circuit fan-out.
+     */
+    const val SOCKS_ISOLATION_APPS =
+        "IsolateClientAddr IsolateClientProtocol IsolateDestAddr IsolateSOCKSAuth"
 
     /**
      * @param dataDirectory absolute Tor DataDirectory path
      * @param socksPort apps/hev SocksPort
      * @param dnsCryptSocksPort DNSCrypt upstream SocksPort
      * @param probeSocksPort validation/leak-probe SocksPort
+     * @param httpTunnelPort Tor HTTPTunnelPort (HTTP CONNECT for PAC / legacy apps)
      * @param dnsPort Tor DNSPort (Automap)
-     * @param preferences bridges, nodes, circuit dirtiness, DNS mode (SafeSocks)
+     * @param preferences bridges, nodes, circuit dirtiness
      */
     fun write(
         dataDirectory: String,
         socksPort: Int = TunnelEndpoints.TOR_SOCKS_PORT,
         dnsCryptSocksPort: Int = TunnelEndpoints.TOR_SOCKS_PORT + 1,
         probeSocksPort: Int = TunnelEndpoints.TOR_SOCKS_PORT + 2,
+        httpTunnelPort: Int = TunnelEndpoints.TOR_SOCKS_PORT + 3,
         dnsPort: Int = TunnelEndpoints.TOR_DNS_PORT,
         preferences: TunnelPreferences = TunnelPreferences(),
     ): String = buildString {
@@ -64,6 +76,8 @@ object TorConfigWriter {
         appendLine("ClientOnly 1")
         appendLine("AvoidDiskWrites 1")
         appendLine("DormantCanceledByStartup 1")
+        // Idle timeout before Tor goes dormant on its own (battery). Controller can SIGNAL ACTIVE.
+        appendLine("DormantClientTimeout 30 minutes")
         appendLine("SafeLogging 1")
         appendLine("Log notice stderr")
 
@@ -72,7 +86,8 @@ object TorConfigWriter {
 
         appendLine(
             "SOCKSPort ${TunnelEndpoints.LOOPBACK}:$socksPort " +
-                "SessionGroup=${TunnelEndpoints.SESSION_GROUP_APPS} $SOCKS_ISOLATION_MAX",
+                "SessionGroup=${TunnelEndpoints.SESSION_GROUP_APPS} $SOCKS_ISOLATION_APPS " +
+                "KeepAliveIsolateSOCKSAuth",
         )
         appendLine(
             "SOCKSPort ${TunnelEndpoints.LOOPBACK}:$dnsCryptSocksPort " +
@@ -90,12 +105,16 @@ object TorConfigWriter {
         appendLine("AutomapHostsOnResolve 1")
         appendLine("AutomapHostsSuffixes .onion,.exit")
 
-        val safeSocks = preferences.dnsResolverMode == DnsResolverMode.FAKE_IP_SOCKS5A
-        appendLine("SafeSocks ${if (safeSocks) 1 else 0}")
-        appendLine("TestSocks ${if (safeSocks) 1 else 0}")
+        // UID SOCKS forwarder does CONNECT by IPv4 (DNSCrypt supplies real A records).
+        // SafeSocks would reject those — keep off. Hostname SOCKS5A is for probes only.
+        appendLine("SafeSocks 0")
+        appendLine("TestSocks 0")
         appendLine("VirtualAddrNetwork 10.192.0.0/10")
         appendLine("TransPort 0")
-        appendLine("HTTPTunnelPort 0")
+        appendLine(
+            "HTTPTunnelPort ${TunnelEndpoints.LOOPBACK}:$httpTunnelPort " +
+                "IsolateClientAddr IsolateClientProtocol IsolateDestAddr",
+        )
         appendLine("ControlPort 0")
         appendLine("CookieAuthentication 1")
         appendLine("CookieAuthFile ${File(dataDirectory, COOKIE_FILE_NAME).absolutePath}")
@@ -114,16 +133,20 @@ object TorConfigWriter {
         appendLine("UseMicrodescriptors 1")
 
         appendLine("UseEntryGuards 1")
-        appendLine("NumEntryGuards 1")
-        appendLine("NumPrimaryGuards 1")
+        // Tor defaults ~2 primary guards — single guard hurts Wi‑Fi↔cell handoffs (Privacy Guides:
+        // guards stay for months; having two improves mobile resilience without DROPGUARDS).
+        appendLine("NumEntryGuards 2")
+        appendLine("NumPrimaryGuards 2")
         appendLine("NumDirectoryGuards 3")
         appendLine("EnforceDistinctSubnets 1")
         appendLine("StrictNodes 0")
 
-        appendLine("MaxClientCircuitsPending 128")
+        // Cap pending builds — Isolate* + high pending caused circuit storms on app fan-out.
+        appendLine("MaxClientCircuitsPending 32")
         appendLine("CircuitBuildTimeout 60")
         appendLine("LearnCircuitBuildTimeout 1")
         appendLine("SocksTimeout 120")
+        appendLine("CircuitStreamTimeout 0")
 
         appendLine("ConnectionPadding auto")
         appendLine("ReducedConnectionPadding 0")

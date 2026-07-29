@@ -8,14 +8,15 @@ import org.junit.Test
 
 class TorConfigWriterTest {
     @Test
-    fun streamIsolation_maxFlags_threeSocksPorts_noKeepAliveOnApps() {
+    fun streamIsolation_appsWithoutDestPort_keepAlive_mobileGuards() {
         val torrc = TorConfigWriter.write(
             dataDirectory = "/tmp/tor",
             socksPort = 1111,
             dnsCryptSocksPort = 2222,
             probeSocksPort = 3333,
+            httpTunnelPort = 5555,
             dnsPort = 4444,
-            preferences = TunnelPreferences(torMaxCircuitDirtinessSec = 180),
+            preferences = TunnelPreferences(torMaxCircuitDirtinessSec = 600),
         )
 
         assertTrue(torrc.contains("SOCKSPort ${TunnelEndpoints.LOOPBACK}:1111"))
@@ -27,24 +28,38 @@ class TorConfigWriterTest {
         assertTrue(torrc.contains("IsolateClientAddr"))
         assertTrue(torrc.contains("IsolateClientProtocol"))
         assertTrue(torrc.contains("IsolateDestAddr"))
-        assertTrue(torrc.contains("IsolateDestPort"))
         assertTrue(torrc.contains("IsolateSOCKSAuth"))
-        assertTrue(torrc.contains("MaxClientCircuitsPending 128"))
-        assertTrue(torrc.contains("MaxCircuitDirtiness 180"))
+        assertTrue(torrc.contains("MaxClientCircuitsPending 32"))
+        assertTrue(torrc.contains("MaxCircuitDirtiness 600"))
+        assertTrue(torrc.contains("NumEntryGuards 2"))
+        assertTrue(torrc.contains("NumPrimaryGuards 2"))
+        assertTrue(torrc.contains("DormantClientTimeout 30 minutes"))
 
         val appLine = torrc.lineSequence().first {
             it.startsWith("SOCKSPort ") &&
                 it.contains("SessionGroup=${TunnelEndpoints.SESSION_GROUP_APPS}")
         }
-        assertFalse(
-            "KeepAliveIsolateSOCKSAuth on app SocksPort would pin shared hev auth circuits",
+        assertTrue(
+            "KeepAliveIsolateSOCKSAuth required for per-UID strong isolation tokens",
             appLine.contains("KeepAliveIsolateSOCKSAuth"),
+        )
+        assertFalse(
+            "Apps SocksPort must omit IsolateDestPort (circuit storm / Whonix #3455)",
+            appLine.contains("IsolateDestPort"),
         )
         val dnsCryptLine = torrc.lineSequence().first {
             it.startsWith("SOCKSPort ") &&
                 it.contains("SessionGroup=${TunnelEndpoints.SESSION_GROUP_DNSCRYPT}")
         }
         assertTrue(dnsCryptLine.contains("KeepAliveIsolateSOCKSAuth"))
+        assertTrue(dnsCryptLine.contains("IsolateDestPort"))
+        assertTrue(torrc.contains("SafeSocks 0"))
+        assertTrue(torrc.contains("TestSocks 0"))
+        assertTrue(torrc.contains("HTTPTunnelPort ${TunnelEndpoints.LOOPBACK}:5555"))
+        assertTrue(torrc.contains("AutomapHostsOnResolve 1"))
+        assertTrue(torrc.contains("AutomapHostsSuffixes .onion,.exit"))
+        assertTrue(torrc.contains("VirtualAddrNetwork 10.192.0.0/10"))
+        assertTrue(torrc.contains("DNSPort ${TunnelEndpoints.LOOPBACK}:4444"))
     }
 
     @Test

@@ -10,15 +10,24 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import ltechnologies.onionphone.onionvpn.BuildConfig
 import ltechnologies.onionphone.onionvpn.core.model.TunnelPhase
 import ltechnologies.onionphone.onionvpn.core.model.TunnelSnapshot
 import ltechnologies.onionphone.onionvpn.core.model.ValidationCheck
 import ltechnologies.onionphone.onionvpn.core.model.ValidationStatus
+import ltechnologies.onionphone.onionvpn.core.tor.control.lifecycle.CircuitLifecycleManager
+import ltechnologies.onionphone.onionvpn.core.vpn.forwarder.LeakPacketFilter
+import ltechnologies.onionphone.onionvpn.firewall.AppUidResolver
 
 @Composable
 fun StatusScreen(
@@ -27,7 +36,21 @@ fun StatusScreen(
     onStart: () -> Unit,
     onStop: () -> Unit,
     onNewNym: (() -> Unit)? = null,
+    circuitLifecycle: CircuitLifecycleManager? = null,
 ) {
+    var showCircuits by remember { mutableStateOf(false) }
+    val context = LocalContext.current
+    val appUidResolver = remember { AppUidResolver(context) }
+
+    if (showCircuits && circuitLifecycle != null) {
+        CircuitsScreen(
+            lifecycle = circuitLifecycle,
+            appUidResolver = appUidResolver,
+            onBack = { showCircuits = false },
+        )
+        return
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -46,6 +69,55 @@ fun StatusScreen(
         Text(text = "Tor: ${if (snapshot.torRunning) "up" else "down"}")
         Text(text = "DNSCrypt: ${if (snapshot.dnsCryptRunning) "up" else "down"}")
         Text(text = "VPN: ${if (snapshot.vpnEstablished) "up" else "down"}")
+        if (snapshot.vpnEstablished) {
+            Text(
+                text = "UDP blackhole (force TCP): ${LeakPacketFilter.statsSummary()}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        if (snapshot.pacUrl.isNotBlank()) {
+            Text("App helpers (PAC / proxy)", style = MaterialTheme.typography.titleMedium)
+            Text(
+                text = "Stable PAC URL (DNS via DNSCrypt → Tor by IP):\n${snapshot.pacUrl}",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            OutlinedButton(
+                onClick = {
+                    val cm = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE)
+                        as android.content.ClipboardManager
+                    cm.setPrimaryClip(
+                        android.content.ClipData.newPlainText("OnionVPN PAC", snapshot.pacUrl),
+                    )
+                },
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("Copy PAC URL")
+            }
+            if (snapshot.socksProxy.isNotBlank()) {
+                Text(
+                    text = "PAC SOCKS bridge: ${snapshot.socksProxy} (DNSCrypt→Tor)\n" +
+                        "Tor HTTP CONNECT (exit DNS — prefer PAC): ${snapshot.httpProxy}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                OutlinedButton(
+                    onClick = {
+                        val cm = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE)
+                            as android.content.ClipboardManager
+                        cm.setPrimaryClip(
+                            android.content.ClipData.newPlainText(
+                                "OnionVPN SOCKS",
+                                "socks5://${snapshot.socksProxy}",
+                            ),
+                        )
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text("Copy socks5:// URL")
+                }
+            }
+        }
         if (snapshot.torControlConnected || snapshot.torBootstrapProgress > 0) {
             Text(
                 text = buildString {
@@ -125,6 +197,15 @@ fun StatusScreen(
                 enabled = snapshot.torControlConnected,
             ) {
                 Text("New identity (NEWNYM)")
+            }
+            if (circuitLifecycle != null) {
+                OutlinedButton(
+                    onClick = { showCircuits = true },
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = snapshot.torControlConnected,
+                ) {
+                    Text("Circuits")
+                }
             }
         }
 

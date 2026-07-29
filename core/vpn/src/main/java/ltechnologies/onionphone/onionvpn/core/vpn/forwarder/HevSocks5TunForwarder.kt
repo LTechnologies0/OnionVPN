@@ -37,12 +37,18 @@ class HevSocks5TunForwarder(
     private var tunDup: ParcelFileDescriptor? = null
     private var dnsMux: TunDnsMux? = null
 
-    override fun start(tunFd: ParcelFileDescriptor, socksHost: String, socksPort: Int, dnsCryptPort: Int) {
+    override fun start(
+        tunFd: ParcelFileDescriptor,
+        socksHost: String,
+        socksPort: Int,
+        dnsCryptPort: Int,
+        torDnsPort: Int,
+    ) {
         stop()
         // Always mux TUN↔hev so PacketFirewall can inspect both DNSCRYPT_MUX and FakeDNS paths.
         val useMapDns = dnsMode == DnsResolverMode.FAKE_IP_SOCKS5A
         val divertDns = dnsMode == DnsResolverMode.DNSCRYPT_MUX
-        startWithMux(tunFd, socksHost, socksPort, dnsCryptPort, useMapDns, divertDns)
+        startWithMux(tunFd, socksHost, socksPort, dnsCryptPort, torDnsPort, useMapDns, divertDns)
     }
 
     private fun startWithMux(
@@ -50,6 +56,7 @@ class HevSocks5TunForwarder(
         socksHost: String,
         socksPort: Int,
         dnsCryptPort: Int,
+        torDnsPort: Int,
         useMapDns: Boolean,
         divertDns: Boolean,
     ) {
@@ -64,7 +71,8 @@ class HevSocks5TunForwarder(
             configFile.writeText(buildConfig(socksHost, socksPort, useMapDns = useMapDns))
             Timber.i(
                 "Starting hev-socks5-tunnel (mux/dgram) on fd=${hevEnd.fd} " +
-                    "socks=$socksPort dnscrypt=$dnsCryptPort mapdns=$useMapDns divertDns=$divertDns",
+                    "socks=$socksPort dnscrypt=$dnsCryptPort torDns=$torDnsPort " +
+                    "mapdns=$useMapDns divertDns=$divertDns",
             )
             try {
                 hev.sockstun.TProxyService.TProxyStartService(configFile.absolutePath, hevEnd.fd)
@@ -87,6 +95,8 @@ class HevSocks5TunForwarder(
             dnsCryptPort = dnsCryptPort,
             vpnDnsAddress = TunnelEndpoints.VPN_DNS_ADDRESS,
             divertDnsToDnsCrypt = divertDns,
+            torDnsHost = TunnelEndpoints.LOOPBACK,
+            torDnsPort = torDnsPort,
             onFatal = { error ->
                 Timber.e(error, "TunDnsMux died")
                 onFatal?.invoke(error)

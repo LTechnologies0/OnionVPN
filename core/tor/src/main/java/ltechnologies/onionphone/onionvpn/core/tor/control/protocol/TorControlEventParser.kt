@@ -107,13 +107,21 @@ internal object TorControlEventParser {
     }
 
     private fun parseCirc(payload: String): Result {
-        val parts = payload.split(' ')
-        if (parts.size < 3) return Result()
-        val id = parts[1]
-        val st = parts[2]
-        val reason = parts.firstOrNull { it.startsWith("REASON=") }?.substringAfter('=')
-        val path = parts.getOrNull(3)?.takeIf { !it.contains('=') }.orEmpty()
-        val event = TorControlEvent.Circuit(id, st, path, reason)
+        val parts = TorStatusListParser.tokenize(payload.removePrefix("CIRC_MINOR ").removePrefix("CIRC "))
+        if (parts.size < 2) return Result()
+        val id = parts[0]
+        val st = parts[1]
+        val reason = TorStatusListParser.kv(parts, "REASON")
+        val path = parts.getOrNull(2)?.takeIf { !it.contains('=') }.orEmpty()
+        val event = TorControlEvent.Circuit(
+            id = id,
+            status = st,
+            path = path,
+            reason = reason,
+            purpose = TorStatusListParser.kv(parts, "PURPOSE"),
+            socksUsername = TorStatusListParser.kvQuoted(parts, "SOCKS_USERNAME"),
+            socksPassword = TorStatusListParser.kvQuoted(parts, "SOCKS_PASSWORD"),
+        )
         return Result(
             event = event,
             statusPatch = { status ->
@@ -130,14 +138,25 @@ internal object TorControlEventParser {
     }
 
     private fun parseStream(payload: String): Result {
-        val parts = payload.split(' ')
-        if (parts.size < 5) return Result()
-        val id = parts[1]
-        val st = parts[2]
-        val circ = parts[3]
-        val target = parts[4]
-        val reason = parts.firstOrNull { it.startsWith("REASON=") }?.substringAfter('=')
-        val event = TorControlEvent.Stream(id, st, circ, target, reason)
+        val parts = TorStatusListParser.tokenize(payload.removePrefix("STREAM "))
+        if (parts.size < 4) return Result()
+        val id = parts[0]
+        val st = parts[1]
+        val circ = parts[2]
+        val target = parts[3]
+        val reason = TorStatusListParser.kv(parts, "REASON")
+        val event = TorControlEvent.Stream(
+            id = id,
+            status = st,
+            circuitId = circ,
+            target = target,
+            reason = reason,
+            socksUsername = TorStatusListParser.kvQuoted(parts, "SOCKS_USERNAME"),
+            socksPassword = TorStatusListParser.kvQuoted(parts, "SOCKS_PASSWORD"),
+            clientProtocol = TorStatusListParser.kv(parts, "CLIENT_PROTOCOL"),
+            purpose = TorStatusListParser.kv(parts, "PURPOSE"),
+            sourceAddr = TorStatusListParser.kv(parts, "SOURCE_ADDR"),
+        )
         return Result(
             event = event,
             statusPatch = { status ->

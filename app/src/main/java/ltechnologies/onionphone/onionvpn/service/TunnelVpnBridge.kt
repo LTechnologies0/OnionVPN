@@ -27,6 +27,7 @@ internal class TunnelVpnBridge(
                 putExtra(OnionVpnService.EXTRA_PROFILE_MODE, VpnProfileMode.Connected.name)
                 putExtra(OnionVpnService.EXTRA_TOR_SOCKS_PORT, ports.torSocksPort)
                 putExtra(OnionVpnService.EXTRA_DNSCRYPT_PORT, ports.dnsCryptListenPort)
+                putExtra(OnionVpnService.EXTRA_TOR_DNS_PORT, ports.torDnsPort)
                 putExtra(OnionVpnService.EXTRA_GENERATION, generation)
                 putExtra(OnionVpnService.EXTRA_DNS_MODE, preferences.dnsResolverMode.name)
             },

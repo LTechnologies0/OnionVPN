@@ -59,6 +59,7 @@ object ExitIpValidator {
         val proxy = Proxy(Proxy.Type.SOCKS, InetSocketAddress(socksHost, socksPort))
         val client = OkHttpClient.Builder()
             .proxy(proxy)
+            .dns(TorSocksDns)
             .connectTimeout(25, TimeUnit.SECONDS)
             .readTimeout(25, TimeUnit.SECONDS)
             .writeTimeout(25, TimeUnit.SECONDS)

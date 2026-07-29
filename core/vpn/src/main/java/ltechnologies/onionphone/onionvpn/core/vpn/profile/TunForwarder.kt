@@ -3,11 +3,19 @@ package ltechnologies.onionphone.onionvpn.core.vpn.profile
 import android.os.ParcelFileDescriptor
 
 /**
- * TUN packet forwarder (hev-socks5-tunnel implementation in `forwarder/`).
+ * TUN packet engine (UID SOCKS or hev) started after the VPN interface is up.
  *
- * Owned by [ltechnologies.onionphone.onionvpn.core.vpn.OnionVpnService] while Connected.
+ * @param torDnsPort Tor DNSPort for AutomapHostsOnResolve (`.onion` / `.exit` only).
+ *   Clearnet DNS stays on DNSCrypt; `0` disables Automap divert.
  */
 interface TunForwarder {
-    fun start(tunFd: ParcelFileDescriptor, socksHost: String, socksPort: Int, dnsCryptPort: Int)
+    fun start(
+        tunFd: ParcelFileDescriptor,
+        socksHost: String,
+        socksPort: Int,
+        dnsCryptPort: Int,
+        torDnsPort: Int = 0,
+    )
+
     fun stop()
 }

@@ -27,6 +27,7 @@ object TunnelPortAllocator {
             torSocksPort = allocateTcpPort(used),
             torDnsCryptSocksPort = allocateTcpPort(used),
             torProbeSocksPort = allocateTcpPort(used),
+            torHttpTunnelPort = allocateTcpPort(used),
             torDnsPort = allocateUdpPort(used),
             dnsCryptListenPort = allocateTcpUdpPort(used),
         )
@@ -78,12 +79,14 @@ object TunnelPortAllocator {
 }
 
 data class TunnelRuntimePorts(
-    /** Tor SocksPort for hev / application traffic (IsolateDest*). */
+    /** Tor SocksPort for UID forwarder / application traffic. */
     val torSocksPort: Int,
     /** Tor SocksPort for DNSCrypt upstream only (Whonix: separate circuit family). */
     val torDnsCryptSocksPort: Int,
     /** Tor SocksPort for OnionVPN validation probes only (no app circuit sharing). */
     val torProbeSocksPort: Int,
+    /** Tor HTTPTunnelPort (HTTP CONNECT) for PAC / apps that lack SOCKS. */
+    val torHttpTunnelPort: Int,
     val torDnsPort: Int,
     val dnsCryptListenPort: Int,
 )

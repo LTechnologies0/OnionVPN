@@ -53,4 +53,15 @@ class TunnelOrchestrator @Inject constructor(
                 .setAction(TunnelForegroundService.ACTION_NEWNYM),
         )
     }
+
+    /** Live SETCONF MaxCircuitDirtiness / NewCircuitPeriod while connected. */
+    fun applyCircuitTiming(preferences: TunnelPreferences) {
+        context.startService(
+            Intent(context, TunnelForegroundService::class.java).apply {
+                action = TunnelForegroundService.ACTION_APPLY_CIRCUIT_TIMING
+                putExtra(TunnelForegroundService.EXTRA_TOR_MAX_DIRTINESS, preferences.torMaxCircuitDirtinessSec)
+                putExtra(TunnelForegroundService.EXTRA_TOR_NEW_CIRCUIT, preferences.torNewCircuitPeriodSec)
+            },
+        )
+    }
 }

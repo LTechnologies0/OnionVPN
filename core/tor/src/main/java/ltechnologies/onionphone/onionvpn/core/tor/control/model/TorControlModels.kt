@@ -99,22 +99,33 @@ sealed interface TorControlEvent {
      * @property status LAUNCHED/BUILT/FAILED/CLOSED/…
      * @property path hop path when present
      * @property reason REASON= on failure/close
+     * @property purpose PURPOSE= when present
+     * @property socksUsername SOCKS_USERNAME= isolation token
+     * @property socksPassword SOCKS_PASSWORD= isolation token
      */
     data class Circuit(
         val id: String,
         val status: String,
         val path: String,
         val reason: String? = null,
+        val purpose: String? = null,
+        val socksUsername: String? = null,
+        val socksPassword: String? = null,
     ) : TorControlEvent
 
     /**
      * STREAM application stream attached to a circuit.
      *
      * @property id stream id
-     * @property status NEW/SENTCONNECT/SUCCEEDED/FAILED/…
+     * @property status NEW/SENTCONNECT/SUCCEEDED/FAILED/CLOSED/…
      * @property circuitId owning circuit or 0
      * @property target destination host:port
      * @property reason REASON= on failure
+     * @property socksUsername SOCKS_USERNAME= (IsolateSOCKSAuth key)
+     * @property socksPassword SOCKS_PASSWORD=
+     * @property clientProtocol CLIENT_PROTOCOL=
+     * @property purpose PURPOSE=
+     * @property sourceAddr SOURCE_ADDR=
      */
     data class Stream(
         val id: String,
@@ -122,6 +133,11 @@ sealed interface TorControlEvent {
         val circuitId: String,
         val target: String,
         val reason: String? = null,
+        val socksUsername: String? = null,
+        val socksPassword: String? = null,
+        val clientProtocol: String? = null,
+        val purpose: String? = null,
+        val sourceAddr: String? = null,
     ) : TorControlEvent
 
     /**

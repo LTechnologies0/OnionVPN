@@ -56,11 +56,16 @@ class MainViewModel @Inject constructor(
     fun savePreferences(prefs: TunnelPreferences, restartIfConnected: Boolean = true) {
         viewModelScope.launch {
             preferencesStore.update { prefs }
-            if (restartIfConnected && snapshot.value.phase == TunnelPhase.Connected) {
-                orchestrator.stop()
-                // Brief delay so stop settles before restart.
-                kotlinx.coroutines.delay(750)
-                orchestrator.start(prefs)
+            when {
+                restartIfConnected && snapshot.value.phase == TunnelPhase.Connected -> {
+                    orchestrator.stop()
+                    kotlinx.coroutines.delay(750)
+                    orchestrator.start(prefs)
+                }
+                snapshot.value.phase == TunnelPhase.Connected -> {
+                    // Dirtiness / NewCircuitPeriod apply live via ControlPort SETCONF.
+                    orchestrator.applyCircuitTiming(prefs)
+                }
             }
         }
     }

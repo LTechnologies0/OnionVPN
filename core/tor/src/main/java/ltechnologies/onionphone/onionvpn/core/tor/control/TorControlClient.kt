@@ -11,8 +11,10 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import ltechnologies.onionphone.onionvpn.core.tor.control.catalog.TorControlCatalog
+import ltechnologies.onionphone.onionvpn.core.tor.control.model.TorCircuitInfo
 import ltechnologies.onionphone.onionvpn.core.tor.control.model.TorControlEvent
 import ltechnologies.onionphone.onionvpn.core.tor.control.model.TorControlStatus
+import ltechnologies.onionphone.onionvpn.core.tor.control.model.TorStreamInfo
 import ltechnologies.onionphone.onionvpn.core.tor.control.ops.TorControlOperations
 import ltechnologies.onionphone.onionvpn.core.tor.control.protocol.TorControlEventParser
 import ltechnologies.onionphone.onionvpn.core.tor.control.transport.TorControlTransport
@@ -136,7 +138,7 @@ class TorControlClient {
 
     fun signal(name: String): Result<Unit> = ops.signal(name)
     fun signal(signal: TorControlCatalog.Signal): Result<Unit> = ops.signal(signal)
-    fun newNym(): Result<Unit> = ops.newNym()
+    fun newNym(): Result<Unit> = ops.newNymRateLimited()
     fun clearDnsCache(): Result<Unit> = ops.clearDnsCache()
     fun setActive(): Result<Unit> = ops.setActive()
     fun setDormant(): Result<Unit> = ops.setDormant()
@@ -146,9 +148,19 @@ class TorControlClient {
     fun dropTimeouts(): Result<Unit> = ops.dropTimeouts()
     fun setDisableNetwork(disabled: Boolean): Result<Unit> = ops.setDisableNetwork(disabled)
     fun setBridges(bridgeLines: List<String>): Result<Unit> = ops.setBridges(bridgeLines)
+    fun setCircuitTiming(
+        maxCircuitDirtinessSec: Int,
+        newCircuitPeriodSec: Int,
+    ): Result<Unit> = ops.setCircuitTiming(maxCircuitDirtinessSec, newCircuitPeriodSec)
     fun resolve(hostname: String, timeoutMs: Long = 15_000): Result<String> =
         ops.resolve(hostname, timeoutMs)
     fun extendNewCircuit(): Result<String> = ops.extendNewCircuit()
+    fun closeCircuit(id: String, ifUnused: Boolean = true): Result<Unit> =
+        ops.closeCircuit(id, ifUnused)
+    fun closeStream(id: String, reason: String = "DONE"): Result<Unit> =
+        ops.closeStream(id, reason)
+    fun listCircuits(): List<TorCircuitInfo> = ops.listCircuits()
+    fun listStreams(): List<TorStreamInfo> = ops.listStreams()
     fun closeBuiltCircuits(): Result<Int> = ops.closeBuiltCircuits()
     fun getConf(vararg keys: String): Map<String, String> = ops.getConf(*keys)
     fun getInfo(key: String): String = ops.getInfo(key)

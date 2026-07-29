@@ -46,7 +46,7 @@ object TorPathValidator {
         } else {
             config.contains("DNSPort $loopback:")
         }
-        val safeSocksSet = config.contains("SafeSocks 0") || config.contains("SafeSocks 1")
+        val safeSocksOff = config.contains("SafeSocks 0")
         val clientOnly = config.contains("ClientOnly 1")
         val entryGuards = config.contains("UseEntryGuards 1")
         val rejectInternal = config.contains("ClientRejectInternalAddresses 1")
@@ -54,29 +54,36 @@ object TorPathValidator {
         val refuseUnknownExits = config.contains("RefuseUnknownExits 1")
         val controlSocket = config.contains("ControlSocket ") && config.contains("CookieAuthentication 1")
         val socksIsolation = config.contains("IsolateDestAddr") &&
-            config.contains("IsolateDestPort") &&
             config.contains("IsolateSOCKSAuth") &&
             config.contains("IsolateClientAddr") &&
             config.contains("IsolateClientProtocol")
+        val appsNoDestPortStorm = config.lineSequence()
+            .filter { it.startsWith("SOCKSPort ") && it.contains("SessionGroup=${TunnelEndpoints.SESSION_GROUP_APPS}") }
+            .any { it.contains("KeepAliveIsolateSOCKSAuth") && !it.contains("IsolateDestPort") }
         val socksPolicy = config.contains("SocksPolicy accept 127.0.0.1") &&
             config.contains("SocksPolicy reject *")
         // Apps + DNSCrypt + probe SocksPorts (path-spec proxy-address isolation).
         val multiSocks = config.lineSequence().count { it.startsWith("SOCKSPort ") } >= 3
         val hasProbeGroup = config.contains("SessionGroup=${TunnelEndpoints.SESSION_GROUP_PROBE}")
-        val noKeepAliveOnApps = !config.lineSequence()
+        val keepAliveOnApps = config.lineSequence()
             .filter { it.startsWith("SOCKSPort ") && it.contains("SessionGroup=${TunnelEndpoints.SESSION_GROUP_APPS}") }
             .any { it.contains("KeepAliveIsolateSOCKSAuth") }
-        val ok = hasSocks && hasDns && safeSocksSet && clientOnly &&
+        val guardsOk = config.contains("NumEntryGuards 2") && config.contains("NumPrimaryGuards 2")
+        val pendingOk = config.contains("MaxClientCircuitsPending 32")
+        val ok = hasSocks && hasDns && safeSocksOff && clientOnly &&
             entryGuards && socksIsolation && socksPolicy && multiSocks &&
-            hasProbeGroup && noKeepAliveOnApps && rejectInternal && safeLogging &&
+            hasProbeGroup && keepAliveOnApps && appsNoDestPortStorm &&
+            guardsOk && pendingOk &&
+            rejectInternal && safeLogging &&
             refuseUnknownExits && controlSocket
         return ValidationCheck(
             id = "tor.config.content",
             label = "Tor torrc (runtime)",
             status = if (ok) ValidationStatus.Pass else ValidationStatus.Fail,
             detail = "$source: socks=$hasSocks dns=$hasDns multiSocks=$multiSocks " +
-                "probeGroup=$hasProbeGroup noKeepAliveApps=$noKeepAliveOnApps " +
-                "ControlSocket=$controlSocket RejectInternal=$rejectInternal " +
+                "probeGroup=$hasProbeGroup keepAliveApps=$keepAliveOnApps " +
+                "appsNoDestPort=$appsNoDestPortStorm guards2=$guardsOk pending32=$pendingOk " +
+                "SafeSocks0=$safeSocksOff ControlSocket=$controlSocket RejectInternal=$rejectInternal " +
                 "SafeLogging=$safeLogging RefuseUnknownExits=$refuseUnknownExits " +
                 "SocksPolicy=$socksPolicy EntryGuards=$entryGuards Isolation=$socksIsolation" +
                 (if (socksPort != null) " ports=$socksPort/$dnsPort" else ""),

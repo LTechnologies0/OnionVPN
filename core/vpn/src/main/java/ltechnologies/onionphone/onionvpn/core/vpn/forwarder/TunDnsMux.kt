@@ -11,6 +11,7 @@ import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.locks.LockSupport
+import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
 import ltechnologies.onionphone.onionvpn.core.vpn.dns.DnsHostnameCache
 import ltechnologies.onionphone.onionvpn.core.vpn.dns.DnsPacketParser
 import ltechnologies.onionphone.onionvpn.core.vpn.firewall.FirewallBridge
@@ -18,8 +19,10 @@ import timber.log.Timber
 
 /**
  * Splits VPN TUN traffic:
- * - When [divertDnsToDnsCrypt]: UDP to [vpnDnsAddress]:53 → DNSCrypt on loopback
- * - everything else → firewall check → hev socket (raw IP packet stream)
+ * - When [divertDnsToDnsCrypt]: UDP/53 clearnet → DNSCrypt; `.onion`/`.exit` → Tor DNSPort
+ *   (AutomapHostsOnResolve → virtual IPs in [TunnelEndpoints.VIRTUAL_ADDR_NETWORK]/10)
+ * - Non-DNS UDP / ICMP / IPv6 → blackhole (force apps onto TCP; Tor has no UDP)
+ * - IPv4 TCP → firewall check → UID SOCKS / hev engine
  *
  * DoS / ARM notes:
  * - DNS work uses a **bounded** pool + queue (never unbounded LinkedBlockingQueue).
@@ -34,6 +37,9 @@ class TunDnsMux(
     private val dnsCryptPort: Int,
     private val vpnDnsAddress: String,
     private val divertDnsToDnsCrypt: Boolean = true,
+    /** Tor DNSPort for Automap; `<= 0` drops onion queries (fail-closed). */
+    private val torDnsHost: String = TunnelEndpoints.LOOPBACK,
+    private val torDnsPort: Int = 0,
     private val onFatal: ((Throwable) -> Unit)? = null,
 ) {
     private val running = AtomicBoolean(false)
@@ -48,6 +54,7 @@ class TunDnsMux(
     private var hevOut: FileOutputStream? = null
 
     private val dnsCryptAddress: InetAddress = InetAddress.getByName(dnsCryptHost)
+    private val torDnsAddress: InetAddress = InetAddress.getByName(torDnsHost)
     private val packetPool = ArrayBlockingQueue<ByteArray>(DNS_QUEUE_CAP)
 
     private val dnsExecutor = ThreadPoolExecutor(
@@ -64,6 +71,7 @@ class TunDnsMux(
 
     fun start() {
         if (!running.compareAndSet(false, true)) return
+        LeakPacketFilter.resetStats()
         val vpnDns = InetAddress.getByName(vpnDnsAddress).address
         val localTunOut = FileOutputStream(tunFd.fileDescriptor)
         val localHevOut = FileOutputStream(hevFd.fileDescriptor)
@@ -83,7 +91,8 @@ class TunDnsMux(
                             LockSupport.parkNanos(EMPTY_READ_PARK_NS)
                             continue
                         }
-                        divertDnsToDnsCrypt && isDnsQueryToVpnDns(buf, n, vpnDns) -> {
+                        divertDnsToDnsCrypt && LeakPacketFilter.isDnsUdpPort53(buf, n) -> {
+                            // Clearnet UDP/53 → DNSCrypt; .onion/.exit → Tor DNSPort (in handleDnsQuery).
                             snoopDnsOutbound(buf, n)
                             val packet = borrowPacket(buf, n)
                             dnsExecutor.execute {
@@ -94,10 +103,22 @@ class TunDnsMux(
                                 }
                             }
                         }
-                        isDnsQueryToVpnDns(buf, n, vpnDns) -> {
-                            // FakeDNS path — still learn QNAME before hev mapdns.
+                        !divertDnsToDnsCrypt && isDnsQueryToVpnDns(buf, n, vpnDns) -> {
+                            // Legacy FakeDNS path — still learn QNAME before engine.
                             snoopDnsOutbound(buf, n)
                             writeHev(localHevOut, buf, n)
+                        }
+                        LeakPacketFilter.shouldDropEarly(buf, n) -> {
+                            val reason = LeakPacketFilter.classifyBlackholeReason(buf, n)
+                            LeakPacketFilter.noteBlackhole(reason)
+                        }
+                        LeakPacketFilter.shouldBlackholeUdp(buf, n) -> {
+                            val reason = LeakPacketFilter.classifyBlackholeReason(buf, n)
+                            LeakPacketFilter.noteBlackhole(reason)
+                        }
+                        !LeakPacketFilter.isTorrifiableIpv4Tcp(buf, n) -> {
+                            val reason = LeakPacketFilter.classifyBlackholeReason(buf, n)
+                            LeakPacketFilter.noteBlackhole(reason)
                         }
                         !FirewallBridge.engine.allowOutbound(buf, n) -> {
                             // Drop
@@ -154,7 +175,9 @@ class TunDnsMux(
 
         Timber.i(
             "TunDnsMux started dns=$vpnDnsAddress divertDns=$divertDnsToDnsCrypt " +
-                "→ $dnsCryptHost:$dnsCryptPort pool=$DNS_CORE_THREADS..$DNS_MAX_THREADS q=$DNS_QUEUE_CAP",
+                "clearnet→$dnsCryptHost:$dnsCryptPort " +
+                "onion→$torDnsHost:$torDnsPort " +
+                "pool=$DNS_CORE_THREADS..$DNS_MAX_THREADS q=$DNS_QUEUE_CAP",
         )
     }
 
@@ -293,22 +316,31 @@ class TunDnsMux(
             val dnsOffset = ihl + 8
             if (length <= dnsOffset) return
 
-            val scratch = dnsScratch.get()
-            val socket = scratch.socket()
             val queryLen = length - dnsOffset
+            val qname = DnsPacketParser.parse(packet, dnsOffset, queryLen)?.qname
+            val useTorAutomap = TunnelEndpoints.isOnionLikeHostname(qname.orEmpty())
+            if (useTorAutomap && torDnsPort <= 0) {
+                Timber.d("Onion DNS dropped — Tor DNSPort not configured q=$qname")
+                return
+            }
+            val upstreamHost = if (useTorAutomap) torDnsAddress else dnsCryptAddress
+            val upstreamPort = if (useTorAutomap) torDnsPort else dnsCryptPort
+
+            val scratch = checkNotNull(dnsScratch.get())
+            val socket = scratch.socket()
             socket.send(
                 DatagramPacket(
                     packet,
                     dnsOffset,
                     queryLen,
-                    dnsCryptAddress,
-                    dnsCryptPort,
+                    upstreamHost,
+                    upstreamPort,
                 ),
             )
             val response = DatagramPacket(scratch.responseBuf, scratch.responseBuf.size)
             socket.receive(response)
 
-            // Attribute resolved A records → QNAME for firewall prompts.
+            // Attribute resolved A records → QNAME (Automap virtual IP → .onion for SOCKS5A).
             learnFromDnsPayload(scratch.responseBuf, 0, response.length)
 
             val replyLen = buildDnsReplyInto(
@@ -326,13 +358,13 @@ class TunDnsMux(
             if (running.get()) {
                 when (error) {
                     is java.net.SocketTimeoutException ->
-                        Timber.d("DNSCrypt forward timeout — query dropped")
+                        Timber.d("DNS forward timeout — query dropped")
                     is java.net.ConnectException ->
-                        Timber.d(error, "DNSCrypt stub refused — query dropped")
+                        Timber.d(error, "DNS stub refused — query dropped")
                     is java.net.PortUnreachableException ->
-                        Timber.d(error, "DNSCrypt port unreachable — query dropped")
+                        Timber.d(error, "DNS port unreachable — query dropped")
                     else ->
-                        Timber.d(error, "DNSCrypt forward failed — query dropped")
+                        Timber.d(error, "DNS forward failed — query dropped")
                 }
             }
         }

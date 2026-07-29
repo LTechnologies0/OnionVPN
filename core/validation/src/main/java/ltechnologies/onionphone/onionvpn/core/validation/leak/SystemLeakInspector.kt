@@ -68,15 +68,17 @@ object SystemLeakInspector {
                 id = "android.vpn.always_on",
                 label = "Android Always-on VPN lockdown",
                 status = ValidationStatus.Fail,
-                detail = "Always-on ON but Lockdown OFF — enable “Block connections without VPN”",
-                tripsKillSwitch = false,
+                detail = "Always-on ON but Lockdown OFF — enable “Block connections without VPN” " +
+                    "(Privacy Guides / GrapheneOS)",
+                tripsKillSwitch = true,
             )
             alwaysOnPkg == ourPkg -> ValidationCheck(
                 id = "android.vpn.always_on",
                 label = "Android Always-on VPN lockdown",
-                status = ValidationStatus.Pass,
-                detail = "Always-on=$ourPkg — confirm Lockdown is ON",
-                tripsKillSwitch = false,
+                status = ValidationStatus.Fail,
+                detail = "Always-on=$ourPkg but Lockdown not confirmed — enable " +
+                    "“Block connections without VPN”",
+                tripsKillSwitch = true,
             )
             alwaysOnPkg != null -> ValidationCheck(
                 id = "android.vpn.always_on",
@@ -88,10 +90,10 @@ object SystemLeakInspector {
             else -> ValidationCheck(
                 id = "android.vpn.always_on",
                 label = "Android Always-on VPN lockdown",
-                status = ValidationStatus.Skipped,
+                status = ValidationStatus.Fail,
                 detail = "Settings → Network → VPN → OnionVPN → Always-on ON + " +
-                    "Block connections without VPN ON",
-                tripsKillSwitch = false,
+                    "Block connections without VPN ON (required when kill-switch is on)",
+                tripsKillSwitch = true,
             )
         }
     }
@@ -121,7 +123,7 @@ object SystemLeakInspector {
                 status = ValidationStatus.Fail,
                 detail = "Private DNS mode='$mode' active=$privateDnsActive — " +
                     "DoT can resolve outside the TUN (Tor VPN §5.2.4). Set Private DNS → Off",
-                tripsKillSwitch = false,
+                tripsKillSwitch = true,
             )
         } else {
             ValidationCheck(

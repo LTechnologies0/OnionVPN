@@ -2,7 +2,10 @@ package ltechnologies.onionphone.onionvpn.core.tor.control.ops
 
 import java.io.IOException
 import ltechnologies.onionphone.onionvpn.core.tor.control.catalog.TorControlCatalog
+import ltechnologies.onionphone.onionvpn.core.tor.control.model.TorCircuitInfo
+import ltechnologies.onionphone.onionvpn.core.tor.control.model.TorStreamInfo
 import ltechnologies.onionphone.onionvpn.core.tor.control.protocol.TorControlReplyParser
+import ltechnologies.onionphone.onionvpn.core.tor.control.protocol.TorStatusListParser
 import ltechnologies.onionphone.onionvpn.core.tor.control.transport.TorControlTransport
 
 /**
@@ -22,6 +25,9 @@ internal class TorControlOperations(
     private val transport: TorControlTransport,
     private val refreshInfo: () -> Unit,
 ) {
+    @Volatile
+    private var lastNewNymMs: Long = 0L
+
     fun signal(name: String): Result<Unit> = runCatching {
         transport.command("SIGNAL $name")
         Unit
@@ -31,6 +37,23 @@ internal class TorControlOperations(
 
     fun newNym(): Result<Unit> = signal(TorControlCatalog.Signal.NEWNYM).also {
         runCatching { signal(TorControlCatalog.Signal.CLEARDNSCACHE) }
+    }
+
+    /**
+     * Rate-limited NEWNYM (control-spec: Tor rejects rapid NEWNYM ~10s with 551).
+     * @return failure with message if called too soon
+     */
+    fun newNymRateLimited(minIntervalMs: Long = NEWNYM_MIN_INTERVAL_MS): Result<Unit> {
+        val now = System.currentTimeMillis()
+        val wait = lastNewNymMs + minIntervalMs - now
+        if (wait > 0) {
+            return Result.failure(
+                IOException("NEWNYM rate-limited — wait ${((wait + 999) / 1000)}s (Tor ~10s)"),
+            )
+        }
+        return newNym().also { result ->
+            if (result.isSuccess) lastNewNymMs = System.currentTimeMillis()
+        }
     }
 
     fun clearDnsCache(): Result<Unit> = signal(TorControlCatalog.Signal.CLEARDNSCACHE)
@@ -56,6 +79,17 @@ internal class TorControlOperations(
     fun setDisableNetwork(disabled: Boolean): Result<Unit> = runCatching {
         transport.command("SETCONF DisableNetwork=${if (disabled) 1 else 0}")
         if (!disabled) setActive()
+        Unit
+    }
+
+    /** Live SETCONF for circuit timing (no Tor restart). */
+    fun setCircuitTiming(
+        maxCircuitDirtinessSec: Int,
+        newCircuitPeriodSec: Int,
+    ): Result<Unit> = runCatching {
+        val dirt = maxCircuitDirtinessSec.coerceIn(60, 7_200)
+        val period = newCircuitPeriodSec.coerceIn(10, 3_600)
+        transport.command("SETCONF MaxCircuitDirtiness=$dirt NewCircuitPeriod=$period")
         Unit
     }
 
@@ -105,16 +139,28 @@ internal class TorControlOperations(
         lines.firstOrNull { it.startsWith("250 ") }?.substringAfter("EXTENDED ")?.trim().orEmpty()
     }
 
+    fun closeCircuit(id: String, ifUnused: Boolean = true): Result<Unit> = runCatching {
+        val flags = if (ifUnused) " IfUnused" else ""
+        transport.command("CLOSECIRCUIT $id$flags")
+        Unit
+    }
+
+    fun closeStream(id: String, reason: String = "DONE"): Result<Unit> = runCatching {
+        transport.command("CLOSESTREAM $id $reason")
+        Unit
+    }
+
+    fun listCircuits(): List<TorCircuitInfo> =
+        TorStatusListParser.parseCircuitStatus(getInfo("circuit-status"))
+
+    fun listStreams(): List<TorStreamInfo> =
+        TorStatusListParser.parseStreamStatus(getInfo("stream-status"))
+
     fun closeBuiltCircuits(): Result<Int> = runCatching {
-        val body = getInfo("circuit-status")
         var closed = 0
-        body.lineSequence().forEach { line ->
-            val parts = line.trim().split(' ')
-            if (parts.size < 2) return@forEach
-            val id = parts[0]
-            val st = parts[1]
-            if (st == "BUILT" || st == "EXTENDED" || st == "GUARD_WAIT") {
-                runCatching { transport.command("CLOSECIRCUIT $id") }
+        listCircuits().forEach { circ ->
+            if (circ.status == "BUILT" || circ.status == "EXTENDED" || circ.status == "GUARD_WAIT") {
+                runCatching { transport.command("CLOSECIRCUIT ${circ.id}") }
                 closed++
             }
         }
@@ -164,5 +210,10 @@ internal class TorControlOperations(
         conf("EntryNodes", entry)
         conf("ExitNodes", exit)
         conf("ExcludeNodes", exclude)
+    }
+
+    companion object {
+        /** Tor enforces ~10s between NEWNYM; pad slightly for clock skew. */
+        const val NEWNYM_MIN_INTERVAL_MS = 10_500L
     }
 }

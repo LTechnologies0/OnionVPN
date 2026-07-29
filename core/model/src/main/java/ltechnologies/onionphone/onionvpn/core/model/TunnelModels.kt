@@ -33,19 +33,61 @@ object TunnelEndpoints {
     const val FAKE_DNS_NETMASK = "255.192.0.0"
     const val FAKE_DNS_CACHE_SIZE = 4096
 
+    /**
+     * Tor AutomapHostsOnResolve virtual IPv4 pool (`VirtualAddrNetwork 10.192.0.0/10`).
+     * Apps receive these as A records for `.onion` / `.exit`; TCP must SOCKS5A the hostname.
+     */
+    const val VIRTUAL_ADDR_NETWORK = "10.192.0.0"
+    const val VIRTUAL_ADDR_PREFIX_LEN = 10
+
     /** Mullvad-style dummy DNS when no resolver is available (RFC 5737 TEST-NET-1). */
     const val FALLBACK_BLOCKING_DNS = "192.0.2.1"
+
+    /**
+     * True for Tor Automap virtual IPv4 (`10.192.0.0/10` → `10.192.0.0`–`10.255.255.255`).
+     * These must never be SOCKS CONNECT'd as literal IPs (no exit path).
+     */
+    fun isAutomapVirtualIpv4(hostAddress: String): Boolean {
+        val parts = hostAddress.split('.')
+        if (parts.size != 4) return false
+        val a = parts[0].toIntOrNull() ?: return false
+        val b = parts[1].toIntOrNull() ?: return false
+        val c = parts[2].toIntOrNull() ?: return false
+        val d = parts[3].toIntOrNull() ?: return false
+        if (a !in 0..255 || b !in 0..255 || c !in 0..255 || d !in 0..255) return false
+        return a == 10 && b in 192..255
+    }
+
+    /** Tor special hostnames that must use DNSPort Automap + SOCKS5A, never DNSCrypt. */
+    fun isOnionLikeHostname(hostname: String): Boolean {
+        val h = hostname.trim().trimEnd('.').lowercase()
+        return h.endsWith(".onion") || h.endsWith(".exit")
+    }
 
     const val VPN_MTU = 1280
 
     /**
-     * SOCKS5 credentials for hev → Tor IsolateSOCKSAuth (app traffic circuits).
-     * hev uses one token for all TUN streams — circuit separation relies on
-     * IsolateDestAddr/IsolateDestPort (path-spec); KeepAliveIsolateSOCKSAuth is
-     * intentionally off on the app SocksPort so MaxCircuitDirtiness rotates.
+     * SOCKS5 credentials helpers for per-app IsolateSOCKSAuth (path-spec strong tokens).
+     * username = u{uid}, password = p{uid}. Unknown UID uses a dedicated token.
      */
+    const val SOCKS_UNKNOWN_USER = "uunknown"
+    const val SOCKS_UNKNOWN_PASS = "punknown"
+
+    /** @deprecated Static hev token — replaced by [socksUserForUid] / [socksPassForUid]. */
     const val SOCKS_ISOLATION_USER = "onionvpn"
     const val SOCKS_ISOLATION_PASS = "stream"
+
+    fun socksUserForUid(uid: Int): String =
+        if (uid < 0) SOCKS_UNKNOWN_USER else "u$uid"
+
+    fun socksPassForUid(uid: Int): String =
+        if (uid < 0) SOCKS_UNKNOWN_PASS else "p$uid"
+
+    fun uidFromSocksUser(user: String): Int? {
+        if (user == SOCKS_UNKNOWN_USER) return -1
+        if (!user.startsWith("u")) return null
+        return user.removePrefix("u").toIntOrNull()
+    }
 
     /**
      * SOCKS5 credentials for DNSCrypt → separate SocksPort + IsolateSOCKSAuth
@@ -63,13 +105,32 @@ object TunnelEndpoints {
     const val SESSION_GROUP_DNS = 2
     const val SESSION_GROUP_DNSCRYPT = 3
     const val SESSION_GROUP_PROBE = 4
+
+    /**
+     * Stable PAC HTTP listen port (URL does not change across sessions).
+     * Body of `/onionvpn.pac` always reflects the current ephemeral SocksPort /
+     * HTTPTunnelPort (RFC 1928 SOCKS5 + Tor HTTP CONNECT).
+     */
+    const val PAC_LISTEN_PORT = 18_201
+    const val PAC_PATH = "/onionvpn.pac"
+    /** Fixed SOCKS5 listen for PAC clients — resolves via DNSCrypt, then Tor by IP. */
+    const val PAC_BRIDGE_SOCKS_PORT = 18_202
+
+    /** IsolateSOCKSAuth token for PAC bridge → Tor apps SocksPort. */
+    const val SOCKS_PAC_USER = "pac"
+    const val SOCKS_PAC_PASS = "dnscrypt"
+
+    fun pacUrl(): String = "http://$LOOPBACK:$PAC_LISTEN_PORT$PAC_PATH"
+
+    fun pacSocksBridge(): String = "$LOOPBACK:$PAC_BRIDGE_SOCKS_PORT"
 }
 
 /**
  * How app DNS is resolved while the VPN is up.
  *
- * - [DNSCRYPT_MUX]: UDP/53 to VPN DNS is forwarded to DNSCrypt (upstream via Tor SOCKS).
- * - [FAKE_IP_SOCKS5A]: hev FakeDNS + hostname recovery over Tor SOCKS5A.
+ * Both modes divert VPN DNS (UDP/53) to DNSCrypt whose upstream is Tor SOCKS
+ * (no clearnet stub resolver). [FAKE_IP_SOCKS5A] is a legacy preference key —
+ * hev mapdns FakeDNS is no longer in the data plane.
  */
 enum class DnsResolverMode {
     DNSCRYPT_MUX,
@@ -144,6 +205,12 @@ data class TunnelSnapshot(
     val torDormant: Boolean = false,
     val torEntryGuards: String = "",
     val torLastCircEvent: String = "",
+    /** Stable PAC URL while tunnel is up (`http://127.0.0.1:18201/onionvpn.pac`). */
+    val pacUrl: String = "",
+    /** Current apps SOCKS5 endpoint for manual proxy config. */
+    val socksProxy: String = "",
+    /** Current HTTP CONNECT (HTTPTunnelPort) endpoint. */
+    val httpProxy: String = "",
 ) {
     val isBusy: Boolean
         get() = when (phase) {

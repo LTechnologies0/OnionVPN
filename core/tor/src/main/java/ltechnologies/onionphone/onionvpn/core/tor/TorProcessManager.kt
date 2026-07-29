@@ -132,13 +132,60 @@ class TorProcessManager(
     fun currentProbeSocksPort(): Int? =
         runtimePorts?.torProbeSocksPort?.takeIf { isRunning() }
 
-    /** SIGNAL NEWNYM + CLEARDNSCACHE (user “new identity”). */
+    /** SIGNAL NEWNYM + CLEARDNSCACHE (user “new identity”), rate-limited ~10s. */
     fun newNym(): Result<Unit> {
         if (!control.isConnected) return Result.failure(IOException("control not connected"))
         return control.newNym().also {
             it.onSuccess { Timber.i("SIGNAL NEWNYM accepted") }
             it.onFailure { e -> Timber.w(e, "NEWNYM failed") }
         }
+    }
+
+    /** SIGNAL ACTIVE — wake from DORMANT after Blocking / network recovery. */
+    fun signalActive(): Result<Unit> {
+        if (!control.isConnected) return Result.failure(IOException("control not connected"))
+        return control.setActive().also {
+            it.onSuccess { Timber.i("SIGNAL ACTIVE") }
+            it.onFailure { e -> Timber.w(e, "ACTIVE failed") }
+        }
+    }
+
+    /** Live SETCONF MaxCircuitDirtiness / NewCircuitPeriod (no restart). */
+    fun applyCircuitTimingLive(
+        maxCircuitDirtinessSec: Int,
+        newCircuitPeriodSec: Int,
+    ): Result<Unit> {
+        if (!control.isConnected) return Result.failure(IOException("control not connected"))
+        return control.setCircuitTiming(maxCircuitDirtinessSec, newCircuitPeriodSec).also {
+            it.onSuccess {
+                Timber.i(
+                    "SETCONF circuit timing dirtiness=%ds period=%ds",
+                    maxCircuitDirtinessSec,
+                    newCircuitPeriodSec,
+                )
+            }
+        }
+    }
+
+    fun closeCircuit(id: String, ifUnused: Boolean = true): Result<Unit> {
+        if (!control.isConnected) return Result.failure(IOException("control not connected"))
+        return control.closeCircuit(id, ifUnused)
+    }
+
+    fun closeStream(id: String, reason: String = "DONE"): Result<Unit> {
+        if (!control.isConnected) return Result.failure(IOException("control not connected"))
+        return control.closeStream(id, reason)
+    }
+
+    fun listCircuits(): List<ltechnologies.onionphone.onionvpn.core.tor.control.model.TorCircuitInfo> =
+        if (control.isConnected) control.listCircuits() else emptyList()
+
+    fun listStreams(): List<ltechnologies.onionphone.onionvpn.core.tor.control.model.TorStreamInfo> =
+        if (control.isConnected) control.listStreams() else emptyList()
+
+    fun extendNewCircuit(): Result<String> {
+        if (!control.isConnected) return Result.failure(IOException("control not connected"))
+        return control.extendNewCircuit()
     }
 
     /** SIGNAL DORMANT (kill-switch Blocking while keeping Tor process). */
@@ -211,6 +258,7 @@ class TorProcessManager(
                 socksPort = ports.torSocksPort,
                 dnsCryptSocksPort = ports.torDnsCryptSocksPort,
                 probeSocksPort = ports.torProbeSocksPort,
+                httpTunnelPort = ports.torHttpTunnelPort,
                 dnsPort = ports.torDnsPort,
                 preferences = preferences,
             ),

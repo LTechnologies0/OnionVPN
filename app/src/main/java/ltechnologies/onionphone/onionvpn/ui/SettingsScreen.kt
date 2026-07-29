@@ -45,6 +45,7 @@ import ltechnologies.onionphone.onionvpn.R
 import ltechnologies.onionphone.onionvpn.core.dnscrypt.config.DnsCryptPublicResolvers
 import ltechnologies.onionphone.onionvpn.core.model.DnsResolverMode
 import ltechnologies.onionphone.onionvpn.core.model.FirewallDefaultAction
+import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
 import ltechnologies.onionphone.onionvpn.core.model.TunnelPreferences
 import ltechnologies.onionphone.onionvpn.threat.DomainReputationRepository
 import ltechnologies.onionphone.onionvpn.util.SystemSecurityIntents
@@ -163,9 +164,9 @@ fun SettingsScreen(
             Text("Open network settings (set Private DNS Off)")
         }
         Text(
-            text = "Checklist:\n" +
+            text = "Checklist (Privacy Guides / GrapheneOS VPN leak blocking):\n" +
                 "1. Always-on VPN → OnionVPN ON\n" +
-                "2. Block connections without VPN ON\n" +
+                "2. Block connections without VPN ON (OS kill switch)\n" +
                 "3. Private DNS → Off (DoT bypasses tunnel DNS)\n" +
                 "4. Stop other VPNs\n" +
                 "5. Prefer Vanadium; disable WebRTC if possible",
@@ -173,10 +174,37 @@ fun SettingsScreen(
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
 
+        Text("UDP / Tor Datagram", style = MaterialTheme.typography.titleMedium)
+        Text(
+            text = "Tor has no deployed CONNECT_UDP (prop. 339). OnionVPN policy:\n" +
+                "• UDP/53 → DNSCrypt over Tor (any resolver IP)\n" +
+                "• QUIC/HTTP3, STUN/WebRTC, DTLS, WireGuard, mDNS, NTP → blackhole\n" +
+                "• Apps fall back to TCP (HTTP/2, no real UDP)\n" +
+                "• Zero clearnet UDP side-channel, zero remote UDP gateway",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+
+        Text("PAC / proxy for apps", style = MaterialTheme.typography.titleMedium)
+        Text(
+            text = "Stable URL (while tunnel is up):\n" +
+                "${TunnelEndpoints.pacUrl()}\n\n" +
+                "PAC points at socks5://${TunnelEndpoints.pacSocksBridge()} — a local bridge that:\n" +
+                "1. Resolves names via DNSCrypt (not Tor DNSPort / exit DNS)\n" +
+                "2. CONNECTs to Tor SocksPort by IPv4\n" +
+                ".onion hostnames skip DNSCrypt and go to Tor as hostname.\n" +
+                "Do not point apps at raw Tor SOCKS (that uses Tor DNS).",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+
         Text("DNS mode", style = MaterialTheme.typography.titleMedium)
         Text(
-            text = "FakeDNS (Orbot): apps see fake 100.64.x IPs; hostname resolved at Tor exit.\n" +
-                "DNSCrypt mux: apps see real dest IPs (looked up over Tor); TCP still via Tor exit.",
+            text = "Clearnet names: DNSCrypt over Tor (encrypted stub, no system resolver).\n" +
+                ".onion / .exit: Tor DNSPort AutomapHostsOnResolve → virtual IP in " +
+                "${TunnelEndpoints.VIRTUAL_ADDR_NETWORK}/${TunnelEndpoints.VIRTUAL_ADDR_PREFIX_LEN}, " +
+                "then SOCKS5A with the real hostname (DNSCrypt is never asked for onion).\n" +
+                "FakeDNS option is legacy — both modes divert UDP/53 through TunDnsMux.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -185,14 +213,14 @@ fun SettingsScreen(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             FilterChip(
-                selected = local.dnsResolverMode == DnsResolverMode.FAKE_IP_SOCKS5A,
-                onClick = { commit(local.copy(dnsResolverMode = DnsResolverMode.FAKE_IP_SOCKS5A)) },
-                label = { Text("FakeDNS (Orbot)") },
-            )
-            FilterChip(
                 selected = local.dnsResolverMode == DnsResolverMode.DNSCRYPT_MUX,
                 onClick = { commit(local.copy(dnsResolverMode = DnsResolverMode.DNSCRYPT_MUX)) },
-                label = { Text("DNSCrypt mux") },
+                label = { Text("DNSCrypt over Tor") },
+            )
+            FilterChip(
+                selected = local.dnsResolverMode == DnsResolverMode.FAKE_IP_SOCKS5A,
+                onClick = { commit(local.copy(dnsResolverMode = DnsResolverMode.FAKE_IP_SOCKS5A)) },
+                label = { Text("Legacy FakeDNS→DNSCrypt") },
             )
         }
 
@@ -226,7 +254,8 @@ fun SettingsScreen(
             text = "OpenSnitch-style prompts for new outbound connections on the TUN. " +
                 "Requests wait in a FIFO queue (one at a time) until you answer — no timeout. " +
                 "A heads-up notification shows the app icon with Accept / Deny " +
-                "(permanent rule). Tap the notification for more scope options.",
+                "(permanent rule). Tap the notification for more scope options. " +
+                "Tor circuits are isolated per app UID (SOCKS u{uid}).",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -330,8 +359,9 @@ fun SettingsScreen(
 
         Text("Tor", style = MaterialTheme.typography.titleMedium)
         Text(
-            text = "Circuit rotation presets (tor-spec path-spec / MaxCircuitDirtiness). " +
-                "Vanguards-lite, padding, ClientOnly, SafeLogging already forced in torrc.",
+            text = "Circuit rotation (path-spec / prop. 368). Per-UID KeepAliveIsolateSOCKSAuth " +
+                "circuits stay sticky; dirtiness mainly affects non-auth streams. " +
+                "Default Stable=600s. Live SETCONF when connected (no Tor restart).",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -339,6 +369,19 @@ fun SettingsScreen(
             modifier = Modifier.horizontalScroll(rememberScrollState()),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
+            FilterChip(
+                selected = local.torNewCircuitPeriodSec == 30 &&
+                    local.torMaxCircuitDirtinessSec == 600,
+                onClick = {
+                    commit(
+                        local.copy(
+                            torNewCircuitPeriodSec = 30,
+                            torMaxCircuitDirtinessSec = 600,
+                        ),
+                    )
+                },
+                label = { Text("Stable") },
+            )
             FilterChip(
                 selected = local.torNewCircuitPeriodSec == 30 &&
                     local.torMaxCircuitDirtinessSec == 180,
@@ -404,8 +447,8 @@ fun SettingsScreen(
             modifier = Modifier.fillMaxWidth(),
         )
         Text(
-            text = "MaxCircuitDirtiness (sec) — lower = more circuit rotation " +
-                "(path-spec; app SocksPort has no KeepAliveIsolateSOCKSAuth).",
+            text = "MaxCircuitDirtiness (sec) — unused-circuit expiry. " +
+                "App SocksPort uses KeepAliveIsolateSOCKSAuth with per-UID tokens (sticky).",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )

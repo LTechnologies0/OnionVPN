@@ -22,6 +22,7 @@ import kotlinx.coroutines.withContext
 import ltechnologies.onionphone.onionvpn.core.model.DomainThreatCategory
 import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
 import ltechnologies.onionphone.onionvpn.core.tor.TorProcessManager
+import ltechnologies.onionphone.onionvpn.core.validation.path.TorSocksDns
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import timber.log.Timber
@@ -32,10 +33,9 @@ import timber.log.Timber
  * - **Malware / C2 (red):** HaGeZi Threat Intelligence Feeds (TIF) mini
  * - **Ads / tracking / telemetry (orange):** HaGeZi Light + Native Tracker lists
  *
- * Prefer Tor probe SOCKS when the tunnel is up; otherwise fall back to direct HTTPS
- * so lists can be seeded before the first VPN session.
- *
- * Sources: https://github.com/hagezi/dns-blocklists
+ * Prefer Tor probe SOCKS when the tunnel is up. Never downloads over clearnet
+ * (excluded-UID OkHttp would leak DNS + SNI on the ISP path — Privacy Guides /
+ * Tor threat model). Seed lists via cache until [onTorReady].
  */
 @Singleton
 class DomainReputationRepository @Inject constructor(
@@ -242,24 +242,26 @@ class DomainReputationRepository @Inject constructor(
     private data class HttpTransport(val client: OkHttpClient, val viaTor: Boolean)
 
     private fun buildClient(): HttpTransport {
-        val builder = OkHttpClient.Builder()
+        val probePort = tor.currentProbeSocksPort()
+        if (probePort == null || !tor.isRunning()) {
+            Timber.i("Domain reputation: Tor probe SOCKS unavailable — cache only (no clearnet)")
+            throw IllegalStateException("Tor probe SOCKS not ready — refusing clearnet download")
+        }
+        val proxy = Proxy(
+            Proxy.Type.SOCKS,
+            InetSocketAddress(TunnelEndpoints.LOOPBACK, probePort),
+        )
+        val client = OkHttpClient.Builder()
+            .proxy(proxy)
+            .dns(TorSocksDns)
             .connectTimeout(60, TimeUnit.SECONDS)
             .readTimeout(120, TimeUnit.SECONDS)
             .writeTimeout(60, TimeUnit.SECONDS)
             .followRedirects(true)
             .followSslRedirects(true)
-        val probePort = tor.currentProbeSocksPort()
-        if (probePort != null && tor.isRunning()) {
-            val proxy = Proxy(
-                Proxy.Type.SOCKS,
-                InetSocketAddress(TunnelEndpoints.LOOPBACK, probePort),
-            )
-            builder.proxy(proxy)
-            Timber.i("Domain reputation download via Tor probe SOCKS :%d", probePort)
-            return HttpTransport(builder.build(), viaTor = true)
-        }
-        Timber.i("Domain reputation download via direct HTTPS (Tor not ready)")
-        return HttpTransport(builder.build(), viaTor = false)
+            .build()
+        Timber.i("Domain reputation download via Tor probe SOCKS :%d", probePort)
+        return HttpTransport(client, viaTor = true)
     }
 
     private fun listDir(): File =

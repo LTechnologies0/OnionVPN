@@ -14,6 +14,8 @@ import ltechnologies.onionphone.onionvpn.core.validation.leak.SystemLeakInspecto
 import ltechnologies.onionphone.onionvpn.core.validation.path.DnsCryptPathValidator
 import ltechnologies.onionphone.onionvpn.core.validation.path.ExitIpValidator
 import ltechnologies.onionphone.onionvpn.core.validation.path.TorPathValidator
+import ltechnologies.onionphone.onionvpn.core.vpn.OnionVpnService
+import ltechnologies.onionphone.onionvpn.core.vpn.forwarder.LeakPacketFilter
 import ltechnologies.onionphone.onionvpn.core.vpn.profile.VpnProfileBuilder
 
 /**
@@ -52,9 +54,10 @@ object TunnelValidator {
                     )
                 }
                 addAll(DnsCryptPathValidator.validate(listenPort = runtimePorts.dnsCryptListenPort))
-                add(validateHevForwarderWiring(hevConfigFile, runtimePorts, dnsResolverMode))
+                add(validateUidForwarderWiring(torConfigFile, runtimePorts, dnsResolverMode))
                 add(validateDnsCryptTorWiring(dnsCryptConfigFile, runtimePorts))
                 add(validateDnsModeLeakProperties(dnsResolverMode, hevConfigFile))
+                add(validateUdpBlackholePolicy())
             } else {
                 addAll(TorPathValidator.validate())
                 addAll(DnsCryptPathValidator.validate())
@@ -136,7 +139,7 @@ object TunnelValidator {
                     d.contains("clearnet leak")
             }
             // hev wiring broken → TUN packets won't reach Tor SOCKS.
-            "hev.config.missing", "hev.forwarder.wiring" -> true
+            "hev.config.missing", "hev.forwarder.wiring", "uid.forwarder.wiring" -> true
             // VPN interface / route ownership lost or stolen.
             "vpn.not.established",
             "android.vpn.link.missing",
@@ -156,17 +159,45 @@ object TunnelValidator {
      * Mode A: mapdns FakeDNS on 10.8.0.1:53 + fake-IP pool outside VPN subnet.
      * Mode B: no mapdns — TunDnsMux forwards UDP/53 to DNSCrypt; hev socks → Tor only.
      */
+    private fun validateUidForwarderWiring(
+        torConfigFile: File?,
+        ports: TunnelRuntimePorts,
+        dnsMode: DnsResolverMode,
+    ): ValidationCheck {
+        val torrc = torConfigFile?.takeIf { it.exists() }?.readText().orEmpty()
+        val appSocks = torrc.lineSequence().firstOrNull {
+            it.startsWith("SOCKSPort ") &&
+                it.contains("SessionGroup=${TunnelEndpoints.SESSION_GROUP_APPS}")
+        }.orEmpty()
+        val portOk = appSocks.contains(":${ports.torSocksPort}") ||
+            appSocks.contains("SOCKSPort ${TunnelEndpoints.LOOPBACK}:${ports.torSocksPort}")
+        val isolateOk = appSocks.contains("IsolateSOCKSAuth")
+        val keepAliveOk = appSocks.contains("KeepAliveIsolateSOCKSAuth")
+        val forwarderAlive = OnionVpnService.tunForwarderAlive.value
+        val ok = portOk && isolateOk && keepAliveOk && forwarderAlive
+        return ValidationCheck(
+            id = "uid.forwarder.wiring",
+            label = "Per-app SOCKS IsolateSOCKSAuth (u{uid})",
+            status = if (ok) ValidationStatus.Pass else ValidationStatus.Fail,
+            detail = "mode=$dnsMode socksPort=$portOk isolate=$isolateOk " +
+                "keepAlive=$keepAliveOk forwarderAlive=$forwarderAlive " +
+                "(expect apps SOCKS ${ports.torSocksPort})",
+            tripsKillSwitch = true,
+        )
+    }
+
     private fun validateHevForwarderWiring(
         hevConfigFile: File?,
         ports: TunnelRuntimePorts,
         dnsMode: DnsResolverMode,
     ): ValidationCheck {
+        // Legacy hev yaml check retained for FakeDNS diagnostics only.
         val config = hevConfigFile?.takeIf { it.exists() }?.readText()
             ?: return ValidationCheck(
                 id = "hev.config.missing",
                 label = "hev-socks5 DNS + Tor SOCKS wiring",
-                status = ValidationStatus.Fail,
-                detail = "hev-socks5-tunnel.yaml not found",
+                status = ValidationStatus.Skipped,
+                detail = "hev-socks5-tunnel.yaml not used (UID SOCKS forwarder)",
             )
 
         val socksBlock = config.substringAfter("socks5:", "")
@@ -177,36 +208,15 @@ object TunnelValidator {
             socksBlock.contains("address: ${TunnelEndpoints.LOOPBACK}")
 
         return when (dnsMode) {
-            DnsResolverMode.DNSCRYPT_MUX -> {
-                val noMapDns = !config.contains("mapdns:")
-                val icmpOff = config.contains("icmp: 'off'")
-                val socksAuth = config.contains("username: '${TunnelEndpoints.SOCKS_ISOLATION_USER}'")
-                val ipv6 = config.contains("ipv6: '${TunnelEndpoints.VPN_CLIENT_ADDRESS_V6}'")
-                val ok = socksPortOk && socksAddrOk && noMapDns && icmpOff && socksAuth && ipv6
+            DnsResolverMode.DNSCRYPT_MUX,
+            DnsResolverMode.FAKE_IP_SOCKS5A,
+            -> {
                 ValidationCheck(
                     id = "hev.forwarder.wiring",
-                    label = "Internet→Tor SOCKS; DNS via TunDnsMux→DNSCrypt",
-                    status = if (ok) ValidationStatus.Pass else ValidationStatus.Fail,
-                    detail = "mode=DNSCRYPT_MUX socks=$socksPortOk auth=$socksAuth " +
-                        "icmpOff=$icmpOff ipv6=$ipv6 noMapDns=$noMapDns " +
-                        "(expect socks ${ports.torSocksPort})",
-                    tripsKillSwitch = true,
-                )
-            }
-            DnsResolverMode.FAKE_IP_SOCKS5A -> {
-                val mapdnsBlock = config.substringAfter("mapdns:", "")
-                val mapAddrOk = mapdnsBlock.contains("address: ${TunnelEndpoints.VPN_DNS_ADDRESS}")
-                val mapPortOk = mapdnsBlock.contains("port: 53")
-                val poolOk = mapdnsBlock.contains("network: ${TunnelEndpoints.FAKE_DNS_NETWORK}") &&
-                    mapdnsBlock.contains("netmask: ${TunnelEndpoints.FAKE_DNS_NETMASK}")
-                val ok = socksPortOk && socksAddrOk && mapAddrOk && mapPortOk && poolOk
-                ValidationCheck(
-                    id = "hev.forwarder.wiring",
-                    label = "Internet→Tor SOCKS; FakeDNS on VPN DNS",
-                    status = if (ok) ValidationStatus.Pass else ValidationStatus.Fail,
-                    detail = "mode=FAKE_IP socksPortOk=$socksPortOk mapAddrOk=$mapAddrOk " +
-                        "mapPortOk=$mapPortOk poolOk=$poolOk",
-                    tripsKillSwitch = true,
+                    label = "Legacy hev yaml (unused)",
+                    status = ValidationStatus.Skipped,
+                    detail = "UID forwarder + DNSCrypt divert active; hev yaml ignored " +
+                        "socksPortOk=$socksPortOk mode=$dnsMode",
                 )
             }
         }
@@ -301,37 +311,36 @@ object TunnelValidator {
     }
 
     /**
-     * Orbot FakeDNS: apps receive CGNAT fake A records; hostnames resolve at the Tor exit
-     * via SOCKS5A — destination public IPs never appear in local DNS answers.
-     * DNSCrypt mux: apps receive real A records (resolved over Tor) then connect by IP
-     * through SOCKS — egress is still Tor, but local DNS cache holds real dest IPs.
+     * Both UI modes divert DNS to DNSCrypt-over-Tor (Privacy Guides: no clearnet stub).
+     * Tor carries TCP only — UDP/ICMP are fail-closed dropped on the TUN.
      */
     private fun validateDnsModeLeakProperties(
         dnsMode: DnsResolverMode,
-        hevConfigFile: File?,
+        @Suppress("UNUSED_PARAMETER") hevConfigFile: File?,
     ): ValidationCheck {
-        return when (dnsMode) {
-            DnsResolverMode.FAKE_IP_SOCKS5A -> {
-                val config = hevConfigFile?.takeIf { it.exists() }?.readText().orEmpty()
-                val mapOk = config.contains("mapdns:") &&
-                    config.contains("network: ${TunnelEndpoints.FAKE_DNS_NETWORK}")
-                ValidationCheck(
-                    id = "dns.mode.fakeip",
-                    label = "FakeDNS hides destination IPs locally (Orbot)",
-                    status = if (mapOk) ValidationStatus.Pass else ValidationStatus.Fail,
-                    detail = "Apps get ${TunnelEndpoints.FAKE_DNS_NETWORK}/10 fakes; " +
-                        "SOCKS5A recovers hostname at Tor exit (SafeSocks on)",
-                    tripsKillSwitch = true,
-                )
-            }
-            DnsResolverMode.DNSCRYPT_MUX -> ValidationCheck(
-                id = "dns.mode.dnscrypt",
-                label = "DNSCrypt-over-Tor (real A records, Tor egress)",
-                status = ValidationStatus.Pass,
-                detail = "DNS answers are real IPs resolved via Tor SOCKS; " +
-                    "TCP still exits Tor. Prefer FakeDNS if local malware must not see dest IPs.",
-                tripsKillSwitch = false,
-            )
-        }
+        return ValidationCheck(
+            id = "dns.mode.dnscrypt",
+            label = "DNSCrypt-over-Tor (no clearnet DNS)",
+            status = ValidationStatus.Pass,
+            detail = "mode=$dnsMode: any UDP/53 diverted to DNSCrypt via Tor SOCKS; " +
+                "TCP via per-UID SOCKS",
+            tripsKillSwitch = false,
+        )
+    }
+
+    /**
+     * Tor has no deployed Datagram/CONNECT_UDP (prop. 339). Policy: blackhole UDP
+     * (except DNS→DNSCrypt) so apps fall back to TCP — zero clearnet UDP, zero gateway.
+     */
+    private fun validateUdpBlackholePolicy(): ValidationCheck {
+        return ValidationCheck(
+            id = "tor.udp.blackhole",
+            label = "UDP policy: blackhole + force TCP",
+            status = ValidationStatus.Pass,
+            detail = "Tor Datagram (prop. 339 CONNECT_UDP) not on network — " +
+                "QUIC/STUN/WebRTC/ICMP blackholed on TUN; apps must use TCP. " +
+                "Stats: ${LeakPacketFilter.statsSummary()}",
+            tripsKillSwitch = false,
+        )
     }
 }

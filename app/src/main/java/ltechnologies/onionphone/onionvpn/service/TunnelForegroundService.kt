@@ -41,6 +41,7 @@ import ltechnologies.onionphone.onionvpn.core.tor.TorProcessManager
 import ltechnologies.onionphone.onionvpn.core.validation.TunnelValidator
 import ltechnologies.onionphone.onionvpn.core.vpn.OnionVpnService
 import ltechnologies.onionphone.onionvpn.core.vpn.net.TorBandwidthSampler
+import ltechnologies.onionphone.onionvpn.core.vpn.pac.PacProxyServer
 import ltechnologies.onionphone.onionvpn.firewall.InteractiveFirewallEngine
 import ltechnologies.onionphone.onionvpn.prefs.TunnelPreferencesStore
 import ltechnologies.onionphone.onionvpn.threat.DomainReputationRepository
@@ -64,6 +65,7 @@ class TunnelForegroundService : Service() {
     @Inject lateinit var preferencesStore: TunnelPreferencesStore
     @Inject lateinit var firewallEngine: InteractiveFirewallEngine
     @Inject lateinit var domainReputation: DomainReputationRepository
+    @Inject lateinit var circuitLifecycle: ltechnologies.onionphone.onionvpn.core.tor.control.lifecycle.CircuitLifecycleManager
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val lifecycleMutex = Mutex()
@@ -83,6 +85,7 @@ class TunnelForegroundService : Service() {
     private val bandwidthSampler by lazy { TorBandwidthSampler(applicationInfo.uid) }
     private val notifications by lazy { TunnelNotifications(this) }
     private val vpnBridge by lazy { TunnelVpnBridge(this) }
+    private val pacServer by lazy { PacProxyServer() }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -129,6 +132,20 @@ class TunnelForegroundService : Service() {
                             lastError = TunnelFailure.userMessageOf(err, "newnym"),
                         )
                     }
+                }
+                return START_STICKY
+            }
+            ACTION_APPLY_CIRCUIT_TIMING -> {
+                val dirt = intent.getIntExtra(EXTRA_TOR_MAX_DIRTINESS, preferences.torMaxCircuitDirtinessSec)
+                val period = intent.getIntExtra(EXTRA_TOR_NEW_CIRCUIT, preferences.torNewCircuitPeriodSec)
+                preferences = preferences.copy(
+                    torMaxCircuitDirtinessSec = dirt,
+                    torNewCircuitPeriodSec = period,
+                )
+                scope.launch {
+                    tor.applyCircuitTimingLive(dirt, period)
+                        .onSuccess { Timber.i("Live circuit timing applied dirt=%d period=%d", dirt, period) }
+                        .onFailure { Timber.w(it, "Live circuit timing SETCONF failed") }
                 }
                 return START_STICKY
             }
@@ -226,9 +243,15 @@ class TunnelForegroundService : Service() {
         Timber.i(
             "Allocated tunnel ports socks=${ports.torSocksPort} " +
                 "dnscryptSocks=${ports.torDnsCryptSocksPort} " +
-                "probeSocks=${ports.torProbeSocksPort} dns=${ports.torDnsPort} " +
+                "probeSocks=${ports.torProbeSocksPort} " +
+                "httpTunnel=${ports.torHttpTunnelPort} dns=${ports.torDnsPort} " +
                 "dnscrypt=${ports.dnsCryptListenPort} dnsMode=${preferences.dnsResolverMode}",
         )
+        runCatching {
+            pacServer.start()
+            // Bridge DNS = DNSCrypt; Tor SOCKS only after A-record (not Tor DNSPort).
+            pacServer.updateUpstream(ports.torSocksPort, ports.dnsCryptListenPort)
+        }.onFailure { Timber.e(it, "PAC server failed to start") }
 
         val bootstrapUiJob = scope.launch {
             while (isActive) {
@@ -254,27 +277,23 @@ class TunnelForegroundService : Service() {
         domainReputation.onTorReady()
 
         updateSnapshot(TunnelPhase.StartingDnsCrypt, torRunning = true)
-        val useDnsCrypt = preferences.dnsResolverMode == DnsResolverMode.DNSCRYPT_MUX
-        if (useDnsCrypt) {
-            val dnsResult = dnsCrypt.start(preferences.dnsCryptServerName, ports, preferences)
-            if (dnsResult.isFailure) {
-                val err = dnsResult.exceptionOrNull() ?: Exception("DNSCrypt failed")
-                val failure = TunnelFailure.fromThrowable(err, context = "dnscrypt.start")
-                // DNSCrypt down ≠ Tor down. Keep Tor; blackhole apps until user retries / FakeDNS.
-                handleFailure(
-                    message = failure.userMessage,
-                    fromValidation = false,
-                    stopTorProcesses = false,
-                )
-                return
-            }
-            updateSnapshot(TunnelPhase.StartingVpn, dnsCryptRunning = true)
-        } else {
-            // FakeDNS: apps never need DNSCrypt — skip so a resolver flake cannot block Tor streams.
-            runCatching { dnsCrypt.stop() }
-            Timber.i("FakeDNS mode — DNSCrypt not required for app DNS")
-            updateSnapshot(TunnelPhase.StartingVpn, dnsCryptRunning = false)
+        // Always run DNSCrypt: Tor is TCP-only (Privacy Guides); DNS must be encrypted
+        // over Tor SOCKS. FakeDNS/hev mapdns is no longer in the data plane.
+        val dnsResult = dnsCrypt.start(preferences.dnsCryptServerName, ports, preferences)
+        if (dnsResult.isFailure) {
+            val err = dnsResult.exceptionOrNull() ?: Exception("DNSCrypt failed")
+            val failure = TunnelFailure.fromThrowable(err, context = "dnscrypt.start")
+            handleFailure(
+                message = failure.userMessage,
+                fromValidation = false,
+                stopTorProcesses = false,
+            )
+            return
         }
+        val useDnsCrypt = true
+        // DNSCrypt stub is live — enable PAC bridge (DNSCrypt resolve → Tor by IP).
+        pacServer.updateUpstream(ports.torSocksPort, ports.dnsCryptListenPort)
+        updateSnapshot(TunnelPhase.StartingVpn, dnsCryptRunning = true)
 
         if (VpnService.prepare(this) != null) {
             handleFailure(
@@ -349,6 +368,13 @@ class TunnelForegroundService : Service() {
             dnsCryptRunning = useDnsCrypt && dnsCrypt.isRunning(),
             vpnEstablished = true,
         )
+        // Wake Tor if we previously SIGNAL DORMANT from kill-switch Blocking.
+        tor.signalActive()
+        tor.applyCircuitTimingLive(
+            preferences.torMaxCircuitDirtinessSec,
+            preferences.torNewCircuitPeriodSec,
+        )
+        circuitLifecycle.start()
         startPeriodicValidation()
         startForwarderWatchdog()
         startThroughputUpdates()
@@ -477,6 +503,8 @@ class TunnelForegroundService : Service() {
         updateSnapshot(phase, lastError = lastError, validations = validations)
         validationJob?.cancel()
         validationJob = null
+        circuitLifecycle.stop()
+        runCatching { pacServer.stop() }
         vpnBridge.destroy()
         vpnBridge.waitUntilDown()
         dnsCrypt.stop()
@@ -498,12 +526,12 @@ class TunnelForegroundService : Service() {
                         if (_snapshot.value.phase != TunnelPhase.Connected) return@withLock
                         val ports = runtimePorts
                         if (ports != null && tor.isRunning() && isSocksReachable(ports.torSocksPort)) {
-                            Timber.w("TUN forwarder died — Tor SOCKS still up; rebinding hev (keep Tor)")
+                            Timber.w("TUN forwarder died — Tor SOCKS still up; rebinding forwarder (keep Tor)")
                             val gen = OnionVpnService.nextGeneration()
                             vpnBridge.startConnected(preferences, ports, gen)
                             if (vpnBridge.waitForConnected(gen, ports)) {
                                 OnionVpnService.markForwarderAlive()
-                                Timber.i("hev rebound after forwarder death")
+                                Timber.i("UID forwarder rebound after forwarder death")
                                 return@withLock
                             }
                         }
@@ -708,6 +736,7 @@ class TunnelForegroundService : Service() {
             dnsCryptRunning = dnsCryptRunning,
             vpnEstablished = vpnEstablished,
             lastError = lastError,
+            runtimePorts = runtimePorts,
         )
         notifications.update(phase, throughputText)
     }
@@ -716,6 +745,7 @@ class TunnelForegroundService : Service() {
         const val ACTION_START = "ltechnologies.onionphone.onionvpn.tunnel.START"
         const val ACTION_STOP = "ltechnologies.onionphone.onionvpn.tunnel.STOP"
         const val ACTION_NEWNYM = "ltechnologies.onionphone.onionvpn.tunnel.NEWNYM"
+        const val ACTION_APPLY_CIRCUIT_TIMING = "ltechnologies.onionphone.onionvpn.tunnel.APPLY_CIRCUIT_TIMING"
         const val ACTION_REVOKED = "ltechnologies.onionphone.onionvpn.tunnel.REVOKED"
         const val ACTION_ALWAYS_ON = "ltechnologies.onionphone.onionvpn.tunnel.ALWAYS_ON"
         const val EXTRA_ROUTE_ALL = "route_all"
@@ -761,7 +791,7 @@ class TunnelForegroundService : Service() {
             torExitNodes = intent.getStringExtra(EXTRA_TOR_EXIT).orEmpty(),
             torExcludeNodes = intent.getStringExtra(EXTRA_TOR_EXCLUDE).orEmpty(),
             torNewCircuitPeriodSec = intent.getIntExtra(EXTRA_TOR_NEW_CIRCUIT, 30),
-            torMaxCircuitDirtinessSec = intent.getIntExtra(EXTRA_TOR_MAX_DIRTINESS, 180),
+            torMaxCircuitDirtinessSec = intent.getIntExtra(EXTRA_TOR_MAX_DIRTINESS, 600),
             dnsCryptRequireNoLog = intent.getBooleanExtra(EXTRA_DNS_NOLOG, true),
             dnsCryptRequireNoFilter = intent.getBooleanExtra(EXTRA_DNS_NOFILTER, false),
             dnsCryptForceTcp = intent.getBooleanExtra(EXTRA_DNS_FORCE_TCP, true),

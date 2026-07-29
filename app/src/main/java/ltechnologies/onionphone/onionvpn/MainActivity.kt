@@ -34,6 +34,7 @@ import ltechnologies.onionphone.onionvpn.firewall.InteractiveFirewallEngine
 import ltechnologies.onionphone.onionvpn.security.AppLockAuthenticator
 import ltechnologies.onionphone.onionvpn.security.AppLockManager
 import ltechnologies.onionphone.onionvpn.threat.DomainReputationRepository
+import ltechnologies.onionphone.onionvpn.core.tor.control.lifecycle.CircuitLifecycleManager
 import ltechnologies.onionphone.onionvpn.ui.FirewallScreen
 import ltechnologies.onionphone.onionvpn.ui.LogsScreen
 import ltechnologies.onionphone.onionvpn.ui.SettingsScreen
@@ -50,6 +51,7 @@ class MainActivity : FragmentActivity() {
     @Inject lateinit var domainReputation: DomainReputationRepository
     @Inject lateinit var appLockManager: AppLockManager
     @Inject lateinit var appLockAuthenticator: AppLockAuthenticator
+    @Inject lateinit var circuitLifecycle: CircuitLifecycleManager
 
     private val vpnPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult(),
@@ -88,6 +90,7 @@ class MainActivity : FragmentActivity() {
                         preferences = preferences,
                         firewallEngine = firewallEngine,
                         domainReputation = domainReputation,
+                        circuitLifecycle = circuitLifecycle,
                         onStart = ::requestNotificationsThenStart,
                         onStop = viewModel::stopTunnel,
                         onNewNym = viewModel::newNym,
@@ -140,6 +143,7 @@ private fun OnionVpnApp(
     preferences: ltechnologies.onionphone.onionvpn.core.model.TunnelPreferences,
     firewallEngine: InteractiveFirewallEngine,
     domainReputation: DomainReputationRepository,
+    circuitLifecycle: CircuitLifecycleManager,
     onStart: () -> Unit,
     onStop: () -> Unit,
     onNewNym: () -> Unit,
@@ -187,6 +191,7 @@ private fun OnionVpnApp(
                     onStart = onStart,
                     onStop = onStop,
                     onNewNym = onNewNym,
+                    circuitLifecycle = circuitLifecycle,
                 )
                 1 -> FirewallScreen(engine = firewallEngine, preferences = preferences)
                 2 -> LogsScreen()

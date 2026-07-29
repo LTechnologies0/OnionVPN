@@ -15,19 +15,19 @@ import ltechnologies.onionphone.onionvpn.core.model.TunnelFailure
 import ltechnologies.onionphone.onionvpn.core.model.TunnelPreferences
 import ltechnologies.onionphone.onionvpn.core.model.VpnEstablishResult
 import ltechnologies.onionphone.onionvpn.core.model.VpnProfileMode
-import ltechnologies.onionphone.onionvpn.core.vpn.forwarder.HevSocks5TunForwarder
+import ltechnologies.onionphone.onionvpn.core.vpn.forwarder.UidIsolatingTunForwarder
 import ltechnologies.onionphone.onionvpn.core.vpn.net.UnderlyingNetworkTracker
 import ltechnologies.onionphone.onionvpn.core.vpn.profile.TunForwarder
 import ltechnologies.onionphone.onionvpn.core.vpn.profile.VpnProfileBuilder
 import timber.log.Timber
 
 /**
- * Android [VpnService] data plane — builds TUN profiles and runs hev forwarder.
+ * Android [VpnService] data plane — builds TUN profiles and runs UID-isolating SOCKS forwarder.
  *
  * Sequential applyProfile:
  * 1. Parse intent prefs/mode/ports/generation
  * 2. [VpnProfileBuilder.configure] + establish TUN (before closing old)
- * 3. Optionally start [HevSocks5TunForwarder]
+ * 3. Optionally start [UidIsolatingTunForwarder]
  * 4. [UnderlyingNetworkTracker] for SIGNAL ACTIVE on net change
  *
  * Coordinator: [ltechnologies.onionphone.onionvpn.service.TunnelForegroundService].
@@ -93,6 +93,7 @@ class OnionVpnService : VpnService() {
             ?: if (startForwarder) VpnProfileMode.Connected else VpnProfileMode.Blocking
         val torSocksPort = intent.getIntExtra(EXTRA_TOR_SOCKS_PORT, TunnelEndpoints.DEFAULT_TOR_SOCKS_PORT)
         val dnsCryptPort = intent.getIntExtra(EXTRA_DNSCRYPT_PORT, TunnelEndpoints.DEFAULT_DNSCRYPT_LISTEN_PORT)
+        val torDnsPort = intent.getIntExtra(EXTRA_TOR_DNS_PORT, TunnelEndpoints.DEFAULT_TOR_DNS_PORT)
         val generation = intent.getIntExtra(EXTRA_GENERATION, -1)
         val dnsMode = intent.getStringExtra(EXTRA_DNS_MODE)
             ?.let { runCatching { DnsResolverMode.valueOf(it) }.getOrNull() }
@@ -119,7 +120,7 @@ class OnionVpnService : VpnService() {
                     previousTun.close()
                 }
                 if (startForwarder && mode == VpnProfileMode.Connected) {
-                    startForwarder(torSocksPort, dnsCryptPort, dnsMode)
+                    startForwarder(torSocksPort, dnsCryptPort, torDnsPort, dnsMode)
                     startUnderlyingTracking()
                 } else {
                     stopUnderlyingTracking()
@@ -135,7 +136,7 @@ class OnionVpnService : VpnService() {
                 }
                 Timber.i(
                     "VPN established mode=$mode killSwitch=${preferences.killSwitchEnabled} " +
-                        "socks=$torSocksPort dnscrypt=$dnsCryptPort gen=$generation " +
+                        "socks=$torSocksPort dnscrypt=$dnsCryptPort torDns=$torDnsPort gen=$generation " +
                         "alwaysOn=${alwaysOnActive.value} lockdown=${lockdownActive.value}",
                 )
             }
@@ -218,11 +219,19 @@ class OnionVpnService : VpnService() {
         }
     }
 
-    private fun startForwarder(torSocksPort: Int, dnsCryptPort: Int, dnsMode: DnsResolverMode) {
+    private fun startForwarder(
+        torSocksPort: Int,
+        dnsCryptPort: Int,
+        torDnsPort: Int,
+        dnsMode: DnsResolverMode,
+    ) {
         val tun = tunInterface ?: return
-        val forwarder = HevSocks5TunForwarder(
+        val forwarder = UidIsolatingTunForwarder(
             context = applicationContext,
             dnsMode = dnsMode,
+            protectSocket = { socket ->
+                runCatching { protect(socket) }.getOrDefault(false)
+            },
             onFatal = { error ->
                 Timber.e(error, "TUN forwarder died — signalling fail-closed")
                 forwarderAlive.value = false
@@ -237,6 +246,7 @@ class OnionVpnService : VpnService() {
             socksHost = TunnelEndpoints.LOOPBACK,
             socksPort = torSocksPort,
             dnsCryptPort = dnsCryptPort,
+            torDnsPort = torDnsPort,
         )
     }
 
@@ -313,6 +323,7 @@ class OnionVpnService : VpnService() {
         const val EXTRA_PROFILE_MODE = "profile_mode"
         const val EXTRA_TOR_SOCKS_PORT = "tor_socks_port"
         const val EXTRA_DNSCRYPT_PORT = "dnscrypt_port"
+        const val EXTRA_TOR_DNS_PORT = "tor_dns_port"
         const val EXTRA_GENERATION = "vpn_generation"
         const val EXTRA_DNS_MODE = "dns_mode"
 
