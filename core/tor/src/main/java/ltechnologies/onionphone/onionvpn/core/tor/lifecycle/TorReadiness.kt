@@ -40,7 +40,7 @@ internal object TorReadiness {
      * Minimal DNS query to Tor DNSPort.
      * @throws Exception on send/receive failure or timeout
      */
-    fun assertDnsPortReady(port: Int, timeoutMs: Int = 1_500) {
+    fun assertDnsPortReady(port: Int, timeoutMs: Int = 8_000) {
         val query = byteArrayOf(
             0x00, 0x01,
             0x01, 0x00,

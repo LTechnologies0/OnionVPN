@@ -59,10 +59,11 @@ object TorConfigWriter {
      * @param socksPort apps/hev SocksPort
      * @param dnsCryptSocksPort DNSCrypt upstream SocksPort
      * @param probeSocksPort validation/leak-probe SocksPort
-     * @param httpTunnelPort Tor HTTPTunnelPort (HTTP CONNECT for PAC / legacy apps)
+     * @param httpTunnelPort unused (HTTPTunnelPort forced 0 — PAC bridge only)
      * @param dnsPort Tor DNSPort (Automap)
      * @param preferences bridges, nodes, circuit dirtiness
      */
+    @Suppress("UNUSED_PARAMETER")
     fun write(
         dataDirectory: String,
         socksPort: Int = TunnelEndpoints.TOR_SOCKS_PORT,
@@ -111,10 +112,9 @@ object TorConfigWriter {
         appendLine("TestSocks 0")
         appendLine("VirtualAddrNetwork 10.192.0.0/10")
         appendLine("TransPort 0")
-        appendLine(
-            "HTTPTunnelPort ${TunnelEndpoints.LOOPBACK}:$httpTunnelPort " +
-                "IsolateClientAddr IsolateClientProtocol IsolateDestAddr",
-        )
+        // HTTPTunnelPort uses Tor name resolution (exit DNS) — conflicts with DNSCrypt policy.
+        // Apps that need HTTP CONNECT must use the PAC DNSCrypt→Tor bridge instead.
+        appendLine("HTTPTunnelPort 0")
         appendLine("ControlPort 0")
         appendLine("CookieAuthentication 1")
         appendLine("CookieAuthFile ${File(dataDirectory, COOKIE_FILE_NAME).absolutePath}")

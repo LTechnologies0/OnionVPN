@@ -2,12 +2,14 @@ package ltechnologies.onionphone.onionvpn.core.vpn.dns
 
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
+import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
+import ltechnologies.onionphone.onionvpn.core.vpn.firewall.FirewallBridge
 
 /**
  * IP → hostname map filled by DNS snooping in [ltechnologies.onionphone.onionvpn.core.vpn.forwarder.TunDnsMux].
  *
- * Lookups are lock-free reads for the firewall ASK path. Entries are trimmed FIFO-ish when
- * [MAX_ENTRIES] is exceeded (budgeted key removal — never blocks TUN).
+ * Automap (`10.192.0.0/10`) entries are pinned on trim (onion SOCKS5A depends on them).
+ * Remaps notify [FirewallBridge.onAutomapRemap] so firewall decisions cannot cross HS names.
  */
 object DnsHostnameCache {
     private val ipToHost = ConcurrentHashMap<String, String>(512)
@@ -18,6 +20,9 @@ object DnsHostnameCache {
         if (ip.isBlank() || host.isBlank() || host == "localhost") return
         if (looksLikeIp(host)) return
         val previous = ipToHost.put(ip, host)
+        if (previous != null && previous != host) {
+            FirewallBridge.onAutomapRemap?.invoke(ip, previous, host)
+        }
         if (previous == null) {
             val n = sizeApprox.incrementAndGet()
             if (n > MAX_ENTRIES) trim()
@@ -37,7 +42,9 @@ object DnsHostnameCache {
         var n = 0
         val it = ipToHost.keys.iterator()
         while (it.hasNext() && n < TRIM_BUDGET) {
-            it.next()
+            val key = it.next()
+            // Never evict Tor Automap bindings — SOCKS5A needs them.
+            if (TunnelEndpoints.isAutomapVirtualIpv4(key)) continue
             it.remove()
             sizeApprox.decrementAndGet()
             n++

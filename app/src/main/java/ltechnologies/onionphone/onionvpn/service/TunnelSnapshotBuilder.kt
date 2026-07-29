@@ -23,11 +23,16 @@ internal object TunnelSnapshotBuilder {
         vpnEstablished: Boolean,
         lastError: String?,
         runtimePorts: TunnelRuntimePorts? = null,
+        /** Prefer live ControlPort circuit list (Status used to show 0 while Circuits had many). */
+        liveBuiltCircuits: Int = -1,
+        liveStreamCount: Int = -1,
     ): TunnelSnapshot {
         val proxiesLive = phase == TunnelPhase.Connected ||
             phase == TunnelPhase.Validating ||
             phase == TunnelPhase.StartingVpn
         val ports = runtimePorts?.takeIf { proxiesLive && torRunning }
+        val built = if (liveBuiltCircuits >= 0) liveBuiltCircuits else torStatus.builtCircuits
+        val streams = if (liveStreamCount >= 0) liveStreamCount else torStatus.streamCount
         return TunnelSnapshot(
             phase = phase,
             killSwitchEnabled = preferences.killSwitchEnabled,
@@ -40,17 +45,17 @@ internal object TunnelSnapshotBuilder {
             torBootstrapProgress = torStatus.bootstrapProgress,
             torBootstrapSummary = torStatus.bootstrapSummary,
             torControlConnected = torStatus.connected,
-            torBuiltCircuits = torStatus.builtCircuits,
-            torCircuitEstablished = torStatus.circuitEstablished,
+            torBuiltCircuits = built,
+            torCircuitEstablished = torStatus.circuitEstablished || built > 0,
             torVersion = torStatus.torVersion,
-            torStreamCount = torStatus.streamCount,
+            torStreamCount = streams,
             torNetworkLive = torStatus.networkLive,
             torDormant = torStatus.dormant,
             torEntryGuards = torStatus.entryGuardsSummary,
             torLastCircEvent = torStatus.lastCircEvent,
             pacUrl = if (ports != null) TunnelEndpoints.pacUrl() else "",
             socksProxy = ports?.let { TunnelEndpoints.pacSocksBridge() }.orEmpty(),
-            httpProxy = ports?.let { "${TunnelEndpoints.LOOPBACK}:${it.torHttpTunnelPort}" }.orEmpty(),
+            httpProxy = "", // HTTPTunnelPort disabled — use PAC bridge (DNSCrypt), not Tor exit DNS
         )
     }
 

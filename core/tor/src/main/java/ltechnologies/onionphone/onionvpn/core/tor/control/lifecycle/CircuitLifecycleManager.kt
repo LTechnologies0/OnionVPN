@@ -1,6 +1,5 @@
 package ltechnologies.onionphone.onionvpn.core.tor.control.lifecycle
 
-import android.app.ActivityManager
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -33,7 +32,8 @@ import timber.log.Timber
  * - Per-UID `u{uid}` circuits are **sticky** — Tor manages dirtiness; we do **not**
  *   CLOSECIRCUIT on every short stream end (that fought KeepAlive + pooling).
  * - Auto-close only: FAILED circuits, or idle ephemeral (no SOCKS auth) after grace.
- * - App death (UID gone): CLOSESTREAM + CLOSECIRCUIT IfUnused for that auth domain.
+ * - App death: CLOSESTREAM + CLOSECIRCUIT IfUnused only on PACKAGE_REMOVED /
+ *   PACKAGE_RESTARTED for that UID (never ActivityManager.runningAppProcesses polls).
  * - Poll slower while Tor is dormant (battery).
  */
 class CircuitLifecycleManager(
@@ -91,7 +91,9 @@ class CircuitLifecycleManager(
             while (isActive && running) {
                 val dormant = control.status.value.dormant
                 refreshFromGetInfo()
-                reapDeadAppCircuits()
+                // Do NOT poll ActivityManager.runningAppProcesses — on modern Android it only
+                // returns a tiny subset of UIDs, so we were CLOSECIRCUIT'ing live app circuits
+                // every tick (traffic "allowed" by firewall but Tor streams killed).
                 flushIdleCloses()
                 delay(if (dormant) DORMANT_POLL_MS else APP_POLL_MS)
             }
@@ -354,28 +356,14 @@ class CircuitLifecycleManager(
         return now - at >= LONG_LIVED_MS
     }
 
-    private fun reapDeadAppCircuits() {
-        val am = context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager ?: return
-        val runningUids = HashSet<Int>()
-        runCatching {
-            @Suppress("DEPRECATION")
-            am.runningAppProcesses?.forEach { proc ->
-                runningUids.add(proc.uid)
-            }
-        }
-        runningUids.add(Process.myUid())
-        val socksToClose = HashSet<String>()
-        for (circ in circuits.values) {
-            val user = circ.socksUsername ?: continue
-            val uid = TunnelEndpoints.uidFromSocksUser(user) ?: continue
-            if (uid == Process.INVALID_UID) continue
-            if (uid !in runningUids) {
-                socksToClose.add(user)
-            }
-        }
-        for (user in socksToClose) {
-            closeAuthDomain(user)
-        }
+    /**
+     * Close circuits for a UID only when we have a reliable signal the app is gone
+     * (package removed / force-stop restarted) — never from runningAppProcesses polls.
+     */
+    private fun reapUidIfKnown(uid: Int) {
+        if (uid < 0 || uid == Process.myUid()) return
+        val user = TunnelEndpoints.socksUserForUid(uid)
+        closeAuthDomain(user)
     }
 
     private fun closeAuthDomain(socksUser: String) {
@@ -400,7 +388,8 @@ class CircuitLifecycleManager(
         if (packageReceiver != null) return
         val receiver = object : BroadcastReceiver() {
             override fun onReceive(ctx: Context?, intent: Intent?) {
-                scope.launch { reapDeadAppCircuits() }
+                val uid = intent?.getIntExtra(Intent.EXTRA_UID, -1) ?: -1
+                scope.launch { reapUidIfKnown(uid) }
             }
         }
         val filter = IntentFilter().apply {

@@ -10,4 +10,11 @@ package ltechnologies.onionphone.onionvpn.core.vpn.firewall
 object FirewallBridge {
     @Volatile
     var engine: PacketFirewall = PacketFirewall.AllowAll
+
+    /**
+     * Fired when Tor Automap reuses a virtual IP for a different `.onion` hostname.
+     * Firewall must drop IP-keyed decisions so ALLOW/DENY cannot cross HS boundaries.
+     */
+    @Volatile
+    var onAutomapRemap: ((ip: String, oldHost: String, newHost: String) -> Unit)? = null
 }

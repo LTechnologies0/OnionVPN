@@ -20,4 +20,13 @@ class PacScriptTest {
         val pac = PacScript.build(bridgeUp = false)
         assertTrue(pac.contains("PROXY 127.0.0.1:1"))
     }
+
+    @Test
+    fun automap10_192_notDirect() {
+        val pac = PacScript.build(bridgeUp = true)
+        assertTrue(pac.contains("isTorAutomap"))
+        assertTrue(pac.contains("10.19[2-9]"))
+        // Must not blanket-DIRECT all of 10.* without Automap exclusion.
+        assertTrue(pac.contains("!isTorAutomap(host)"))
+    }
 }

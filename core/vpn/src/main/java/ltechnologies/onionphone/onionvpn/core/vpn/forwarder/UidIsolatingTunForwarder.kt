@@ -160,6 +160,11 @@ class UidIsolatingTunForwarder(
             }
             val info = IpPacketParser.parse(buf, length)
             val uid = info?.let { ownerResolver.resolveUid(it) } ?: Process.INVALID_UID
+            // Never IsolateSOCKSAuth as uunknown — wait for owner (matches firewall fail-closed).
+            if (!ConnectionOwnerResolver.isValidUid(uid)) {
+                Timber.d("Drop SYN — UID not resolved yet ${destIp}:${meta.dstPort}")
+                return
+            }
             val user = TunnelEndpoints.socksUserForUid(uid)
             val pass = TunnelEndpoints.socksPassForUid(uid)
             session = TcpTunSession(

@@ -21,7 +21,7 @@ data class LogLine(
  * Thread-safe ring buffers for tunnel UI logs (app / DNSCrypt / Tor).
  */
 object TunnelLogBuffer {
-    private const val CAPACITY = 500
+    private const val CAPACITY = 2_000
     private const val MAX_LINE_CHARS = 2_000
 
     private val appDeque = ArrayDeque<LogLine>(CAPACITY)
@@ -36,6 +36,52 @@ object TunnelLogBuffer {
     val appLogs: StateFlow<List<LogLine>> = _app.asStateFlow()
     val dnsCryptLogs: StateFlow<List<LogLine>> = _dnscrypt.asStateFlow()
     val torLogs: StateFlow<List<LogLine>> = _tor.asStateFlow()
+
+    fun snapshot(source: LogSource): List<LogLine> = synchronized(lock) {
+        when (source) {
+            LogSource.APP -> appDeque.toList()
+            LogSource.DNSCRYPT -> dnsDeque.toList()
+            LogSource.TOR -> torDeque.toList()
+        }
+    }
+
+    /** Plain-text dump for share/export (OnionVPN / DNSCrypt / Tor tabs). */
+    fun exportText(source: LogSource? = null): String {
+        val fmt = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", java.util.Locale.US)
+        fun render(src: LogSource, lines: List<LogLine>): String {
+            val header = "===== ${src.name} (${lines.size} lines) ====="
+            if (lines.isEmpty()) return "$header\n(empty)\n"
+            return buildString {
+                appendLine(header)
+                for (line in lines) {
+                    val ts = fmt.format(java.util.Date(line.timestampMs))
+                    val mark = if (line.isError) " E " else "   "
+                    appendLine("$ts$mark${line.text}")
+                }
+                appendLine()
+            }
+        }
+        return synchronized(lock) {
+            if (source != null) {
+                render(source, snapshotUnlocked(source))
+            } else {
+                buildString {
+                    appendLine("OnionVPN log export")
+                    appendLine("generated=${fmt.format(java.util.Date())}")
+                    appendLine()
+                    append(render(LogSource.APP, snapshotUnlocked(LogSource.APP)))
+                    append(render(LogSource.DNSCRYPT, snapshotUnlocked(LogSource.DNSCRYPT)))
+                    append(render(LogSource.TOR, snapshotUnlocked(LogSource.TOR)))
+                }
+            }
+        }
+    }
+
+    private fun snapshotUnlocked(source: LogSource): List<LogLine> = when (source) {
+        LogSource.APP -> appDeque.toList()
+        LogSource.DNSCRYPT -> dnsDeque.toList()
+        LogSource.TOR -> torDeque.toList()
+    }
 
     fun append(source: LogSource, text: String, isError: Boolean = false) {
         val clipped = if (text.length > MAX_LINE_CHARS) {

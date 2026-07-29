@@ -85,6 +85,21 @@ class LeakPacketFilterTest {
     }
 
     @Test
+    fun tcpDns53_notTorrifiable_forceDnsCryptUdp() {
+        val pkt = ipv4TcpSyn(
+            srcIp = byteArrayOf(10, 0, 0, 2),
+            dstIp = byteArrayOf(8, 8, 8, 8),
+            srcPort = 40_000,
+            dstPort = 53,
+        )
+        assertFalse(LeakPacketFilter.isTorrifiableIpv4Tcp(pkt, pkt.size))
+        assertEquals(
+            LeakPacketFilter.BlackholeReason.TcpDns,
+            LeakPacketFilter.classifyBlackholeReason(pkt, pkt.size),
+        )
+    }
+
+    @Test
     fun icmp_droppedEarly() {
         val pkt = ByteArray(20)
         pkt[0] = 0x45

@@ -9,6 +9,8 @@ import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
  * always do SOCKS remote DNS). The bridge resolves via DNSCrypt first, then CONNECT by IP.
  *
  * The PAC **URL** stays fixed; [bridgeSocksPort] is fixed ([TunnelEndpoints.PAC_BRIDGE_SOCKS_PORT]).
+ *
+ * Automap `10.192.0.0/10` must **not** return DIRECT (would fight onion SOCKS5A).
  */
 object PacScript {
     fun build(
@@ -39,12 +41,16 @@ object PacScript {
             |// OnionVPN PAC — stable URL; SOCKS = DNSCrypt→Tor bridge (not Tor DNS).
             |// Name resolution: DNSCrypt stub → A record → Tor SocksPort CONNECT by IP.
             |// .onion / .exit: bridge passes hostname to Tor SOCKS5A (no DNSCrypt).
+            |function isTorAutomap(host) {
+            |  // VirtualAddrNetwork 10.192.0.0/10 → 10.192–10.255
+            |  return shExpMatch(host, "10.19[2-9].*") ||
+            |         shExpMatch(host, "10.2[0-9][0-9].*");
+            |}
             |function FindProxyForURL(url, host) {
             |  // Host-only checks — no PAC dnsResolve (can leak / stall outside the VPN).
             |  if (isPlainHostName(host) ||
             |      shExpMatch(host, "localhost") ||
             |      shExpMatch(host, "127.*") ||
-            |      shExpMatch(host, "10.*") ||
             |      shExpMatch(host, "192.168.*") ||
             |      shExpMatch(host, "172.16.*") ||
             |      shExpMatch(host, "172.17.*") ||
@@ -54,6 +60,10 @@ object PacScript {
             |      shExpMatch(host, "172.3[01].*") ||
             |      shExpMatch(host, "*.local") ||
             |      shExpMatch(host, "*.onionvpn.local")) {
+            |    return "DIRECT";
+            |  }
+            |  // RFC1918 10/8 except Tor Automap — Automap must use the SOCKS bridge.
+            |  if (shExpMatch(host, "10.*") && !isTorAutomap(host)) {
             |    return "DIRECT";
             |  }
             |  return "$chain";

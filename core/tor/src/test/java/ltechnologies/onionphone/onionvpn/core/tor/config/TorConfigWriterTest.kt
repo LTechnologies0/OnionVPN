@@ -55,7 +55,7 @@ class TorConfigWriterTest {
         assertTrue(dnsCryptLine.contains("IsolateDestPort"))
         assertTrue(torrc.contains("SafeSocks 0"))
         assertTrue(torrc.contains("TestSocks 0"))
-        assertTrue(torrc.contains("HTTPTunnelPort ${TunnelEndpoints.LOOPBACK}:5555"))
+        assertTrue(torrc.contains("HTTPTunnelPort 0"))
         assertTrue(torrc.contains("AutomapHostsOnResolve 1"))
         assertTrue(torrc.contains("AutomapHostsSuffixes .onion,.exit"))
         assertTrue(torrc.contains("VirtualAddrNetwork 10.192.0.0/10"))

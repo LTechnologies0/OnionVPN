@@ -334,6 +334,8 @@ class TunnelForegroundService : Service() {
         }
 
         updateSnapshot(TunnelPhase.Validating, vpnEstablished = true)
+        // Wake Tor if dormant so DNSPort / SOCKS5A probes don't Poll/connect timeout.
+        tor.signalActive()
         val validations = runValidation(ports)
         val hardFails = validations.filter { TunnelValidator.isHardKillSwitchFailure(it) }
         val softFails = validations.filter {
@@ -565,6 +567,7 @@ class TunnelForegroundService : Service() {
                 if (_snapshot.value.phase != TunnelPhase.Connected) continue
                 val ports = runtimePorts ?: continue
                 ticks++
+                tor.signalActive()
                 // Most ticks: local lite probes. Exit-IP OkHttp only every ~15 min.
                 val checks = if (ticks % FULL_VALIDATION_TICKS == 0) {
                     TunnelValidator.validateAll(
@@ -641,8 +644,14 @@ class TunnelForegroundService : Service() {
                     tor.refreshControlTraffic()
                 }
                 val st = tor.controlStatus.value
+                val builtLive = circuitLifecycle.liveCircuits.value.count {
+                    it.info.status.equals("BUILT", ignoreCase = true)
+                }
                 if (phase == TunnelPhase.Connected && st.connected) {
-                    throughputText = formatAggregateThroughput(st)
+                    throughputText = formatAggregateThroughput(
+                        st,
+                        builtCircuits = if (st.connected) builtLive else st.builtCircuits,
+                    )
                 } else if (phase == TunnelPhase.Connected) {
                     throughputText = bandwidthSampler.sample().displayText
                 }
@@ -656,7 +665,10 @@ class TunnelForegroundService : Service() {
      *
      * Priority: cumulative traffic/read|written deltas → control BW event → UID TrafficStats.
      */
-    private fun formatAggregateThroughput(st: TorControlStatus): String {
+    private fun formatAggregateThroughput(
+        st: TorControlStatus,
+        builtCircuits: Int = st.builtCircuits,
+    ): String {
         val now = System.currentTimeMillis()
         var trafficDown = 0L
         var trafficUp = 0L
@@ -686,11 +698,11 @@ class TunnelForegroundService : Service() {
             }
             else -> {
                 val sample = bandwidthSampler.sample()
-                return "${sample.displayText}  · ${st.builtCircuits} circuits"
+                return "${sample.displayText}  · $builtCircuits circuits"
             }
         }
         return "Tor ▼ ${TunnelSnapshotBuilder.formatRate(down)}  ▲ ${TunnelSnapshotBuilder.formatRate(up)}" +
-            "  · ${st.builtCircuits} circuits"
+            "  · $builtCircuits circuits"
     }
 
     private fun stopThroughputUpdates() {
@@ -726,6 +738,10 @@ class TunnelForegroundService : Service() {
         vpnEstablished: Boolean = _snapshot.value.vpnEstablished,
         lastError: String? = _snapshot.value.lastError,
     ) {
+        val liveCircs = circuitLifecycle.liveCircuits.value
+        val liveStreams = circuitLifecycle.liveStreams.value
+        val controlUp = tor.controlStatus.value.connected
+        val builtLive = liveCircs.count { it.info.status.equals("BUILT", ignoreCase = true) }
         _snapshot.value = TunnelSnapshotBuilder.build(
             phase = phase,
             preferences = preferences,
@@ -737,6 +753,8 @@ class TunnelForegroundService : Service() {
             vpnEstablished = vpnEstablished,
             lastError = lastError,
             runtimePorts = runtimePorts,
+            liveBuiltCircuits = if (controlUp) builtLive else -1,
+            liveStreamCount = if (controlUp) liveStreams.size else -1,
         )
         notifications.update(phase, throughputText)
     }
@@ -773,8 +791,8 @@ class TunnelForegroundService : Service() {
         private const val THROUGHPUT_INTERVAL_MS = 2_000L
         /** Every N ticks → lite GETINFO (dormant / liveness). ~10s */
         private const val LITE_CONTROL_REFRESH_TICKS = 5
-        /** Every N ticks → circuit/stream dump. ~2 min at 2s ticks. */
-        private const val FULL_CONTROL_REFRESH_TICKS = 60
+        /** Every N ticks → circuit/stream dump. ~20s at 2s ticks (Status must track Circuits). */
+        private const val FULL_CONTROL_REFRESH_TICKS = 10
 
         private val _snapshot = MutableStateFlow(TunnelSnapshot())
         val snapshot: StateFlow<TunnelSnapshot> = _snapshot.asStateFlow()

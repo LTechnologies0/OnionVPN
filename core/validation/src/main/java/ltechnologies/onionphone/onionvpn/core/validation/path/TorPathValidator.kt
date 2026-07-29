@@ -10,6 +10,7 @@ import kotlinx.coroutines.withContext
 import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
 import ltechnologies.onionphone.onionvpn.core.model.ValidationCheck
 import ltechnologies.onionphone.onionvpn.core.model.ValidationStatus
+import ltechnologies.onionphone.onionvpn.core.vpn.forwarder.Socks5Client
 import timber.log.Timber
 
 object TorPathValidator {
@@ -93,7 +94,8 @@ object TorPathValidator {
     private fun checkDnsPort(id: String, label: String, host: String, port: Int): ValidationCheck {
         return try {
             DatagramSocket().use { socket ->
-                socket.soTimeout = 5_000
+                // Exit resolve via DNSPort can exceed 5s on cold circuits ("Poll timed out").
+                socket.soTimeout = DNS_PORT_TIMEOUT_MS
                 val query = minimalDnsQuery()
                 socket.send(DatagramPacket(query, query.size, InetAddress.getByName(host), port))
                 val response = DatagramPacket(ByteArray(512), 512)
@@ -101,7 +103,13 @@ object TorPathValidator {
             }
             ValidationCheck(id, label, ValidationStatus.Pass, "$host:$port (UDP)")
         } catch (error: Exception) {
-            ValidationCheck(id, label, ValidationStatus.Fail, error.message ?: "unreachable", tripsKillSwitch = false)
+            ValidationCheck(
+                id,
+                label,
+                ValidationStatus.Fail,
+                error.message ?: "unreachable",
+                tripsKillSwitch = false,
+            )
         }
     }
 
@@ -122,18 +130,24 @@ object TorPathValidator {
         }
     }
 
+    /**
+     * SOCKS5A via [Socks5Client] with probe IsolateSOCKSAuth tokens.
+     * Java [java.net.Proxy] SOCKS often stalls / mis-auths against our SocksPorts.
+     */
     private fun checkRemoteDns(host: String, port: Int): ValidationCheck {
         return try {
-            val proxy = java.net.Proxy(java.net.Proxy.Type.SOCKS, InetSocketAddress(host, port))
-            val target = InetSocketAddress.createUnresolved("example.com", 80)
-            Socket(proxy).use { socket ->
-                socket.connect(target, 8_000)
-            }
+            Socks5Client(
+                proxyHost = host,
+                proxyPort = port,
+                username = TunnelEndpoints.SOCKS_PROBE_USER,
+                password = TunnelEndpoints.SOCKS_PROBE_PASS,
+                connectTimeoutMs = REMOTE_DNS_TIMEOUT_MS,
+            ).connect("example.com", 80).use { /* handshake + CONNECT OK */ }
             ValidationCheck(
                 id = "tor.remote.dns",
                 label = "SOCKS5A remote DNS via Tor",
                 status = ValidationStatus.Pass,
-                detail = "Resolved example.com through SOCKS",
+                detail = "Resolved example.com through SOCKS5A (probe auth)",
             )
         } catch (error: Exception) {
             ValidationCheck(
@@ -160,4 +174,7 @@ object TorPathValidator {
         0x00, 0x01,
         0x00, 0x01,
     )
+
+    private const val DNS_PORT_TIMEOUT_MS = 15_000
+    private const val REMOTE_DNS_TIMEOUT_MS = 25_000
 }

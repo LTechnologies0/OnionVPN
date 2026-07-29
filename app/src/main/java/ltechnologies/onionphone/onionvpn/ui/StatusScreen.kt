@@ -97,7 +97,7 @@ fun StatusScreen(
             if (snapshot.socksProxy.isNotBlank()) {
                 Text(
                     text = "PAC SOCKS bridge: ${snapshot.socksProxy} (DNSCrypt→Tor)\n" +
-                        "Tor HTTP CONNECT (exit DNS — prefer PAC): ${snapshot.httpProxy}",
+                        "HTTPTunnelPort disabled (Tor exit DNS conflict) — use PAC only.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )

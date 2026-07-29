@@ -47,6 +47,7 @@ object LeakPacketFilter {
         WireGuard,
         OpenVpn,
         Dtls,
+        TcpDns,
         GenericUdp,
     }
 
@@ -77,7 +78,10 @@ object LeakPacketFilter {
         if (version != 4) return false
         if (isMulticastOrBroadcastV4(packet)) return false
         val proto = packet[9].toInt() and 0xff
-        return proto == PROTO_TCP
+        if (proto != PROTO_TCP) return false
+        // TCP/53 and DoT/853 must not bypass DNSCrypt via Tor exit DNS.
+        if (isDnsTcpPort(packet, length)) return false
+        return true
     }
 
     /** True when IPv4 UDP dest port is 53 (any resolver IP — force torrified DNS). */
@@ -91,6 +95,19 @@ object LeakPacketFilter {
         val destPort = ((packet[ihl + 2].toInt() and 0xff) shl 8) or
             (packet[ihl + 3].toInt() and 0xff)
         return destPort == 53
+    }
+
+    /** TCP DNS (53) or DoT (853) — blackhole so apps use UDP/53 → DNSCrypt. */
+    fun isDnsTcpPort(packet: ByteArray, length: Int): Boolean {
+        if (length < 40) return false
+        val version = (packet[0].toInt() ushr 4) and 0x0f
+        if (version != 4) return false
+        val ihl = (packet[0].toInt() and 0x0f) * 4
+        if (length < ihl + 20) return false
+        if (packet[9].toInt() and 0xff != PROTO_TCP) return false
+        val destPort = ((packet[ihl + 2].toInt() and 0xff) shl 8) or
+            (packet[ihl + 3].toInt() and 0xff)
+        return destPort == 53 || destPort == 853
     }
 
     fun classifyUdp(packet: ByteArray, length: Int): UdpDisposition {
@@ -115,7 +132,13 @@ object LeakPacketFilter {
         val proto = packet[9].toInt() and 0xff
         when (proto) {
             PROTO_ICMP, PROTO_IGMP, PROTO_ICMPV6 -> return BlackholeReason.Icmp
-            PROTO_TCP -> return BlackholeReason.NotUdp
+            PROTO_TCP -> {
+                return if (isDnsTcpPort(packet, length)) {
+                    BlackholeReason.TcpDns
+                } else {
+                    BlackholeReason.NotUdp
+                }
+            }
             PROTO_UDP -> Unit
             else -> return BlackholeReason.GenericUdp
         }
@@ -165,7 +188,7 @@ object LeakPacketFilter {
             BlackholeReason.QuicHttp3 -> dropQuic.incrementAndGet()
             BlackholeReason.StunWebrtc -> dropStun.incrementAndGet()
             BlackholeReason.Ipv6, BlackholeReason.Icmp, BlackholeReason.Multicast,
-            BlackholeReason.LinkLocal, BlackholeReason.NotUdp,
+            BlackholeReason.LinkLocal, BlackholeReason.NotUdp, BlackholeReason.TcpDns,
             -> dropNonUdp.incrementAndGet()
             else -> dropOtherUdp.incrementAndGet()
         }
