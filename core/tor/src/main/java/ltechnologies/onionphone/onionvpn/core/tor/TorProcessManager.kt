@@ -194,15 +194,32 @@ class TorProcessManager(
     /**
      * Underlying Android network changed (Wi‑Fi ↔ cell, loss, validated flip).
      *
-     * Orbot-style recovery without flooding ControlPort:
-     * DROPTIMEOUTS → DisableNetwork bounce → ACTIVE → CLEARDNSCACHE.
-     * Skips heavy circuit-status GETINFO (use SETEVENTS + periodic lite refresh).
+     * Soft recovery only: DROPTIMEOUTS → ACTIVE → CLEARDNSCACHE.
+     * A DisableNetwork bounce closes every Socks/DNS listener and DESTROYs all circuits
+     * (see connection_connect_sockaddr Bug warn + STREAM FAILED storm) — that caused
+     * app streams to sit at NEW without SENTCONNECT while Tor rebuilt isolation circuits.
+     * Hard bounce is reserved for [recoverNetworkHard] (captive / prolonged stall).
      */
     fun onNetworkChanged(): Result<Unit> {
         if (!control.isConnected) return Result.failure(IOException("control not connected"))
         control.dropTimeouts().onFailure { Timber.w(it, "DROPTIMEOUTS failed") }
-        // Bounce DisableNetwork so Tor rebinds sockets on the new underlying path
-        // (helps after MITM captive portals / handoffs stalling ORCONNs).
+        val active = control.setActive()
+        control.clearDnsCache().onFailure { Timber.w(it, "CLEARDNSCACHE failed") }
+        control.refreshHealthLite()
+        return active.also {
+            it.onSuccess {
+                Timber.i("Tor network recovery: DROPTIMEOUTS+ACTIVE+CLEARDNSCACHE")
+            }
+        }
+    }
+
+    /**
+     * Hard recovery: DisableNetwork bounce to rebind OR sockets on a new path.
+     * Tears down listeners/circuits — use only when soft recovery is insufficient.
+     */
+    fun recoverNetworkHard(): Result<Unit> {
+        if (!control.isConnected) return Result.failure(IOException("control not connected"))
+        control.dropTimeouts().onFailure { Timber.w(it, "DROPTIMEOUTS failed") }
         control.setDisableNetwork(true).onFailure { Timber.w(it, "DisableNetwork=1 failed") }
         control.setDisableNetwork(false).onFailure { Timber.w(it, "DisableNetwork=0 failed") }
         val active = control.setActive()
@@ -210,7 +227,7 @@ class TorProcessManager(
         control.refreshHealthLite()
         return active.also {
             it.onSuccess {
-                Timber.i("Tor network recovery: DROPTIMEOUTS+DisableNetwork bounce+ACTIVE+CLEARDNSCACHE")
+                Timber.w("Tor network recovery HARD: DROPTIMEOUTS+DisableNetwork bounce+ACTIVE+CLEARDNSCACHE")
             }
         }
     }

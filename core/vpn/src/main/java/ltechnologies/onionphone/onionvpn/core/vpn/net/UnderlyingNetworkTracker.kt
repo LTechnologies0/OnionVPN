@@ -56,7 +56,9 @@ class UnderlyingNetworkTracker(
         try {
             cm.registerNetworkCallback(request, cb)
             callback = cb
-            publish(cm, forceNotify = true)
+            // Bind underlying net only — do NOT notify Tor. forceNotify used to fire
+            // DisableNetwork bounce on every VPN-up and kill live SOCKS/DNS mid-bootstrap.
+            publish(cm, notifyTor = false)
             Timber.i("UnderlyingNetworkTracker started (debounce=${DEBOUNCE_MS}ms)")
         } catch (error: Exception) {
             Timber.e(error, "Failed to register underlying NetworkCallback")
@@ -77,12 +79,16 @@ class UnderlyingNetworkTracker(
 
     private fun schedulePublish(cm: ConnectivityManager) {
         pendingPublish?.let { mainHandler.removeCallbacks(it) }
-        val r = Runnable { publish(cm, forceNotify = false) }
+        val r = Runnable { publish(cm, notifyTor = true) }
         pendingPublish = r
         mainHandler.postDelayed(r, DEBOUNCE_MS)
     }
 
-    private fun publish(cm: ConnectivityManager, forceNotify: Boolean) {
+    /**
+     * @param notifyTor when true, invoke [onUnderlyingChanged] only if the selected
+     *   network identity actually changed (Wi‑Fi↔cell / loss / route flip).
+     */
+    private fun publish(cm: ConnectivityManager, notifyTor: Boolean) {
         val best = selectBestUnderlying(cm)
             val netId = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && best != null) {
                 best.networkHandle
@@ -102,9 +108,9 @@ class UnderlyingNetworkTracker(
             } else {
                 Timber.w("No underlying non-VPN network — setUnderlyingNetworks(null)")
             }
-            val changed = forceNotify || netId != lastPublishedNetId
+            val changed = netId != lastPublishedNetId
             lastPublishedNetId = netId
-            if (changed) {
+            if (notifyTor && changed) {
                 onUnderlyingChanged?.invoke()
             }
         } catch (error: Exception) {
