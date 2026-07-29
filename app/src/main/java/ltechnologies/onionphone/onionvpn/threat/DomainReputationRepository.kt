@@ -12,6 +12,7 @@ import javax.inject.Singleton
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -55,8 +56,8 @@ class DomainReputationRepository @Inject constructor(
     fun start() {
         if (!started.compareAndSet(false, true)) return
         scope.launch {
+            // Cache only at cold start — never hit the network before Tor probe SOCKS.
             loadCached()
-            maybeAutoUpdate()
         }
     }
 
@@ -67,10 +68,15 @@ class DomainReputationRepository @Inject constructor(
 
     /**
      * Prefer a Tor-backed refresh when probe SOCKS appears.
-     * If the last success was clearnet (or never via Tor), refresh immediately.
+     * Waits until [TorProcessManager.currentProbeSocksPort] is published — Tor.start used
+     * to clear runtimePorts in stopInternal, so a naive immediate update always failed.
      */
     fun onTorReady() {
         scope.launch {
+            if (!awaitProbeSocks()) {
+                Timber.w("Domain reputation: Tor probe SOCKS never became ready — keeping cache")
+                return@launch
+            }
             val st = _status.value
             if (!st.lastViaTor) {
                 update()
@@ -78,6 +84,17 @@ class DomainReputationRepository @Inject constructor(
                 maybeAutoUpdate()
             }
         }
+    }
+
+    private suspend fun awaitProbeSocks(
+        attempts: Int = PROBE_WAIT_ATTEMPTS,
+        delayMs: Long = PROBE_WAIT_DELAY_MS,
+    ): Boolean {
+        repeat(attempts) {
+            if (tor.currentProbeSocksPort() != null && tor.isRunning()) return true
+            delay(delayMs)
+        }
+        return tor.currentProbeSocksPort() != null && tor.isRunning()
     }
 
     private suspend fun maybeAutoUpdate() {
@@ -274,6 +291,9 @@ class DomainReputationRepository @Inject constructor(
         private const val VIA_TOR_FILE = "last-via-tor.txt"
         /** HaGeZi lists expire ~12h–1d; refresh daily. */
         private const val REFRESH_INTERVAL_MS = 24L * 60L * 60L * 1000L
+        /** ~15s — cover Tor ready → ports published + brief SOCKS settle. */
+        private const val PROBE_WAIT_ATTEMPTS = 30
+        private const val PROBE_WAIT_DELAY_MS = 500L
 
         private val MALWARE_URLS = listOf(
             "https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/wildcard/tif.mini-onlydomains.txt",

@@ -69,6 +69,9 @@ class InteractiveFirewallEngine @Inject constructor(
 
     private val flowCache = ConcurrentHashMap<Long, FirewallVerdict>()
     private val decisionCache = ConcurrentHashMap<Long, FirewallVerdict>()
+    /** Reverse index so Automap remaps can drop only related sticky entries. */
+    private val destDecisionKeys = ConcurrentHashMap<String, MutableSet<Long>>()
+    private val destFlowKeys = ConcurrentHashMap<String, MutableSet<Long>>()
 
     /** ruleKey → queued or active prompt (dedupe). */
     private val pendingByKey = ConcurrentHashMap<String, QueuedPrompt>()
@@ -98,6 +101,7 @@ class InteractiveFirewallEngine @Inject constructor(
         promptNotifier.ensureChannel()
         appUidResolver.start()
         FirewallBridge.onAutomapRemap = { ip, oldHost, newHost ->
+            // Scoped only — never wipe every ALLOWED flow (CDN remaps used to blackhole mid-TCP).
             invalidateDestination(ip)
             invalidateDestination(oldHost)
             invalidateDestination(newHost)
@@ -128,6 +132,8 @@ class InteractiveFirewallEngine @Inject constructor(
         }
         flowCache.clear()
         decisionCache.clear()
+        destDecisionKeys.clear()
+        destFlowKeys.clear()
         synchronized(queueLock) {
             waitQueue.clear()
             pendingByKey.clear()
@@ -161,20 +167,31 @@ class InteractiveFirewallEngine @Inject constructor(
         val flowKey = flowKey(uid, info)
         flowCache[flowKey]?.let { return it == FirewallVerdict.ALLOW }
 
-        // Mid-flow: only pass if we already decided this flow (miss → drop, not open gate).
+        // Mid-flow: never open ASK/DENY prompts. Prefer sticky decision / rules when the
+        // flow-cache entry was trimmed or wiped by a remap — hard-drop only if never allowed.
         if (info.isTcp && !info.isTcpSyn) {
+            val matching = findRule(uid, matchDest, info)
+            if (matching != null) {
+                rememberFlow(flowKey, matching.verdict, matchDest)
+                return matching.verdict == FirewallVerdict.ALLOW
+            }
+            val rk = decisionKey(uid, matchDest, info)
+            decisionCache[rk]?.let { v ->
+                rememberFlow(flowKey, v, matchDest)
+                return v == FirewallVerdict.ALLOW
+            }
             return false
         }
 
         val matching = findRule(uid, matchDest, info)
         if (matching != null) {
-            rememberFlow(flowKey, matching.verdict)
+            rememberFlow(flowKey, matching.verdict, matchDest)
             return matching.verdict == FirewallVerdict.ALLOW
         }
 
         val rk = decisionKey(uid, matchDest, info)
         decisionCache[rk]?.let { v ->
-            rememberFlow(flowKey, v)
+            rememberFlow(flowKey, v, matchDest)
             return v == FirewallVerdict.ALLOW
         }
 
@@ -187,11 +204,11 @@ class InteractiveFirewallEngine @Inject constructor(
         val dpi = ApplicationLayerDetector.classify(packet, length, info)
         return when (prefs.firewallDefaultAction) {
             FirewallDefaultAction.ALLOW -> {
-                rememberDecision(rk, flowKey, FirewallVerdict.ALLOW)
+                rememberDecision(rk, flowKey, FirewallVerdict.ALLOW, matchDest)
                 true
             }
             FirewallDefaultAction.DENY -> {
-                rememberDecision(rk, flowKey, FirewallVerdict.DENY)
+                rememberDecision(rk, flowKey, FirewallVerdict.DENY, matchDest)
                 appendJournal(
                     uid = uid,
                     app = app,
@@ -332,7 +349,7 @@ class InteractiveFirewallEngine @Inject constructor(
                     it.protocol == rule.protocol
             } + rule
         }
-        rememberDecision(answered.decisionKey, answered.flowKey, verdict)
+        rememberDecision(answered.decisionKey, answered.flowKey, verdict, answered.matchDest)
         val note = when (ruleScope) {
             FirewallRuleScope.TEMPORARY -> "temporary ${prefs.firewallTempMinutes}m"
             FirewallRuleScope.SESSION -> "until VPN stops"
@@ -356,9 +373,11 @@ class InteractiveFirewallEngine @Inject constructor(
     fun deleteRule(id: String) {
         scope.launch { rulesStore.remove(id) }
         rules.updateAndGet { it.filterNot { r -> r.id == id } }
-        // Only wipe caches for the deleted rule's identity if we can; otherwise clear all.
+        // Rule identity is not keyed the same as flow hashes — clear sticky caches.
         flowCache.clear()
         decisionCache.clear()
+        destDecisionKeys.clear()
+        destFlowKeys.clear()
     }
 
     fun rulesFlow(): StateFlow<List<FirewallRule>> = rulesStore.rules
@@ -397,21 +416,30 @@ class InteractiveFirewallEngine @Inject constructor(
         return if (TunnelEndpoints.isOnionLikeHostname(host)) host else null
     }
 
-    /** Drop decision/flow caches after Automap IP remaps to a different hostname. */
+    /**
+     * Drop only cache entries tied to [dest] (IP or `.onion` hostname).
+     * A global clear after any remap killed mid-flow ACKs for every app while Tor
+     * still showed STREAM SUCCEEDED.
+     */
     private fun invalidateDestination(dest: String) {
         if (dest.isBlank()) return
-        decisionCache.clear()
-        flowCache.clear()
+        val needle = dest.lowercase()
+        destDecisionKeys.remove(needle)?.forEach { decisionCache.remove(it) }
+        destFlowKeys.remove(needle)?.forEach { flowCache.remove(it) }
     }
 
-    private fun rememberDecision(decisionKey: Long, flowKey: Long, verdict: FirewallVerdict) {
+    private fun rememberDecision(decisionKey: Long, flowKey: Long, verdict: FirewallVerdict, matchDest: String) {
         decisionCache[decisionKey] = verdict
-        rememberFlow(flowKey, verdict)
+        destDecisionKeys.getOrPut(matchDest.lowercase()) { ConcurrentHashMap.newKeySet() }.add(decisionKey)
+        rememberFlow(flowKey, verdict, matchDest)
         trimDecisionCache()
     }
 
-    private fun rememberFlow(flowKey: Long, verdict: FirewallVerdict) {
+    private fun rememberFlow(flowKey: Long, verdict: FirewallVerdict, matchDest: String? = null) {
         flowCache[flowKey] = verdict
+        if (matchDest != null) {
+            destFlowKeys.getOrPut(matchDest.lowercase()) { ConcurrentHashMap.newKeySet() }.add(flowKey)
+        }
         if (flowCache.size > MAX_FLOW_CACHE) {
             // Prefer trimming ALLOW over DENY (DENY miss used to open the mid-flow gate).
             var n = 0

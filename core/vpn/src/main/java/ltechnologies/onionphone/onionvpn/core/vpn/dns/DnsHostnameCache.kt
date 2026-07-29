@@ -20,7 +20,7 @@ object DnsHostnameCache {
         if (ip.isBlank() || host.isBlank() || host == "localhost") return
         if (looksLikeIp(host)) return
         val previous = ipToHost.put(ip, host)
-        if (previous != null && previous != host) {
+        if (previous != null && previous != host && TunnelEndpoints.isAutomapVirtualIpv4(ip)) {
             FirewallBridge.onAutomapRemap?.invoke(ip, previous, host)
         }
         if (previous == null) {

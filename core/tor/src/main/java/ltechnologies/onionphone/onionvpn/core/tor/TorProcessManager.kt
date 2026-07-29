@@ -82,12 +82,12 @@ class TorProcessManager(
         preferences: TunnelPreferences = TunnelPreferences(),
     ): Result<Unit> = withContext(Dispatchers.IO) {
         this@TorProcessManager.preferences = preferences
-        runtimePorts = ports
-        // Step 1
+        // Step 1 — stopInternal clears runtimePorts; re-bind after teardown.
         stopInternal()
         killOrphanedProcesses()
         runCatching { controlSocketFile.delete() }
         runCatching { cookieFile.delete() }
+        runtimePorts = ports
         try {
             ensureExecutable(binaryFile)
             // Step 2
