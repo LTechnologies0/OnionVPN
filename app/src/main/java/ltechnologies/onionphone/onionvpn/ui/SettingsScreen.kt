@@ -17,9 +17,12 @@ import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -48,6 +51,8 @@ import ltechnologies.onionphone.onionvpn.core.model.FirewallDefaultAction
 import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
 import ltechnologies.onionphone.onionvpn.core.model.TunnelPreferences
 import ltechnologies.onionphone.onionvpn.threat.DomainReputationRepository
+import ltechnologies.onionphone.onionvpn.ui.components.SectionHeader
+import ltechnologies.onionphone.onionvpn.ui.components.TonalSection
 import ltechnologies.onionphone.onionvpn.util.SystemSecurityIntents
 
 @Composable
@@ -120,46 +125,46 @@ fun SettingsScreen(
     ) {
         val context = LocalContext.current
 
-        Text("App security", style = MaterialTheme.typography.titleMedium)
-        Text(
-            text = "Uses the Android / GrapheneOS screen lock (PIN, pattern, biometric). " +
+        SectionHeader(
+            title = "App security",
+            subtitle = "Uses the Android / GrapheneOS screen lock (PIN, pattern, biometric). " +
                 "The VPN tunnel and kill switch keep running while the UI is locked.",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        PrefSwitch(
-            label = "Require device lock to open app",
-            checked = local.appLockEnabled,
-            onChecked = { commit(local.copy(appLockEnabled = it)) },
-        )
-        PrefSwitch(
-            label = "Allow screenshots",
-            checked = local.allowScreenshots,
-            onChecked = { commit(local.copy(allowScreenshots = it)) },
-        )
-        Text(
-            text = "Off (recommended): FLAG_SECURE blocks screenshots, screen recording, " +
-                "and recents thumbnails of firewall/rules/logs.",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
+        TonalSection {
+            PrefSwitch(
+                label = "Require device lock to open app",
+                checked = local.appLockEnabled,
+                onChecked = { commit(local.copy(appLockEnabled = it)) },
+            )
+            PrefSwitch(
+                label = "Allow screenshots",
+                checked = local.allowScreenshots,
+                onChecked = { commit(local.copy(allowScreenshots = it)) },
+            )
+            Text(
+                text = "Off (recommended): FLAG_SECURE blocks screenshots, screen recording, " +
+                    "and recents thumbnails of firewall/rules/logs.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
 
-        Text("System leak protection", style = MaterialTheme.typography.titleMedium)
-        Text(
-            text = "GrapheneOS improves VPN leak blocking when Always-on VPN + " +
+        SectionHeader(
+            title = "System leak protection",
+            subtitle = "GrapheneOS improves VPN leak blocking when Always-on VPN + " +
                 "“Block connections without VPN” are on. OnionVPN cannot flip those itself.",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        Button(
+        FilledTonalButton(
             onClick = { SystemSecurityIntents.openVpnSettings(context) },
             modifier = Modifier.fillMaxWidth(),
+            shape = MaterialTheme.shapes.large,
         ) {
             Text("Open VPN settings (Always-on / lockdown)")
         }
-        Button(
+        OutlinedButton(
             onClick = { SystemSecurityIntents.openPrivateDnsSettings(context) },
             modifier = Modifier.fillMaxWidth(),
+            shape = MaterialTheme.shapes.large,
         ) {
             Text("Open network settings (set Private DNS Off)")
         }
@@ -174,39 +179,33 @@ fun SettingsScreen(
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
 
-        Text("UDP / Tor Datagram", style = MaterialTheme.typography.titleMedium)
-        Text(
-            text = "Tor has no deployed CONNECT_UDP (prop. 339). OnionVPN policy:\n" +
+        SectionHeader(
+            title = "UDP / Tor Datagram",
+            subtitle = "Tor has no deployed CONNECT_UDP (prop. 339). OnionVPN policy:\n" +
                 "• UDP/53 → DNSCrypt over Tor (any resolver IP)\n" +
                 "• QUIC/HTTP3, STUN/WebRTC, DTLS, WireGuard, mDNS, NTP → blackhole\n" +
                 "• Apps fall back to TCP (HTTP/2, no real UDP)\n" +
                 "• Zero clearnet UDP side-channel, zero remote UDP gateway",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
 
-        Text("PAC / proxy for apps", style = MaterialTheme.typography.titleMedium)
-        Text(
-            text = "Stable URL (while tunnel is up):\n" +
+        SectionHeader(
+            title = "PAC / proxy for apps",
+            subtitle = "Stable URL (while tunnel is up):\n" +
                 "${TunnelEndpoints.pacUrl()}\n\n" +
                 "PAC points at socks5://${TunnelEndpoints.pacSocksBridge()} — a local bridge that:\n" +
                 "1. Resolves names via DNSCrypt (not Tor DNSPort / exit DNS)\n" +
                 "2. CONNECTs to Tor SocksPort by IPv4\n" +
                 ".onion hostnames skip DNSCrypt and go to Tor as hostname.\n" +
                 "Do not point apps at raw Tor SOCKS (that uses Tor DNS).",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
 
-        Text("DNS mode", style = MaterialTheme.typography.titleMedium)
-        Text(
-            text = "Clearnet names: DNSCrypt over Tor (encrypted stub, no system resolver).\n" +
+        SectionHeader(
+            title = "DNS mode",
+            subtitle = "Clearnet names: DNSCrypt over Tor (encrypted stub, no system resolver).\n" +
                 ".onion / .exit: Tor DNSPort AutomapHostsOnResolve → virtual IP in " +
                 "${TunnelEndpoints.VIRTUAL_ADDR_NETWORK}/${TunnelEndpoints.VIRTUAL_ADDR_PREFIX_LEN}, " +
                 "then SOCKS5A with the real hostname (DNSCrypt is never asked for onion).\n" +
                 "FakeDNS option is legacy — both modes divert UDP/53 through TunDnsMux.",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         Row(
             modifier = Modifier.horizontalScroll(rememberScrollState()),
@@ -249,15 +248,13 @@ fun SettingsScreen(
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
 
-        Text("Interactive firewall", style = MaterialTheme.typography.titleMedium)
-        Text(
-            text = "OpenSnitch-style prompts for new outbound connections on the TUN. " +
+        SectionHeader(
+            title = "Interactive firewall",
+            subtitle = "OpenSnitch-style prompts for new outbound connections on the TUN. " +
                 "Requests wait in a FIFO queue (one at a time) until you answer — no timeout. " +
                 "A heads-up notification shows the app icon with Accept / Deny " +
                 "(permanent rule). Tap the notification for more scope options. " +
                 "Tor circuits are isolated per app UID (SOCKS u{uid}).",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         PrefSwitch(
             label = "Enable firewall",
@@ -307,11 +304,9 @@ fun SettingsScreen(
             modifier = Modifier.fillMaxWidth(),
         )
 
-        Text(stringResource(R.string.domain_lists_title), style = MaterialTheme.typography.titleMedium)
-        Text(
-            text = stringResource(R.string.domain_lists_desc),
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        SectionHeader(
+            title = stringResource(R.string.domain_lists_title),
+            subtitle = stringResource(R.string.domain_lists_desc),
         )
         val reputation by domainReputation.status.collectAsStateWithLifecycle()
         val lastUpdate = if (reputation.lastSuccessEpochMs > 0L) {
@@ -357,13 +352,11 @@ fun SettingsScreen(
             )
         }
 
-        Text("Tor", style = MaterialTheme.typography.titleMedium)
-        Text(
-            text = "Circuit rotation (path-spec / prop. 368). Per-UID KeepAliveIsolateSOCKSAuth " +
+        SectionHeader(
+            title = "Tor",
+            subtitle = "Circuit rotation (path-spec / prop. 368). Per-UID KeepAliveIsolateSOCKSAuth " +
                 "circuits stay sticky; dirtiness mainly affects non-auth streams. " +
                 "Default Stable=600s. Live SETCONF when connected (no Tor restart).",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         Row(
             modifier = Modifier.horizontalScroll(rememberScrollState()),
@@ -462,25 +455,24 @@ fun SettingsScreen(
             label = { Text("MaxCircuitDirtiness (sec)") },
             modifier = Modifier.fillMaxWidth(),
         )
-        Button(
+        FilledTonalButton(
             onClick = {
                 torrcDraft = onLoadTorrc()
                 editingTorrc = true
             },
             modifier = Modifier.fillMaxWidth(),
+            shape = MaterialTheme.shapes.large,
         ) {
             Text("Edit torrc")
         }
 
-        Text("DNSCrypt", style = MaterialTheme.typography.titleMedium)
-        Text(
-            text = "Upstream forced through Tor SOCKS; bootstrap via Tor DNSPort; " +
+        SectionHeader(
+            title = "DNSCrypt",
+            subtitle = "Upstream forced through Tor SOCKS; bootstrap via Tor DNSPort; " +
                 "full public-resolvers catalog (${DnsCryptPublicResolvers.knownServers.size} IPv4). " +
                 "Auto uses every resolver matching the filters below.",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        Button(
+        FilledTonalButton(
             onClick = {
                 commit(
                     local.copy(
@@ -493,6 +485,7 @@ fun SettingsScreen(
                 )
             },
             modifier = Modifier.fillMaxWidth(),
+            shape = MaterialTheme.shapes.large,
         ) {
             Text("Apply hardened DNSCrypt profile")
         }
@@ -517,9 +510,10 @@ fun SettingsScreen(
             text = "Selected: ${local.dnsCryptServerName}",
             style = MaterialTheme.typography.bodyMedium,
         )
-        Button(
+        OutlinedButton(
             onClick = { pickingResolver = true },
             modifier = Modifier.fillMaxWidth(),
+            shape = MaterialTheme.shapes.large,
         ) {
             Text("Browse all DNSCrypt resolvers…")
         }
@@ -553,19 +547,23 @@ fun SettingsScreen(
             checked = local.dnsCryptRequireDnssec,
             onChecked = { commit(local.copy(dnsCryptRequireDnssec = it)) },
         )
-        Button(
+        OutlinedButton(
             onClick = {
                 tomlDraft = onLoadDnsCryptToml()
                 editingToml = true
             },
             modifier = Modifier.fillMaxWidth(),
+            shape = MaterialTheme.shapes.large,
         ) {
             Text("Edit dnscrypt-proxy.toml")
         }
 
         Button(
             onClick = { commit(local, restart = true) },
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(56.dp),
+            shape = MaterialTheme.shapes.large,
         ) {
             Text("Apply & restart tunnel")
         }
@@ -574,6 +572,7 @@ fun SettingsScreen(
                 "Text fields flush when you leave Settings. “Apply & restart tunnel” reloads " +
                 "Tor/DNSCrypt while Connected; otherwise changes apply on the next Start.",
             style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }
 }
@@ -671,7 +670,7 @@ private fun PrefSwitch(
     checked: Boolean,
     onChecked: (Boolean) -> Unit,
 ) {
-    Row(
+    Surface(
         modifier = Modifier
             .fillMaxWidth()
             .toggleable(
@@ -679,11 +678,21 @@ private fun PrefSwitch(
                 role = Role.Switch,
                 onValueChange = onChecked,
             ),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically,
+        shape = MaterialTheme.shapes.medium,
+        color = MaterialTheme.colorScheme.surfaceContainerHighest,
     ) {
-        Text(label, modifier = Modifier.weight(1f))
-        Switch(checked = checked, onCheckedChange = null)
+        Row(
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                label,
+                modifier = Modifier.weight(1f),
+                style = MaterialTheme.typography.bodyLarge,
+            )
+            Switch(checked = checked, onCheckedChange = null)
+        }
     }
 }
 
@@ -699,9 +708,9 @@ private fun ConfigEditor(
         modifier = Modifier
             .fillMaxSize()
             .padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        Text(title, style = MaterialTheme.typography.titleLarge)
+        SectionHeader(title = title)
         OutlinedTextField(
             value = text,
             onValueChange = onTextChange,
@@ -709,10 +718,23 @@ private fun ConfigEditor(
                 .fillMaxWidth()
                 .weight(1f),
             textStyle = MaterialTheme.typography.bodySmall,
+            shape = MaterialTheme.shapes.large,
         )
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(onClick = onCancel, modifier = Modifier.weight(1f)) { Text("Cancel") }
-            Button(onClick = onSave, modifier = Modifier.weight(1f)) { Text("Save") }
+            OutlinedButton(
+                onClick = onCancel,
+                modifier = Modifier
+                    .weight(1f)
+                    .height(52.dp),
+                shape = MaterialTheme.shapes.large,
+            ) { Text("Cancel") }
+            Button(
+                onClick = onSave,
+                modifier = Modifier
+                    .weight(1f)
+                    .height(52.dp),
+                shape = MaterialTheme.shapes.large,
+            ) { Text("Save") }
         }
     }
 }

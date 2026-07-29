@@ -8,19 +8,24 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.material3.Card
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.ElevatedCard
+import androidx.compose.material3.FilledTonalIconButton
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
-import ltechnologies.onionphone.onionvpn.core.model.DomainThreatCategory
 import ltechnologies.onionphone.onionvpn.core.model.FirewallJournalEntry
 import ltechnologies.onionphone.onionvpn.core.model.FirewallRule
 import ltechnologies.onionphone.onionvpn.core.model.FirewallRuleScope
@@ -30,6 +35,9 @@ import ltechnologies.onionphone.onionvpn.firewall.FirewallPromptContent
 import ltechnologies.onionphone.onionvpn.firewall.InteractiveFirewallEngine
 import ltechnologies.onionphone.onionvpn.firewall.threatLabelOrNull
 import ltechnologies.onionphone.onionvpn.firewall.threatTextColor
+import ltechnologies.onionphone.onionvpn.ui.components.EmptyStateHint
+import ltechnologies.onionphone.onionvpn.ui.components.SectionHeader
+import ltechnologies.onionphone.onionvpn.ui.components.TonalSection
 
 @Composable
 fun FirewallScreen(
@@ -48,17 +56,22 @@ fun FirewallScreen(
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         item {
-            Text("Firewall journal", style = MaterialTheme.typography.titleLarge)
-            Text(
-                "Interactive decisions for outbound connections through Tor.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            SectionHeader(
+                title = "Firewall",
+                subtitle = "Interactive decisions for outbound connections through Tor.",
             )
         }
 
         if (pending != null) {
             item {
-                Card(modifier = Modifier.fillMaxWidth()) {
+                ElevatedCard(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = MaterialTheme.shapes.large,
+                    colors = CardDefaults.elevatedCardColors(
+                        containerColor = MaterialTheme.colorScheme.primaryContainer,
+                    ),
+                    elevation = CardDefaults.elevatedCardElevation(defaultElevation = 2.dp),
+                ) {
                     FirewallPromptContent(
                         info = pending!!,
                         tempMinutes = preferences.firewallTempMinutes,
@@ -70,17 +83,24 @@ fun FirewallScreen(
             }
         } else if (queueDepth > 0) {
             item {
-                Text(
-                    "Prompt queue: $queueDepth (waiting for surface)",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.primary,
-                )
+                Surface(
+                    shape = MaterialTheme.shapes.medium,
+                    color = MaterialTheme.colorScheme.tertiaryContainer,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text(
+                        "Prompt queue: $queueDepth (waiting for surface)",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onTertiaryContainer,
+                        modifier = Modifier.padding(16.dp),
+                    )
+                }
             }
         }
 
         if (rules.isNotEmpty()) {
             item {
-                Text("Active rules", style = MaterialTheme.typography.titleMedium)
+                SectionHeader(title = "Active rules")
             }
             items(rules, key = { it.id }) { rule ->
                 RuleRow(rule = rule, onDelete = { engine.deleteRule(rule.id) })
@@ -88,14 +108,12 @@ fun FirewallScreen(
         }
 
         item {
-            Text("Timeline", style = MaterialTheme.typography.titleMedium)
+            SectionHeader(title = "Timeline")
         }
         if (journal.isEmpty()) {
             item {
-                Text(
+                EmptyStateHint(
                     "No decisions yet. Enable the firewall in Settings, then start the VPN.",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
         } else {
@@ -108,33 +126,38 @@ fun FirewallScreen(
 
 @Composable
 private fun RuleRow(rule: FirewallRule, onDelete: () -> Unit) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween,
-    ) {
-        Column(modifier = Modifier.weight(1f)) {
-            Text(
-                "${rule.appLabel} → ${ruleDisplayDest(rule)}",
-                style = MaterialTheme.typography.bodyMedium,
-            )
-            if (rule.displayHost.isNotBlank()) {
+    TonalSection {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    "IP ${rule.destHost.ifEmpty { "*" }}",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    "${rule.appLabel} → ${ruleDisplayDest(rule)}",
+                    style = MaterialTheme.typography.titleSmall,
+                )
+                if (rule.displayHost.isNotBlank()) {
+                    Text(
+                        "IP ${rule.destHost.ifEmpty { "*" }}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Text(
+                    "${verdictLabel(rule.verdict)} · ${scopeLabel(rule)}",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = if (rule.verdict == FirewallVerdict.ALLOW) {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        MaterialTheme.colorScheme.error
+                    },
                 )
             }
-            Text(
-                "${verdictLabel(rule.verdict)} · ${scopeLabel(rule)}",
-                style = MaterialTheme.typography.labelSmall,
-                color = if (rule.verdict == FirewallVerdict.ALLOW) {
-                    MaterialTheme.colorScheme.primary
-                } else {
-                    MaterialTheme.colorScheme.error
-                },
-            )
+            FilledTonalIconButton(onClick = onDelete) {
+                Icon(Icons.Filled.Delete, contentDescription = "Delete rule")
+            }
         }
-        TextButton(onClick = onDelete) { Text("Delete") }
     }
 }
 
@@ -144,41 +167,47 @@ private fun JournalRow(entry: FirewallJournalEntry) {
         .format(Date(entry.timestampEpochMs))
     val threatLabel = threatLabelOrNull(entry.threatCategory)
     val destColor = threatTextColor(entry.threatCategory)
-    Column(modifier = Modifier.fillMaxWidth()) {
-        Text(
-            "$time  ${verdictLabel(entry.verdict)}  ${entry.appLabel}",
-            style = MaterialTheme.typography.bodyMedium,
-            color = if (entry.verdict == FirewallVerdict.ALLOW) {
-                MaterialTheme.colorScheme.primary
-            } else {
-                MaterialTheme.colorScheme.error
-            },
-        )
-        Text(
-            buildString {
-                append(entry.protocolLabel)
-                append(' ')
-                append(entry.displayDestination())
-                append(':')
-                append(entry.destPort)
-                if (threatLabel != null) {
-                    append(" · ")
-                    append(threatLabel)
-                }
-                if (entry.note.isNotBlank()) {
-                    append(" · ")
-                    append(entry.note)
-                }
-            },
-            style = MaterialTheme.typography.bodySmall,
-            color = destColor,
-        )
-        if (!entry.destHost.isNullOrBlank()) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.medium,
+        color = MaterialTheme.colorScheme.surfaceContainerLow,
+    ) {
+        Column(modifier = Modifier.padding(14.dp)) {
             Text(
-                "IP ${entry.destIp}",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                "$time  ${verdictLabel(entry.verdict)}  ${entry.appLabel}",
+                style = MaterialTheme.typography.titleSmall,
+                color = if (entry.verdict == FirewallVerdict.ALLOW) {
+                    MaterialTheme.colorScheme.primary
+                } else {
+                    MaterialTheme.colorScheme.error
+                },
             )
+            Text(
+                buildString {
+                    append(entry.protocolLabel)
+                    append(' ')
+                    append(entry.displayDestination())
+                    append(':')
+                    append(entry.destPort)
+                    if (threatLabel != null) {
+                        append(" · ")
+                        append(threatLabel)
+                    }
+                    if (entry.note.isNotBlank()) {
+                        append(" · ")
+                        append(entry.note)
+                    }
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = destColor,
+            )
+            if (!entry.destHost.isNullOrBlank()) {
+                Text(
+                    "IP ${entry.destIp}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
         }
     }
 }

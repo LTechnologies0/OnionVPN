@@ -1,14 +1,35 @@
 package ltechnologies.onionphone.onionvpn.ui
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.Hub
+import androidx.compose.material.icons.filled.Shield
+import androidx.compose.material.icons.filled.SwapHoriz
+import androidx.compose.material.icons.outlined.Shield
 import androidx.compose.material3.Button
-import androidx.compose.material3.Card
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ElevatedCard
+import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.Icon
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
@@ -17,6 +38,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
@@ -28,7 +50,13 @@ import ltechnologies.onionphone.onionvpn.core.model.ValidationStatus
 import ltechnologies.onionphone.onionvpn.core.tor.control.lifecycle.CircuitLifecycleManager
 import ltechnologies.onionphone.onionvpn.core.vpn.forwarder.LeakPacketFilter
 import ltechnologies.onionphone.onionvpn.firewall.AppUidResolver
+import ltechnologies.onionphone.onionvpn.ui.components.HeroIconBadge
+import ltechnologies.onionphone.onionvpn.ui.components.MetricChip
+import ltechnologies.onionphone.onionvpn.ui.components.SectionHeader
+import ltechnologies.onionphone.onionvpn.ui.components.StatusDot
+import ltechnologies.onionphone.onionvpn.ui.components.TonalSection
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun StatusScreen(
     snapshot: TunnelSnapshot,
@@ -51,86 +79,117 @@ fun StatusScreen(
         return
     }
 
+    val connected = snapshot.phase == TunnelPhase.Connected
+    val active = connected || snapshot.phase == TunnelPhase.Blocking
+    val bootstrapping = snapshot.phase == TunnelPhase.StartingTor ||
+        snapshot.phase == TunnelPhase.StartingDnsCrypt ||
+        snapshot.phase == TunnelPhase.StartingVpn ||
+        snapshot.phase == TunnelPhase.Validating
+
     Column(
         modifier = Modifier
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
-            .padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
+            .padding(horizontal = 20.dp, vertical = 16.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
-        Text(text = "OnionVPN", style = MaterialTheme.typography.headlineMedium)
+        Text(
+            text = "OnionVPN",
+            style = MaterialTheme.typography.headlineMedium,
+        )
         Text(
             text = "v${BuildConfig.VERSION_NAME}",
-            style = MaterialTheme.typography.bodySmall,
+            style = MaterialTheme.typography.labelMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        Text(text = "Phase: ${phaseLabel(snapshot.phase)}")
-        Text(text = "Kill switch: ${if (snapshot.killSwitchEnabled) "On" else "Off"}")
-        Text(text = "Tor: ${if (snapshot.torRunning) "up" else "down"}")
-        Text(text = "DNSCrypt: ${if (snapshot.dnsCryptRunning) "up" else "down"}")
-        Text(text = "VPN: ${if (snapshot.vpnEstablished) "up" else "down"}")
-        if (snapshot.vpnEstablished) {
-            Text(
-                text = "UDP blackhole (force TCP): ${LeakPacketFilter.statsSummary()}",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-        if (snapshot.pacUrl.isNotBlank()) {
-            Text("App helpers (PAC / proxy)", style = MaterialTheme.typography.titleMedium)
-            Text(
-                text = "Stable PAC URL (DNS via DNSCrypt → Tor by IP):\n${snapshot.pacUrl}",
-                style = MaterialTheme.typography.bodySmall,
-            )
-            OutlinedButton(
-                onClick = {
-                    val cm = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE)
-                        as android.content.ClipboardManager
-                    cm.setPrimaryClip(
-                        android.content.ClipData.newPlainText("OnionVPN PAC", snapshot.pacUrl),
-                    )
+
+        ElevatedCard(
+            modifier = Modifier.fillMaxWidth(),
+            shape = MaterialTheme.shapes.extraLarge,
+            colors = CardDefaults.elevatedCardColors(
+                containerColor = if (connected) {
+                    MaterialTheme.colorScheme.primaryContainer
+                } else if (snapshot.phase == TunnelPhase.Error || snapshot.phase == TunnelPhase.Blocking) {
+                    MaterialTheme.colorScheme.errorContainer
+                } else {
+                    MaterialTheme.colorScheme.surfaceContainerHigh
                 },
-                modifier = Modifier.fillMaxWidth(),
+            ),
+            elevation = CardDefaults.elevatedCardElevation(defaultElevation = 2.dp),
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(24.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
-                Text("Copy PAC URL")
-            }
-            if (snapshot.socksProxy.isNotBlank()) {
-                Text(
-                    text = "PAC SOCKS bridge: ${snapshot.socksProxy} (DNSCrypt→Tor)\n" +
-                        "HTTPTunnelPort disabled (Tor exit DNS conflict) — use PAC only.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                HeroIconBadge(
+                    icon = if (connected) Icons.Filled.Shield else Icons.Outlined.Shield,
+                    active = connected || bootstrapping,
                 )
-                OutlinedButton(
-                    onClick = {
-                        val cm = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE)
-                            as android.content.ClipboardManager
-                        cm.setPrimaryClip(
-                            android.content.ClipData.newPlainText(
-                                "OnionVPN SOCKS",
-                                "socks5://${snapshot.socksProxy}",
-                            ),
-                        )
+                Text(
+                    text = phaseLabel(snapshot.phase),
+                    style = MaterialTheme.typography.headlineSmall,
+                    color = if (connected) {
+                        MaterialTheme.colorScheme.onPrimaryContainer
+                    } else if (snapshot.phase == TunnelPhase.Error || snapshot.phase == TunnelPhase.Blocking) {
+                        MaterialTheme.colorScheme.onErrorContainer
+                    } else {
+                        MaterialTheme.colorScheme.onSurface
                     },
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    Text("Copy socks5:// URL")
+                )
+                if (bootstrapping) {
+                    LinearProgressIndicator(
+                        progress = { (snapshot.torBootstrapProgress / 100f).coerceIn(0f, 1f) },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(6.dp),
+                    )
+                    if (snapshot.torBootstrapSummary.isNotBlank()) {
+                        Text(
+                            text = snapshot.torBootstrapSummary,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+                if (connected && snapshot.throughputText.isNotBlank()) {
+                    Text(
+                        text = snapshot.throughputText,
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.onPrimaryContainer,
+                    )
+                }
+                snapshot.lastError?.let { error ->
+                    Text(
+                        text = error,
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
                 }
             }
         }
+
+        FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            StatusDot(active = snapshot.torRunning, label = "Tor")
+            StatusDot(active = snapshot.dnsCryptRunning, label = "DNSCrypt")
+            StatusDot(active = snapshot.vpnEstablished, label = "VPN")
+            StatusDot(active = snapshot.killSwitchEnabled, label = "Kill switch")
+        }
+
         if (snapshot.torControlConnected || snapshot.torBootstrapProgress > 0) {
-            Text(
-                text = buildString {
-                    append("Control: ${if (snapshot.torControlConnected) "up" else "…"}  ")
-                    append("bootstrap ${snapshot.torBootstrapProgress}%  ")
-                    append("circuits=${snapshot.torBuiltCircuits}")
-                    if (snapshot.torCircuitEstablished) append(" (established)")
-                    append(" streams=${snapshot.torStreamCount}")
-                    if (snapshot.torNetworkLive) append(" live")
-                    if (snapshot.torDormant) append(" dormant")
-                },
-                style = MaterialTheme.typography.bodySmall,
-            )
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                MetricChip("Bootstrap", "${snapshot.torBootstrapProgress}%")
+                MetricChip("Circuits", "${snapshot.torBuiltCircuits}")
+                MetricChip("Streams", "${snapshot.torStreamCount}")
+            }
             if (snapshot.torVersion.isNotBlank()) {
                 Text(
                     text = "Tor ${snapshot.torVersion}",
@@ -138,79 +197,165 @@ fun StatusScreen(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            if (snapshot.torBootstrapSummary.isNotBlank() && snapshot.torBootstrapProgress < 100) {
-                Text(
-                    text = snapshot.torBootstrapSummary,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            if (snapshot.torEntryGuards.isNotBlank()) {
-                Text(
-                    text = "Guards: ${snapshot.torEntryGuards}",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            if (snapshot.torLastCircEvent.isNotBlank()) {
-                Text(
-                    text = "Last CIRC: ${snapshot.torLastCircEvent}",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-        }
-        if (snapshot.phase == TunnelPhase.Connected && snapshot.throughputText.isNotBlank()) {
-            Text(
-                text = snapshot.throughputText,
-                style = MaterialTheme.typography.titleMedium,
-                color = MaterialTheme.colorScheme.primary,
-            )
-        }
-        snapshot.lastError?.let { error ->
-            Text(
-                text = "Error: $error",
-                color = MaterialTheme.colorScheme.error,
-                style = MaterialTheme.typography.bodySmall,
-            )
         }
 
-        val active = snapshot.phase == TunnelPhase.Connected ||
-            snapshot.phase == TunnelPhase.Blocking
         Button(
             onClick = if (active) onStop else onStart,
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(56.dp),
             enabled = !isBusy && snapshot.phase != TunnelPhase.Stopping,
+            shape = MaterialTheme.shapes.large,
+            colors = if (active) {
+                ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.error,
+                    contentColor = MaterialTheme.colorScheme.onError,
+                )
+            } else {
+                ButtonDefaults.buttonColors()
+            },
         ) {
+            if (isBusy) {
+                CircularProgressIndicator(
+                    modifier = Modifier
+                        .height(22.dp)
+                        .padding(end = 12.dp),
+                    strokeWidth = 2.dp,
+                    color = MaterialTheme.colorScheme.onPrimary,
+                )
+            }
             Text(
                 when (snapshot.phase) {
                     TunnelPhase.Connected -> "Stop tunnel"
-                    TunnelPhase.Blocking -> "Stop (kill switch active)"
+                    TunnelPhase.Blocking -> "Stop (kill switch)"
                     else -> "Start tunnel"
                 },
+                style = MaterialTheme.typography.labelLarge,
             )
         }
-        if (snapshot.phase == TunnelPhase.Connected && onNewNym != null) {
-            Button(
-                onClick = onNewNym,
-                modifier = Modifier.fillMaxWidth(),
-                enabled = snapshot.torControlConnected,
-            ) {
-                Text("New identity (NEWNYM)")
+
+        AnimatedVisibility(visible = connected, enter = fadeIn(), exit = fadeOut()) {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                if (onNewNym != null) {
+                    FilledTonalButton(
+                        onClick = onNewNym,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(52.dp),
+                        enabled = snapshot.torControlConnected,
+                        shape = MaterialTheme.shapes.large,
+                    ) {
+                        Icon(Icons.Filled.SwapHoriz, contentDescription = null)
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("New identity")
+                    }
+                }
+                if (circuitLifecycle != null) {
+                    OutlinedButton(
+                        onClick = { showCircuits = true },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(52.dp),
+                        enabled = snapshot.torControlConnected,
+                        shape = MaterialTheme.shapes.large,
+                    ) {
+                        Icon(Icons.Filled.Hub, contentDescription = null)
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Circuits")
+                    }
+                }
             }
-            if (circuitLifecycle != null) {
+        }
+
+        if (snapshot.vpnEstablished) {
+            TonalSection {
+                SectionHeader(
+                    title = "Leak policy",
+                    subtitle = "UDP blackhole · force TCP over Tor",
+                )
+                Text(
+                    text = LeakPacketFilter.statsSummary(),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+
+        if (snapshot.pacUrl.isNotBlank()) {
+            TonalSection {
+                SectionHeader(
+                    title = "PAC / proxy helpers",
+                    subtitle = "DNS via DNSCrypt → Tor by IP",
+                )
+                Text(
+                    text = snapshot.pacUrl,
+                    style = MaterialTheme.typography.bodySmall,
+                )
                 OutlinedButton(
-                    onClick = { showCircuits = true },
+                    onClick = {
+                        val cm = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE)
+                            as android.content.ClipboardManager
+                        cm.setPrimaryClip(
+                            android.content.ClipData.newPlainText("OnionVPN PAC", snapshot.pacUrl),
+                        )
+                    },
                     modifier = Modifier.fillMaxWidth(),
-                    enabled = snapshot.torControlConnected,
+                    shape = MaterialTheme.shapes.medium,
                 ) {
-                    Text("Circuits")
+                    Icon(Icons.Filled.ContentCopy, contentDescription = null)
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Copy PAC URL")
+                }
+                if (snapshot.socksProxy.isNotBlank()) {
+                    Text(
+                        text = "SOCKS bridge ${snapshot.socksProxy}\nHTTPTunnelPort disabled — use PAC only.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    OutlinedButton(
+                        onClick = {
+                            val cm = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE)
+                                as android.content.ClipboardManager
+                            cm.setPrimaryClip(
+                                android.content.ClipData.newPlainText(
+                                    "OnionVPN SOCKS",
+                                    "socks5://${snapshot.socksProxy}",
+                                ),
+                            )
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = MaterialTheme.shapes.medium,
+                    ) {
+                        Icon(Icons.Filled.ContentCopy, contentDescription = null)
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Copy socks5:// URL")
+                    }
+                }
+            }
+        }
+
+        if (snapshot.torEntryGuards.isNotBlank() || snapshot.torLastCircEvent.isNotBlank()) {
+            TonalSection {
+                SectionHeader(title = "Tor detail")
+                if (snapshot.torEntryGuards.isNotBlank()) {
+                    Text(
+                        text = "Guards: ${snapshot.torEntryGuards}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                if (snapshot.torLastCircEvent.isNotBlank()) {
+                    Text(
+                        text = "Last CIRC: ${snapshot.torLastCircEvent}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
             }
         }
 
         if (snapshot.validations.isNotEmpty()) {
-            Text(text = "Validation", style = MaterialTheme.typography.titleMedium)
+            SectionHeader(title = "Validation")
             snapshot.validations.forEach { check ->
                 ValidationCard(check)
             }
@@ -220,29 +365,47 @@ fun StatusScreen(
 
 @Composable
 private fun ValidationCard(check: ValidationCheck) {
-    Card(modifier = Modifier.fillMaxWidth()) {
-        Column(modifier = Modifier.padding(12.dp)) {
-            Text(text = check.label, style = MaterialTheme.typography.titleSmall)
-            Text(
-                text = "${statusLabel(check.status)}: ${check.detail}",
-                color = if (check.status == ValidationStatus.Fail) {
-                    MaterialTheme.colorScheme.error
-                } else {
-                    MaterialTheme.colorScheme.onSurface
-                },
-            )
+    val tone = when (check.status) {
+        ValidationStatus.Pass -> MaterialTheme.colorScheme.secondaryContainer
+        ValidationStatus.Fail -> MaterialTheme.colorScheme.errorContainer
+        ValidationStatus.Skipped -> MaterialTheme.colorScheme.surfaceContainerHighest
+    }
+    val onTone = when (check.status) {
+        ValidationStatus.Pass -> MaterialTheme.colorScheme.onSecondaryContainer
+        ValidationStatus.Fail -> MaterialTheme.colorScheme.onErrorContainer
+        ValidationStatus.Skipped -> MaterialTheme.colorScheme.onSurfaceVariant
+    }
+    ElevatedCard(
+        modifier = Modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.large,
+        colors = CardDefaults.elevatedCardColors(containerColor = tone),
+        elevation = CardDefaults.elevatedCardElevation(defaultElevation = 0.dp),
+    ) {
+        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Text(text = check.label, style = MaterialTheme.typography.titleSmall, color = onTone)
+                Text(
+                    text = statusLabel(check.status),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = onTone,
+                )
+            }
+            Text(text = check.detail, style = MaterialTheme.typography.bodySmall, color = onTone)
         }
     }
 }
 
 private fun phaseLabel(phase: TunnelPhase): String = when (phase) {
-    TunnelPhase.Idle -> "Idle"
+    TunnelPhase.Idle -> "Ready"
     TunnelPhase.StartingTor -> "Starting Tor"
     TunnelPhase.StartingDnsCrypt -> "Starting DNSCrypt"
     TunnelPhase.StartingVpn -> "Starting VPN"
     TunnelPhase.Validating -> "Validating"
-    TunnelPhase.Connected -> "Connected"
-    TunnelPhase.Blocking -> "Kill switch (blocking)"
+    TunnelPhase.Connected -> "Protected"
+    TunnelPhase.Blocking -> "Kill switch"
     TunnelPhase.Stopping -> "Stopping"
     TunnelPhase.Error -> "Error"
 }
@@ -250,5 +413,5 @@ private fun phaseLabel(phase: TunnelPhase): String = when (phase) {
 private fun statusLabel(status: ValidationStatus): String = when (status) {
     ValidationStatus.Pass -> "Pass"
     ValidationStatus.Fail -> "Fail"
-    ValidationStatus.Skipped -> "Skipped"
+    ValidationStatus.Skipped -> "Skip"
 }

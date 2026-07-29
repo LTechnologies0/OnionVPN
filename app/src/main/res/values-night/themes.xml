@@ -1,12 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- DayNight parent so splash/window follow system dark mode before Compose paints. -->
-    <style name="Theme.OnionVPN" parent="android:Theme.Material.Light.NoActionBar">
+    <style name="Theme.OnionVPN" parent="android:Theme.Material.NoActionBar">
         <item name="android:statusBarColor">@android:color/transparent</item>
         <item name="android:navigationBarColor">@color/nav_bar</item>
         <item name="android:colorPrimary">@color/brand_primary</item>
         <item name="android:windowBackground">@color/window_background</item>
-        <item name="android:windowLightStatusBar">true</item>
-        <item name="android:windowLightNavigationBar">true</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
     </style>
 </resources>

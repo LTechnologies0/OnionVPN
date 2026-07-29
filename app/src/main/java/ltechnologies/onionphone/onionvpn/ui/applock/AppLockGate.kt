@@ -2,10 +2,19 @@ package ltechnologies.onionphone.onionvpn.ui.applock
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.LockOpen
+import androidx.compose.material.icons.outlined.Shield
 import androidx.compose.material3.Button
+import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -25,6 +34,7 @@ import ltechnologies.onionphone.onionvpn.security.AppLockAuthResult
 import ltechnologies.onionphone.onionvpn.security.AppLockAuthenticator
 import ltechnologies.onionphone.onionvpn.security.AppLockManager
 import ltechnologies.onionphone.onionvpn.security.AppLockState
+import ltechnologies.onionphone.onionvpn.ui.components.HeroIconBadge
 import ltechnologies.onionphone.onionvpn.util.SystemSecurityIntents
 
 @Composable
@@ -81,20 +91,30 @@ private fun AppLockScreen(
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(24.dp),
+            .padding(28.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp, Alignment.CenterVertically),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Text("OnionVPN locked", style = MaterialTheme.typography.headlineSmall)
+        HeroIconBadge(icon = Icons.Filled.Lock, active = true)
+        Text("OnionVPN locked", style = MaterialTheme.typography.headlineMedium)
         Text(
             "Authenticate with your device lock. The VPN tunnel keeps running in the background.",
-            style = MaterialTheme.typography.bodyMedium,
+            style = MaterialTheme.typography.bodyLarge,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         error?.let {
-            Text(it, color = MaterialTheme.colorScheme.error)
+            Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium)
         }
-        Button(onClick = { launchPrompt() }, modifier = Modifier.fillMaxWidth()) {
+        Spacer(modifier = Modifier.height(8.dp))
+        Button(
+            onClick = { launchPrompt() },
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(56.dp),
+            shape = MaterialTheme.shapes.large,
+        ) {
+            Icon(Icons.Filled.LockOpen, contentDescription = null)
+            Spacer(modifier = Modifier.width(8.dp))
             Text("Unlock")
         }
     }
@@ -106,21 +126,25 @@ private fun DeviceInsecureScreen(onContinue: () -> Unit) {
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(24.dp),
+            .padding(28.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp, Alignment.CenterVertically),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Text("No screen lock", style = MaterialTheme.typography.headlineSmall)
+        HeroIconBadge(icon = Icons.Outlined.Shield, active = false)
+        Text("No screen lock", style = MaterialTheme.typography.headlineMedium)
         Text(
             "Set a PIN, pattern, or password in Android / GrapheneOS Settings so OnionVPN can " +
                 "protect the UI. Without it, anyone with the unlocked phone can change tunnel " +
                 "settings and firewall rules.",
-            style = MaterialTheme.typography.bodyMedium,
+            style = MaterialTheme.typography.bodyLarge,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        Button(
+        FilledTonalButton(
             onClick = { SystemSecurityIntents.openSecuritySettings(context) },
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(56.dp),
+            shape = MaterialTheme.shapes.large,
         ) {
             Text("Open security settings")
         }

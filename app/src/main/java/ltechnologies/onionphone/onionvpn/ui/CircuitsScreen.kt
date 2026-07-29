@@ -3,26 +3,41 @@ package ltechnologies.onionphone.onionvpn.ui
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.AddRoad
 import androidx.compose.material3.Button
-import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.ElevatedCard
+import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
 import ltechnologies.onionphone.onionvpn.core.tor.control.lifecycle.CircuitLifecycleManager
 import ltechnologies.onionphone.onionvpn.firewall.AppUidResolver
+import ltechnologies.onionphone.onionvpn.ui.components.EmptyStateHint
+import ltechnologies.onionphone.onionvpn.ui.components.MetricChip
+import ltechnologies.onionphone.onionvpn.ui.components.SectionHeader
 
 @Composable
 fun CircuitsScreen(
@@ -45,19 +60,25 @@ fun CircuitsScreen(
     ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text("Tor circuits", style = MaterialTheme.typography.headlineSmall)
-            TextButton(onClick = onBack) { Text("Back") }
+            IconButton(onClick = onBack) {
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+            }
+            SectionHeader(
+                title = "Tor circuits",
+                subtitle = "Per-app isolation via SOCKS u{uid}. Close uses CLOSECIRCUIT IfUnused.",
+                modifier = Modifier.weight(1f),
+            )
         }
-        Text(
-            text = "${circuits.size} circuits · ${streams.size} streams. " +
-                "Per-app isolation via SOCKS u{uid}. Close uses CLOSECIRCUIT IfUnused.",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedButton(onClick = { lifecycle.refreshFromGetInfo() }) {
+            MetricChip(label = "Circuits", value = circuits.size.toString())
+            MetricChip(label = "Streams", value = streams.size.toString())
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FilledTonalButton(onClick = { lifecycle.refreshFromGetInfo() }) {
+                Icon(Icons.Filled.Refresh, contentDescription = null)
+                Spacer(Modifier.width(6.dp))
                 Text("Refresh")
             }
             OutlinedButton(
@@ -66,25 +87,31 @@ fun CircuitsScreen(
                     lifecycle.refreshFromGetInfo()
                 },
             ) {
+                Icon(Icons.Filled.AddRoad, contentDescription = null)
+                Spacer(Modifier.width(6.dp))
                 Text("Extend new")
             }
         }
-        LazyColumn(
-            modifier = Modifier.weight(1f),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            items(circuits, key = { it.info.id }) { live ->
-                CircuitCard(
-                    live = live,
-                    streamCount = live.streamIds.size,
-                    appLabel = labelForSocksUser(live.socksUsername, appUidResolver),
-                    onCloseUnused = {
-                        lifecycle.closeCircuit(live.info.id, ifUnused = true)
-                    },
-                    onCloseForce = {
-                        lifecycle.closeCircuit(live.info.id, ifUnused = false)
-                    },
-                )
+        if (circuits.isEmpty()) {
+            EmptyStateHint("No live circuits yet. Start the VPN and open an app.")
+        } else {
+            LazyColumn(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                items(circuits, key = { it.info.id }) { live ->
+                    CircuitCard(
+                        live = live,
+                        streamCount = live.streamIds.size,
+                        appLabel = labelForSocksUser(live.socksUsername, appUidResolver),
+                        onCloseUnused = {
+                            lifecycle.closeCircuit(live.info.id, ifUnused = true)
+                        },
+                        onCloseForce = {
+                            lifecycle.closeCircuit(live.info.id, ifUnused = false)
+                        },
+                    )
+                }
             }
         }
     }
@@ -99,19 +126,26 @@ private fun CircuitCard(
     onCloseForce: () -> Unit,
 ) {
     val info = live.info
-    Card(modifier = Modifier.fillMaxWidth()) {
+    ElevatedCard(
+        modifier = Modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.large,
+        colors = CardDefaults.elevatedCardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+        ),
+        elevation = CardDefaults.elevatedCardElevation(defaultElevation = 0.dp),
+    ) {
         Column(
-            modifier = Modifier.padding(12.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp),
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             Text(
                 text = "#${info.id} ${info.status}" +
                     if (live.stickyAuth) " · sticky-UID" else if (live.longLived) " · long-lived" else "",
-                style = MaterialTheme.typography.titleSmall,
+                style = MaterialTheme.typography.titleMedium,
             )
             Text(
                 text = appLabel,
-                style = MaterialTheme.typography.bodyMedium,
+                style = MaterialTheme.typography.bodyLarge,
             )
             if (info.path.isNotBlank()) {
                 Text(
@@ -123,11 +157,22 @@ private fun CircuitCard(
             Text(
                 text = "streams=$streamCount purpose=${info.purpose.ifBlank { "?" }} " +
                     "auth=${live.socksUsername ?: "—"}",
-                style = MaterialTheme.typography.labelSmall,
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+            Spacer(Modifier.height(4.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = onCloseUnused) { Text("Close if unused") }
-                OutlinedButton(onClick = onCloseForce) { Text("Force close") }
+                Button(
+                    onClick = onCloseUnused,
+                    shape = MaterialTheme.shapes.medium,
+                ) { Text("Close if unused") }
+                OutlinedButton(
+                    onClick = onCloseForce,
+                    shape = MaterialTheme.shapes.medium,
+                ) {
+                    Icon(Icons.Filled.Close, contentDescription = null, modifier = Modifier.padding(end = 4.dp))
+                    Text("Force close")
+                }
             }
         }
     }

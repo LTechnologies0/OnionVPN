@@ -52,7 +52,10 @@ fun FirewallPromptContent(
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
 
-        Card(modifier = Modifier.fillMaxWidth()) {
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            shape = MaterialTheme.shapes.large,
+        ) {
             Row(
                 modifier = Modifier.padding(16.dp),
                 verticalAlignment = Alignment.CenterVertically,
@@ -118,24 +121,28 @@ fun FirewallPromptContent(
         Button(
             onClick = { onAnswer(FirewallVerdict.ALLOW, FirewallRuleScope.PERMANENT) },
             modifier = Modifier.fillMaxWidth(),
+            shape = MaterialTheme.shapes.large,
         ) {
             Text("Allow permanently")
         }
         OutlinedButton(
             onClick = { onAnswer(FirewallVerdict.ALLOW, FirewallRuleScope.SESSION) },
             modifier = Modifier.fillMaxWidth(),
+            shape = MaterialTheme.shapes.large,
         ) {
             Text("Allow until VPN stops")
         }
         OutlinedButton(
             onClick = { onAnswer(FirewallVerdict.ALLOW, FirewallRuleScope.TEMPORARY) },
             modifier = Modifier.fillMaxWidth(),
+            shape = MaterialTheme.shapes.large,
         ) {
             Text("Allow for $tempMinutes min")
         }
         OutlinedButton(
             onClick = { onAnswer(FirewallVerdict.DENY, FirewallRuleScope.TEMPORARY) },
             modifier = Modifier.fillMaxWidth(),
+            shape = MaterialTheme.shapes.large,
             colors = ButtonDefaults.outlinedButtonColors(
                 contentColor = MaterialTheme.colorScheme.error,
             ),
@@ -145,6 +152,7 @@ fun FirewallPromptContent(
         OutlinedButton(
             onClick = { onAnswer(FirewallVerdict.DENY, FirewallRuleScope.SESSION) },
             modifier = Modifier.fillMaxWidth(),
+            shape = MaterialTheme.shapes.large,
             colors = ButtonDefaults.outlinedButtonColors(
                 contentColor = MaterialTheme.colorScheme.error,
             ),
@@ -154,6 +162,7 @@ fun FirewallPromptContent(
         Button(
             onClick = { onAnswer(FirewallVerdict.DENY, FirewallRuleScope.PERMANENT) },
             modifier = Modifier.fillMaxWidth(),
+            shape = MaterialTheme.shapes.large,
             colors = ButtonDefaults.buttonColors(
                 containerColor = MaterialTheme.colorScheme.error,
             ),

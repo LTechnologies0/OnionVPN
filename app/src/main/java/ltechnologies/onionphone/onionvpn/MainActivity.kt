@@ -5,18 +5,26 @@ import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.List
+import androidx.compose.material.icons.automirrored.filled.List
+import androidx.compose.material.icons.automirrored.outlined.List
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Shield
+import androidx.compose.material.icons.outlined.Security
+import androidx.compose.material.icons.outlined.Settings
+import androidx.compose.material.icons.outlined.Shield
 import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -25,6 +33,8 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -68,38 +78,44 @@ class MainActivity : FragmentActivity() {
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        enableEdgeToEdge()
         super.onCreate(savedInstanceState)
         setContent {
             OnionVpnTheme {
-                val snapshot by viewModel.snapshot.collectAsStateWithLifecycle()
-                val preferences by viewModel.preferences.collectAsStateWithLifecycle()
-
-                LaunchedEffect(preferences.appLockEnabled) {
-                    appLockManager.enabled = preferences.appLockEnabled
-                }
-                LaunchedEffect(preferences.allowScreenshots) {
-                    WindowSecureHelper.apply(this@MainActivity, preferences.allowScreenshots)
-                }
-
-                AppLockGate(
-                    appLockManager = appLockManager,
-                    authenticator = appLockAuthenticator,
+                Surface(
+                    modifier = Modifier.fillMaxSize(),
+                    color = MaterialTheme.colorScheme.background,
                 ) {
-                    OnionVpnApp(
-                        snapshot = snapshot,
-                        preferences = preferences,
-                        firewallEngine = firewallEngine,
-                        domainReputation = domainReputation,
-                        circuitLifecycle = circuitLifecycle,
-                        onStart = ::requestNotificationsThenStart,
-                        onStop = viewModel::stopTunnel,
-                        onNewNym = viewModel::newNym,
-                        onSavePreferences = viewModel::savePreferences,
-                        onLoadTorrc = viewModel::readTorrc,
-                        onLoadDnsCryptToml = viewModel::readDnsCryptToml,
-                        onSaveTorrc = viewModel::saveTorrc,
-                        onSaveDnsCryptToml = viewModel::saveDnsCryptToml,
-                    )
+                    val snapshot by viewModel.snapshot.collectAsStateWithLifecycle()
+                    val preferences by viewModel.preferences.collectAsStateWithLifecycle()
+
+                    LaunchedEffect(preferences.appLockEnabled) {
+                        appLockManager.enabled = preferences.appLockEnabled
+                    }
+                    LaunchedEffect(preferences.allowScreenshots) {
+                        WindowSecureHelper.apply(this@MainActivity, preferences.allowScreenshots)
+                    }
+
+                    AppLockGate(
+                        appLockManager = appLockManager,
+                        authenticator = appLockAuthenticator,
+                    ) {
+                        OnionVpnApp(
+                            snapshot = snapshot,
+                            preferences = preferences,
+                            firewallEngine = firewallEngine,
+                            domainReputation = domainReputation,
+                            circuitLifecycle = circuitLifecycle,
+                            onStart = ::requestNotificationsThenStart,
+                            onStop = viewModel::stopTunnel,
+                            onNewNym = viewModel::newNym,
+                            onSavePreferences = viewModel::savePreferences,
+                            onLoadTorrc = viewModel::readTorrc,
+                            onLoadDnsCryptToml = viewModel::readDnsCryptToml,
+                            onSaveTorrc = viewModel::saveTorrc,
+                            onSaveDnsCryptToml = viewModel::saveDnsCryptToml,
+                        )
+                    }
                 }
             }
         }
@@ -157,27 +173,37 @@ private fun OnionVpnApp(
     onSaveDnsCryptToml: (String) -> Unit,
 ) {
     var selected by remember { mutableIntStateOf(0) }
-    val destinations = listOf("Status", "Firewall", "Logs", "Settings")
+    data class Dest(
+        val label: String,
+        val selectedIcon: ImageVector,
+        val unselectedIcon: ImageVector,
+    )
+    val destinations = listOf(
+        Dest("Status", Icons.Filled.Shield, Icons.Outlined.Shield),
+        Dest("Firewall", Icons.Filled.Security, Icons.Outlined.Security),
+        Dest("Logs", Icons.AutoMirrored.Filled.List, Icons.AutoMirrored.Outlined.List),
+        Dest("Settings", Icons.Filled.Settings, Icons.Outlined.Settings),
+    )
 
     Scaffold(
+        containerColor = MaterialTheme.colorScheme.background,
         bottomBar = {
-            NavigationBar {
-                destinations.forEachIndexed { index, label ->
+            NavigationBar(
+                containerColor = MaterialTheme.colorScheme.surfaceContainer,
+                tonalElevation = 0.dp,
+            ) {
+                destinations.forEachIndexed { index, dest ->
+                    val selectedTab = selected == index
                     NavigationBarItem(
-                        selected = selected == index,
+                        selected = selectedTab,
                         onClick = { selected = index },
                         icon = {
                             Icon(
-                                imageVector = when (index) {
-                                    0 -> Icons.Filled.Shield
-                                    1 -> Icons.Filled.Security
-                                    2 -> Icons.Filled.List
-                                    else -> Icons.Filled.Settings
-                                },
-                                contentDescription = label,
+                                imageVector = if (selectedTab) dest.selectedIcon else dest.unselectedIcon,
+                                contentDescription = dest.label,
                             )
                         },
-                        label = { Text(label) },
+                        label = { Text(dest.label) },
                     )
                 }
             }

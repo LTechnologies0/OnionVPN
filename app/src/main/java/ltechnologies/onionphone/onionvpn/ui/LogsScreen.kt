@@ -12,9 +12,16 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.material3.Button
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.DeleteSweep
+import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ScrollableTabRow
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.PrimaryScrollableTabRow
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -24,7 +31,6 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
@@ -55,41 +61,54 @@ fun LogsScreen() {
     }
 
     Column(modifier = Modifier.fillMaxSize()) {
-        ScrollableTabRow(selectedTabIndex = tabIndex) {
+        PrimaryScrollableTabRow(
+            selectedTabIndex = tabIndex,
+            containerColor = MaterialTheme.colorScheme.surface,
+            edgePadding = 16.dp,
+        ) {
             tabs.forEachIndexed { index, title ->
                 Tab(
                     selected = tabIndex == index,
                     onClick = { tabIndex = index },
-                    text = { Text(title) },
+                    text = {
+                        Text(
+                            title,
+                            style = MaterialTheme.typography.labelLarge,
+                        )
+                    },
                 )
             }
         }
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 8.dp)
+                .padding(horizontal = 16.dp, vertical = 10.dp)
                 .horizontalScroll(rememberScrollState()),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Button(onClick = { TunnelLogBuffer.clear(sources[tabIndex]) }) {
-                Text("Clear")
+            FilledTonalButton(onClick = { TunnelLogBuffer.clear(sources[tabIndex]) }) {
+                Icon(Icons.Filled.Delete, contentDescription = null)
+                Text("Clear", modifier = Modifier.padding(start = 6.dp))
             }
-            Button(onClick = { TunnelLogBuffer.clearAll() }) {
-                Text("Clear all")
+            OutlinedButton(onClick = { TunnelLogBuffer.clearAll() }) {
+                Icon(Icons.Filled.DeleteSweep, contentDescription = null)
+                Text("Clear all", modifier = Modifier.padding(start = 6.dp))
             }
-            Button(
+            OutlinedButton(
                 onClick = {
                     shareLogs(context, TunnelLogBuffer.exportText(sources[tabIndex]), sources[tabIndex].name)
                 },
             ) {
-                Text("Export tab")
+                Icon(Icons.AutoMirrored.Filled.Send, contentDescription = null)
+                Text("Export tab", modifier = Modifier.padding(start = 6.dp))
             }
-            Button(
+            OutlinedButton(
                 onClick = {
                     shareLogs(context, TunnelLogBuffer.exportText(null), "all")
                 },
             ) {
-                Text("Export all")
+                Icon(Icons.AutoMirrored.Filled.Send, contentDescription = null)
+                Text("Export all", modifier = Modifier.padding(start = 6.dp))
             }
         }
         LogList(lines = lines)
@@ -129,24 +148,32 @@ private fun LogList(lines: List<LogLine>) {
     val formatter = remember {
         SimpleDateFormat("HH:mm:ss", Locale.getDefault())
     }
-    LazyColumn(
-        state = listState,
+    Surface(
         modifier = Modifier
             .fillMaxSize()
-            .padding(horizontal = 12.dp),
-        verticalArrangement = Arrangement.spacedBy(2.dp),
+            .padding(horizontal = 12.dp, vertical = 4.dp),
+        shape = MaterialTheme.shapes.large,
+        color = MaterialTheme.colorScheme.surfaceContainerLow,
     ) {
-        items(lines) { line ->
-            Text(
-                text = "${formatter.format(Date(line.timestampMs))}  ${line.text}",
-                style = MaterialTheme.typography.bodySmall,
-                color = if (line.isError) {
-                    MaterialTheme.colorScheme.error
-                } else {
-                    Color.Unspecified
-                },
-                modifier = Modifier.fillMaxWidth(),
-            )
+        LazyColumn(
+            state = listState,
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            items(lines) { line ->
+                Text(
+                    text = "${formatter.format(Date(line.timestampMs))}  ${line.text}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (line.isError) {
+                        MaterialTheme.colorScheme.error
+                    } else {
+                        MaterialTheme.colorScheme.onSurface
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
         }
     }
 }
