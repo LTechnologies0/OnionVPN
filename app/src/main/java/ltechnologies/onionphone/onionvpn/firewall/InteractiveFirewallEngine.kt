@@ -178,10 +178,16 @@ class InteractiveFirewallEngine @Inject constructor(
         val flowKey = FirewallCacheKeys.flowKey(uid, info)
         caches.flowCache[flowKey]?.let { return it == FirewallVerdict.ALLOW }
 
-        val matchDest = matchDestination(info) ?: return false // Automap without hostname
+        val matchDest = matchDestination(info)
+        if (matchDest == null) {
+            // Automap IP without hostname yet (DNS still in flight / dropped).
+            // SYN: fail-closed and wait. Mid-flow: fail-open — SYN already gated.
+            return info.isTcp && !info.isTcpSyn
+        }
 
         // Mid-flow: never open ASK/DENY prompts. Prefer sticky decision / rules when the
-        // flow-cache entry was trimmed or wiped by a remap — hard-drop only if never allowed.
+        // flow-cache entry was trimmed. Miss after an allowed SYN must NOT blackhole the
+        // live TCP (Cromite/Telegram/SimpleX) — fail-open; DENY entries are trim-sticky.
         if (info.isTcp && !info.isTcpSyn) {
             val matching = findRule(uid, matchDest, info)
             if (matching != null) {
@@ -193,7 +199,8 @@ class InteractiveFirewallEngine @Inject constructor(
                 rememberPacketFlow(flowKey, v, matchDest, info)
                 return v == FirewallVerdict.ALLOW
             }
-            return false
+            rememberPacketFlow(flowKey, FirewallVerdict.ALLOW, matchDest, info)
+            return true
         }
 
         val matching = findRule(uid, matchDest, info)

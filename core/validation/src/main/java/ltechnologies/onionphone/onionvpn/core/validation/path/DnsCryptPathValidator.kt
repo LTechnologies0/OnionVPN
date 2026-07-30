@@ -55,15 +55,17 @@ object DnsCryptPathValidator {
         val ephemeralKeys = config.contains("dnscrypt_ephemeral_keys = true")
         val noTlsTickets = config.contains("tls_disable_session_tickets = true")
         val blockIpv6 = config.contains("block_ipv6 = true")
+        val forceTcp = config.contains("force_tcp = true")
         val ok = usesBootstrap && usesNetprobe && ignoresSystemDns && usesProxy && hasListen &&
-            ephemeralKeys && noTlsTickets && blockIpv6
+            ephemeralKeys && noTlsTickets && blockIpv6 && forceTcp
         return ValidationCheck(
             id = "dnscrypt.config.runtime",
             label = "DNSCrypt config (runtime)",
             status = if (ok) ValidationStatus.Pass else ValidationStatus.Fail,
             detail = "$source: listen=$hasListen bootstrap=$usesBootstrap proxy=$usesProxy " +
                 "ignore_system_dns=$ignoresSystemDns ephemeral=$ephemeralKeys " +
-                "noTlsTickets=$noTlsTickets block_ipv6=$blockIpv6",
+                "noTlsTickets=$noTlsTickets block_ipv6=$blockIpv6 force_tcp=$forceTcp",
+            tripsKillSwitch = !ok,
         )
     }
 

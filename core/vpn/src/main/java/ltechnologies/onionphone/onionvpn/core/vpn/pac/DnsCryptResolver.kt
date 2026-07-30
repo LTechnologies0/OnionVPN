@@ -32,7 +32,7 @@ object DnsCryptResolver {
         }
         val qid = queryId.getAndIncrement() and 0xffff
         val query = buildQuery(qid, host)
-        DatagramSocket().use { socket ->
+        DatagramSocket(0, InetAddress.getByName("127.0.0.1")).use { socket ->
             socket.soTimeout = timeoutMs
             socket.send(
                 DatagramPacket(
@@ -76,7 +76,10 @@ object DnsCryptResolver {
         if (length < 12) return null
         val input = DataInputStream(ByteArrayInputStream(buf, 0, length))
         val id = input.readUnsignedShort()
-        if (id != expectId) Timber.d("DNSCrypt reply id mismatch")
+        if (id != expectId) {
+            Timber.d("DNSCrypt reply id mismatch expect=$expectId got=$id — reject")
+            return null
+        }
         input.readUnsignedShort() // flags
         val qd = input.readUnsignedShort()
         val an = input.readUnsignedShort()

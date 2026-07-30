@@ -489,11 +489,9 @@ class TorProcessManager(
         minBytes: Long,
         socksPort: Int?,
     ): Boolean = runCatching {
-        val proxy = if (socksPort != null) {
-            Proxy(Proxy.Type.SOCKS, InetSocketAddress(TunnelEndpoints.LOOPBACK, socksPort))
-        } else {
-            Proxy.NO_PROXY
-        }
+        // Never clearnet — OnionVPN is VPN-excluded; NO_PROXY would leak under kill-switch.
+        val port = socksPort ?: error("GeoIP download refused without Tor SOCKS")
+        val proxy = Proxy(Proxy.Type.SOCKS, InetSocketAddress(TunnelEndpoints.LOOPBACK, port))
         val conn = (URL(url).openConnection(proxy) as HttpURLConnection).apply {
             connectTimeout = 20_000
             readTimeout = 180_000

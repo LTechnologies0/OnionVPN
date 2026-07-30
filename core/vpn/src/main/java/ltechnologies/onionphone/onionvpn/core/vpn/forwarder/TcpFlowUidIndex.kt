@@ -56,7 +56,39 @@ object TcpFlowUidIndex {
         return q.any { now - it.atMs <= maxAgeMs }
     }
 
-    /** Newest matching flow for this destination (hev CONNECT target). */
+    /**
+     * Newest non-expired flow for this destination (hev CONNECT target).
+     *
+     * **Does not consume** — parallel CONNECTs to the same IP:port (Chrome/Telegram)
+     * must share the UID stamp. Consuming entries caused "no UID" denials and
+     * blackholed apps after the first stream.
+     */
+    fun peek(dstIp: Int, dstPort: Int): Entry? {
+        val key = destKey(dstIp, dstPort)
+        val q = byDest[key] ?: run {
+            misses.incrementAndGet()
+            return null
+        }
+        val now = System.currentTimeMillis()
+        while (true) {
+            val e = q.peekLast() ?: break
+            if (now - e.atMs <= ENTRY_TTL_MS) {
+                takes.incrementAndGet()
+                // Touch TTL so long-lived multi-stream destinations stay stampable.
+                if (now - e.atMs > ENTRY_TTL_MS / 4) {
+                    q.pollLast()
+                    q.addLast(e.copy(atMs = now))
+                }
+                return e
+            }
+            q.pollLast()
+        }
+        if (q.isEmpty()) byDest.remove(key, q)
+        misses.incrementAndGet()
+        return null
+    }
+
+    /** @deprecated Prefer [peek] — kept for tests that assert drain semantics. */
     fun take(dstIp: Int, dstPort: Int): Entry? {
         val q = byDest[destKey(dstIp, dstPort)] ?: run {
             misses.incrementAndGet()
@@ -74,6 +106,11 @@ object TcpFlowUidIndex {
         byDest.remove(destKey(dstIp, dstPort), q)
         misses.incrementAndGet()
         return null
+    }
+
+    fun peekIpv4Host(host: String, dstPort: Int): Entry? {
+        val ip = parseIpv4(host) ?: return null
+        return peek(ip, dstPort)
     }
 
     fun takeIpv4Host(host: String, dstPort: Int): Entry? {

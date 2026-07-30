@@ -125,7 +125,8 @@ object DnsCryptConfigWriter {
             require_nolog = ${preferences.dnsCryptRequireNoLog}
             require_nofilter = ${preferences.dnsCryptRequireNoFilter}
 
-            force_tcp = ${preferences.dnsCryptForceTcp}
+            # Always TCP through Tor SOCKS — UDP ASSOCIATE is not a safe DNSCrypt-over-Tor path.
+            force_tcp = true
             timeout = 15000
             keepalive = 30
             cert_refresh_delay = 240

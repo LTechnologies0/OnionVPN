@@ -48,9 +48,19 @@ class HevSocks5TunForwarder(
         torDnsPort: Int,
     ) {
         stop()
-        val useMapDns = dnsMode == DnsResolverMode.FAKE_IP_SOCKS5A
-        val divertDns = dnsMode == DnsResolverMode.DNSCRYPT_MUX
-        startWithMux(tunFd, socksPort, dnsCryptPort, torDnsPort, useMapDns, divertDns)
+        // Always divert UDP/53 via TunDnsMux. hev mapdns FakeDNS conflicts with Tor Automap
+        // + DNSCrypt and is retired from the data plane (preference key kept for migration).
+        if (dnsMode != DnsResolverMode.DNSCRYPT_MUX) {
+            Timber.i("dnsMode=$dnsMode coerced to DNSCRYPT_MUX divert (FakeDNS disabled)")
+        }
+        startWithMux(
+            tunFd = tunFd,
+            torSocksPort = socksPort,
+            dnsCryptPort = dnsCryptPort,
+            torDnsPort = torDnsPort,
+            useMapDns = false,
+            divertDns = true,
+        )
     }
 
     private fun startWithMux(

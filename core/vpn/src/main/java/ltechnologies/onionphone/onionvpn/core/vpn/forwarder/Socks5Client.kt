@@ -7,6 +7,7 @@ import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.Socket
 import java.nio.charset.StandardCharsets
+import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
 import ltechnologies.onionphone.onionvpn.core.model.stability.TorStabilityCodes
 
 /**
@@ -24,7 +25,11 @@ class Socks5Client(
 ) {
     fun connect(destHost: String, destPort: Int): Socket {
         val socket = Socket()
-        protect?.invoke(socket)
+        val protected = protect?.invoke(socket) ?: true
+        if (!protected && !isLoopback(proxyHost)) {
+            runCatching { socket.close() }
+            throw IOException("VpnService.protect failed for SOCKS $proxyHost:$proxyPort")
+        }
         socket.tcpNoDelay = true
         socket.soTimeout = 0
         socket.connect(InetSocketAddress(proxyHost, proxyPort), connectTimeoutMs)
@@ -114,5 +119,9 @@ class Socks5Client(
 
     companion object {
         private val IPV4_REGEX = Regex("""^\d{1,3}(\.\d{1,3}){3}$""")
+
+        private fun isLoopback(host: String): Boolean =
+            host == "127.0.0.1" || host.equals("localhost", ignoreCase = true) ||
+                host == "::1" || host == TunnelEndpoints.LOOPBACK
     }
 }

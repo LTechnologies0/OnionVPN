@@ -102,10 +102,9 @@ object VpnProfileBuilder {
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             builder.setMetered(false)
-            if (preferences.routeAllTrafficThroughTor) {
-                builder.allowFamily(OsConstants.AF_INET)
-                builder.allowFamily(OsConstants.AF_INET6)
-            }
+            // Always claim both families — apps must not fall back to clearnet IPv6/IPv4.
+            builder.allowFamily(OsConstants.AF_INET)
+            builder.allowFamily(OsConstants.AF_INET6)
         }
 
         builder.setConfigureIntent(configurePendingIntent(service))

@@ -8,10 +8,11 @@ import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
 import java.util.concurrent.ArrayBlockingQueue
+import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.ThreadPoolExecutor
-import java.util.concurrent.ThreadPoolExecutor.DiscardOldestPolicy
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.locks.LockSupport
 import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
 import ltechnologies.onionphone.onionvpn.core.vpn.dns.DnsHostnameCache
@@ -30,7 +31,8 @@ import timber.log.Timber
  *
  * DoS / ARM notes:
  * - DNS work uses a **bounded** pool + queue (never unbounded LinkedBlockingQueue).
- * - Saturated pool: DiscardOldestPolicy (never block TUN reader on DNS I/O).
+ * - Saturated pool: AbortPolicy + recycle (never block TUN; never silently drop
+ *   queued DNS without recycling — DiscardOldest leaked buffers and starved apps).
  * - Per-worker reused DatagramSocket + reply buffers (ThreadLocal) — no open/close per query.
  * - Packet handoff uses a small free-list of MTU buffers.
  * - No per-packet [FileOutputStream.flush].
@@ -63,6 +65,7 @@ class TunDnsMux(
     private val dnsCryptAddress: InetAddress = InetAddress.getByName(dnsCryptHost)
     private val torDnsAddress: InetAddress = InetAddress.getByName(torDnsHost)
     private val packetPool = ArrayBlockingQueue<ByteArray>(DNS_QUEUE_CAP)
+    private val dnsRejectSample = AtomicLong(0)
 
     private val dnsExecutor = ThreadPoolExecutor(
         DNS_CORE_THREADS,
@@ -71,7 +74,7 @@ class TunDnsMux(
         TimeUnit.SECONDS,
         ArrayBlockingQueue(DNS_QUEUE_CAP),
         { r -> Thread(r, "onionvpn-dns").apply { isDaemon = true } },
-        DiscardOldestPolicy(),
+        ThreadPoolExecutor.AbortPolicy(),
     ).apply {
         allowCoreThreadTimeOut(true)
     }
@@ -106,11 +109,18 @@ class TunDnsMux(
                             // Clearnet UDP/53 → DNSCrypt; .onion/.exit → Tor DNSPort (in handleDnsQuery).
                             snoopDnsOutbound(buf, n)
                             val packet = borrowPacket(buf, n)
-                            dnsExecutor.execute {
-                                try {
-                                    handleDnsQuery(packet, n, localTunOut)
-                                } finally {
-                                    recyclePacket(packet)
+                            try {
+                                dnsExecutor.execute {
+                                    try {
+                                        handleDnsQuery(packet, n, localTunOut)
+                                    } finally {
+                                        recyclePacket(packet)
+                                    }
+                                }
+                            } catch (_: RejectedExecutionException) {
+                                recyclePacket(packet)
+                                if ((dnsRejectSample.incrementAndGet() and 0x3F) == 0L) {
+                                    Timber.w("TunDnsMux DNS pool saturated — dropping query")
                                 }
                             }
                         }
@@ -339,7 +349,9 @@ class TunDnsMux(
             if (length <= dnsOffset) return
 
             val queryLen = length - dnsOffset
-            val qname = DnsPacketParser.parse(packet, dnsOffset, queryLen)?.qname
+            val parsedQuery = DnsPacketParser.parse(packet, dnsOffset, queryLen)
+            val qname = parsedQuery?.qname
+            val expectId = parsedQuery?.queryId ?: -1
             val useTorAutomap = TunnelEndpoints.isOnionLikeHostname(qname.orEmpty())
             if (useTorAutomap && torDnsPort <= 0) {
                 Timber.d("Onion DNS dropped — Tor DNSPort not configured q=$qname")
@@ -350,6 +362,7 @@ class TunDnsMux(
 
             val scratch = checkNotNull(dnsScratch.get())
             val socket = scratch.socket()
+            socket.soTimeout = DNS_TIMEOUT_MS
             socket.send(
                 DatagramPacket(
                     packet,
@@ -359,8 +372,33 @@ class TunDnsMux(
                     upstreamPort,
                 ),
             )
+            // Shared ThreadLocal socket can still hold a late reply from a prior timeout —
+            // only accept responses whose DNS ID matches this query (prevents Automap/cache poison).
             val response = DatagramPacket(scratch.responseBuf, scratch.responseBuf.size)
-            socket.receive(response)
+            val deadlineNs = System.nanoTime() + DNS_TIMEOUT_MS * 1_000_000L
+            var matched = false
+            while (System.nanoTime() < deadlineNs) {
+                val remainingMs = ((deadlineNs - System.nanoTime()) / 1_000_000L).coerceAtLeast(1L)
+                socket.soTimeout = remainingMs.toInt().coerceAtMost(DNS_TIMEOUT_MS)
+                try {
+                    socket.receive(response)
+                } catch (_: java.net.SocketTimeoutException) {
+                    break
+                }
+                if (expectId < 0 || response.length < 2) continue
+                val respId =
+                    ((scratch.responseBuf[0].toInt() and 0xff) shl 8) or
+                        (scratch.responseBuf[1].toInt() and 0xff)
+                if (respId == expectId) {
+                    matched = true
+                    break
+                }
+                Timber.d("TunDnsMux DNS id mismatch expect=$expectId got=$respId — skip stale")
+            }
+            if (!matched) {
+                Timber.d("DNS forward timeout/mismatch — query dropped q=$qname")
+                return
+            }
 
             // Attribute resolved A records → QNAME (Automap virtual IP → .onion for SOCKS5A).
             learnFromDnsPayload(scratch.responseBuf, 0, response.length)
@@ -452,7 +490,8 @@ class TunDnsMux(
         fun socket(): DatagramSocket {
             val existing = socket
             if (existing != null && !existing.isClosed) return existing
-            return DatagramSocket().also {
+            // Bind loopback — never let the stub pick a clearnet interface.
+            return DatagramSocket(0, InetAddress.getByName(TunnelEndpoints.LOOPBACK)).also {
                 it.soTimeout = DNS_TIMEOUT_MS
                 socket = it
             }
@@ -467,8 +506,8 @@ class TunDnsMux(
         private const val EMPTY_READ_BASE_NS = 200_000L // 0.2ms base, exponential cap ~51ms
         private val DNS_CORE_THREADS =
             Runtime.getRuntime().availableProcessors().coerceIn(2, 4)
-        private val DNS_MAX_THREADS = (DNS_CORE_THREADS + 2).coerceAtMost(6)
-        private const val DNS_QUEUE_CAP = 64
+        private val DNS_MAX_THREADS = (DNS_CORE_THREADS + 4).coerceAtMost(8)
+        private const val DNS_QUEUE_CAP = 256
         private const val PENDING_QNAME_CAP = 512
 
         private val dnsScratch = ThreadLocal.withInitial { DnsScratch() }

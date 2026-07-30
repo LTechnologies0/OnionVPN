@@ -155,12 +155,12 @@ class SocksUidBridge(
     }
 
     private fun resolveUidForConnect(host: String, port: Int): Int {
-        TcpFlowUidIndex.takeIpv4Host(host, port)?.uid?.let { return it }
-        // Brief retry: SYN stamp may race hev's SOCKS open.
+        // Peek (non-consuming): parallel streams to the same dest must not steal the stamp.
+        TcpFlowUidIndex.peekIpv4Host(host, port)?.uid?.let { return it }
+        // Retry: SYN stamp may race hev's SOCKS open under load.
         repeat(UID_RETRY) {
             LockSupport.parkNanos(UID_PARK_NS)
-            // single park per item 14 spec: 4ms once after first miss — covered by UID_RETRY=2
-            TcpFlowUidIndex.takeIpv4Host(host, port)?.uid?.let { return it }
+            TcpFlowUidIndex.peekIpv4Host(host, port)?.uid?.let { return it }
         }
         return Process.INVALID_UID
     }
@@ -257,18 +257,18 @@ class SocksUidBridge(
     private fun newClientExecutor(): ThreadPoolExecutor =
         ThreadPoolExecutor(
             0,
-            64,
+            96,
             60L,
             TimeUnit.SECONDS,
-            ArrayBlockingQueue(128),
+            ArrayBlockingQueue(512),
             { r -> Thread(r, "onionvpn-uid-socks").apply { isDaemon = true } },
             // Never run handleClient on accept thread (would stall accept under load).
             ThreadPoolExecutor.AbortPolicy(),
         ).apply { allowCoreThreadTimeOut(true) }
 
     companion object {
-        private const val UID_RETRY = 2
-        private const val UID_PARK_NS = 4_000_000L // 4ms
+        private const val UID_RETRY = 5
+        private const val UID_PARK_NS = 3_000_000L // 3ms × 5 ≈ 15ms race window
         private val ipv4Scratch = ThreadLocal.withInitial { ByteArray(4) }
         private val replyAddrScratch = ThreadLocal.withInitial { ByteArray(4) }
     }

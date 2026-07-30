@@ -167,9 +167,9 @@ object TunnelEndpoints {
 /**
  * How app DNS is resolved while the VPN is up.
  *
- * Both modes divert VPN DNS (UDP/53) to DNSCrypt whose upstream is Tor SOCKS
- * (no clearnet stub resolver). [FAKE_IP_SOCKS5A] is a legacy preference key —
- * hev mapdns FakeDNS is no longer in the data plane.
+ * Both preference values divert VPN DNS (UDP/53) through [TunDnsMux] → DNSCrypt /
+ * Tor Automap. [FAKE_IP_SOCKS5A] is a legacy key only — hev mapdns is disabled
+ * (it conflicted with Automap virtual IPs and the UID SOCKS bridge).
  */
 enum class DnsResolverMode {
     DNSCRYPT_MUX,

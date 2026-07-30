@@ -61,7 +61,7 @@ internal class FirewallVerdictCaches {
     }
 
     private fun trimFlowCache() {
-            // Prefer trimming ALLOW over DENY (DENY miss used to open the mid-flow gate).
+            // Prefer trimming ALLOW; DENY stays sticky so mid-flow miss can fail-open safely.
             var n = 0
             val it = flowCache.entries.iterator()
             while (it.hasNext() && n < FLOW_TRIM_BUDGET) {
@@ -116,8 +116,8 @@ internal class FirewallVerdictCaches {
     }
 
     companion object {
-        private const val MAX_FLOW_CACHE = 8_000
-        private const val MAX_DECISION_CACHE = 4_000
+        private const val MAX_FLOW_CACHE = 16_000
+        private const val MAX_DECISION_CACHE = 8_000
         private const val FLOW_TRIM_BUDGET = 128
         private const val DECISION_TRIM_BUDGET = 64
     }

@@ -15,6 +15,17 @@ class TcpFlowUidIndexTest {
     }
 
     @Test
+    fun peekKeepsStampForParallelConnects() {
+        TcpFlowUidIndex.note(info(srcPort = 40000, dstIp = 0x08080808, dstPort = 443), uid = 10100)
+        val a = TcpFlowUidIndex.peek(0x08080808, 443)
+        val b = TcpFlowUidIndex.peek(0x08080808, 443)
+        assertNotNull(a)
+        assertNotNull(b)
+        assertEquals(10100, a!!.uid)
+        assertEquals(10100, b!!.uid)
+    }
+
+    @Test
     fun takeReturnsNewestUidForDestination() {
         val synA = info(srcPort = 40000, dstIp = 0x08080808, dstPort = 443)
         val synB = info(srcPort = 40001, dstIp = 0x08080808, dstPort = 443)
