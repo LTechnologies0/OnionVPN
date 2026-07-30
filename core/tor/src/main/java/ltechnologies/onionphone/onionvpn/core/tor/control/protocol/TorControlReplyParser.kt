@@ -36,4 +36,31 @@ internal object TorControlReplyParser {
         }
         return out.toString().trimEnd()
     }
+
+    /**
+     * True for a control-spec terminal reply line (`250 ` / `251 ` / `4xx ` / `5xx `).
+     *
+     * Must not match GETINFO data-body lines such as `517 EXTENDED …` (circuit id 517) —
+     * those are only safe when the transport ignores terminals inside a `250+` … `.` block.
+     */
+    fun isTerminalReplyLine(line: String): Boolean {
+        if (line.startsWith("250 ") || line.startsWith("251 ")) return true
+        return isErrorReplyLine(line)
+    }
+
+    /** True for a 3-digit `4xx`/`5xx` status line (space after the code). */
+    fun isErrorReplyLine(line: String): Boolean {
+        if (line.length < 4 || line[3] != ' ') return false
+        val c0 = line[0]
+        if (c0 != '4' && c0 != '5') return false
+        return line[1].isDigit() && line[2].isDigit()
+    }
+
+    /** Start of a `250+key=` multi-line value block. */
+    fun isMultilineDataStart(line: String): Boolean =
+        line.length >= 4 &&
+            line[0] == '2' &&
+            line[1] == '5' &&
+            line[2] == '0' &&
+            line[3] == '+'
 }

@@ -7,10 +7,12 @@ import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.Socket
 import java.nio.charset.StandardCharsets
+import ltechnologies.onionphone.onionvpn.core.model.stability.TorStabilityCodes
 
 /**
  * Minimal SOCKS5 client with USERNAME/PASSWORD auth (RFC 1928 / 1929).
  * Used for IsolateSOCKSAuth tokens (path-spec strong isolation).
+ * SOCKS reply codes use [TorStabilityCodes.SocksReply] (RFC 1928 + Tor F0–F7).
  */
 class Socks5Client(
     private val proxyHost: String,
@@ -98,7 +100,10 @@ class Socks5Client(
         input.skipBytes(2) // bind port
         if (respVer != 0x05 || respStatus != 0x00) {
             socket.close()
-            throw IOException("SOCKS5 CONNECT failed status=$respStatus")
+            val signal = TorStabilityCodes.SocksReply.signalFor(respStatus)
+            throw IOException(
+                "SOCKS5 CONNECT failed status=$respStatus (${signal.detail.ifBlank { signal.code }})",
+            )
         }
         return socket
     }

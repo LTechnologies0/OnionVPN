@@ -1,6 +1,9 @@
 package ltechnologies.onionphone.onionvpn.ui
 
+import android.graphics.drawable.Drawable
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -8,14 +11,15 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.AddRoad
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.filled.AddRoad
 import androidx.compose.material3.Button
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ElevatedCard
@@ -28,11 +32,15 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.unit.dp
+import androidx.core.graphics.drawable.toBitmap
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
+import ltechnologies.onionphone.onionvpn.core.tor.control.geo.RelayCountryLookup
 import ltechnologies.onionphone.onionvpn.core.tor.control.lifecycle.CircuitLifecycleManager
 import ltechnologies.onionphone.onionvpn.firewall.AppUidResolver
 import ltechnologies.onionphone.onionvpn.ui.components.EmptyStateHint
@@ -100,10 +108,12 @@ fun CircuitsScreen(
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
                 items(circuits, key = { it.info.id }) { live ->
+                    val uid = live.socksUsername?.let { TunnelEndpoints.uidFromSocksUser(it) }
                     CircuitCard(
                         live = live,
                         streamCount = live.streamIds.size,
                         appLabel = labelForSocksUser(live.socksUsername, appUidResolver),
+                        appIcon = uid?.takeIf { it >= 0 }?.let { appUidResolver.iconDrawable(it) },
                         onCloseUnused = {
                             lifecycle.closeCircuit(live.info.id, ifUnused = true)
                         },
@@ -122,6 +132,7 @@ private fun CircuitCard(
     live: CircuitLifecycleManager.LiveCircuit,
     streamCount: Int,
     appLabel: String,
+    appIcon: Drawable?,
     onCloseUnused: () -> Unit,
     onCloseForce: () -> Unit,
 ) {
@@ -134,47 +145,84 @@ private fun CircuitCard(
         ),
         elevation = CardDefaults.elevatedCardElevation(defaultElevation = 0.dp),
     ) {
-        Column(
-            modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            Text(
-                text = "#${info.id} ${info.status}" +
-                    if (live.stickyAuth) " · sticky-UID" else if (live.longLived) " · long-lived" else "",
-                style = MaterialTheme.typography.titleMedium,
-            )
-            Text(
-                text = appLabel,
-                style = MaterialTheme.typography.bodyLarge,
-            )
-            if (info.path.isNotBlank()) {
-                Text(
-                    text = shortenPath(info.path),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+        Box(modifier = Modifier.fillMaxWidth()) {
+            if (appIcon != null) {
+                val bmp = remember(appIcon) { appIcon.toBitmap(96, 96).asImageBitmap() }
+                Image(
+                    bitmap = bmp,
+                    contentDescription = appLabel,
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(12.dp)
+                        .size(40.dp),
                 )
             }
-            Text(
-                text = "streams=$streamCount purpose=${info.purpose.ifBlank { "?" }} " +
-                    "auth=${live.socksUsername ?: "—"}",
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Spacer(Modifier.height(4.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(
-                    onClick = onCloseUnused,
-                    shape = MaterialTheme.shapes.medium,
-                ) { Text("Close if unused") }
-                OutlinedButton(
-                    onClick = onCloseForce,
-                    shape = MaterialTheme.shapes.medium,
-                ) {
-                    Icon(Icons.Filled.Close, contentDescription = null, modifier = Modifier.padding(end = 4.dp))
-                    Text("Force close")
+            Column(
+                modifier = Modifier.padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text(
+                    text = "#${info.id} ${info.status}" +
+                        if (live.stickyAuth) {
+                            " · sticky-UID"
+                        } else if (live.longLived) {
+                            " · long-lived"
+                        } else {
+                            ""
+                        },
+                    style = MaterialTheme.typography.titleMedium,
+                    modifier = Modifier.padding(end = if (appIcon != null) 48.dp else 0.dp),
+                )
+                Text(
+                    text = appLabel,
+                    style = MaterialTheme.typography.bodyLarge,
+                    modifier = Modifier.padding(end = if (appIcon != null) 48.dp else 0.dp),
+                )
+                val pathText = formatHops(live.hops).ifBlank {
+                    if (info.path.isNotBlank()) shortenPath(info.path) else ""
+                }
+                if (pathText.isNotBlank()) {
+                    Text(
+                        text = pathText,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Text(
+                    text = "streams=$streamCount purpose=${info.purpose.ifBlank { "?" }} " +
+                        "auth=${live.socksUsername ?: "—"}",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(4.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(
+                        onClick = onCloseUnused,
+                        shape = MaterialTheme.shapes.medium,
+                    ) { Text("Close if unused") }
+                    OutlinedButton(
+                        onClick = onCloseForce,
+                        shape = MaterialTheme.shapes.medium,
+                    ) {
+                        Icon(
+                            Icons.Filled.Close,
+                            contentDescription = null,
+                            modifier = Modifier.padding(end = 4.dp),
+                        )
+                        Text("Force close")
+                    }
                 }
             }
         }
+    }
+}
+
+private fun formatHops(hops: List<RelayCountryLookup.Hop>): String {
+    if (hops.isEmpty()) return ""
+    return hops.joinToString(" → ") { hop ->
+        val flag = RelayCountryLookup.flagEmoji(hop.countryCode)
+        val nick = hop.nickname.take(20)
+        if (flag.isNotEmpty()) "$flag $nick" else nick
     }
 }
 

@@ -23,7 +23,7 @@ Privacy-focused Android VPN that routes **all device traffic through Tor**, with
 | Tor | SOCKS + DNSPort (ephemeral ports), SafeSocks depending on DNS mode |
 | DNSCrypt | App DNS via TunDnsMux; upstream via Tor SOCKS; bootstrap via Tor DNSPort |
 | VPN | `OnionVpnService` + hev-socks5-tunnel; client `10.8.0.2`, DNS `10.8.0.1` |
-| Firewall | `InteractiveFirewallEngine` on the TUN; DNS hostname cache + HaGeZi reputation for prompt UI |
+| Firewall | `InteractiveFirewallEngine` on the TUN; DNS hostname cache + local reputation DB (HaGeZi / URLhaus / Yoyo / uAssets) for prompt UI |
 
 Modules: `app`, `core:model`, `core:tor`, `core:dnscrypt`, `core:vpn`, `core:validation`.
 

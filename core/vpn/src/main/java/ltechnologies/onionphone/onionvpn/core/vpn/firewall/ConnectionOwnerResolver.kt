@@ -8,6 +8,7 @@ import android.system.OsConstants
 import java.io.File
 import java.net.InetAddress
 import java.net.InetSocketAddress
+import java.net.Socket
 import timber.log.Timber
 
 /**
@@ -31,6 +32,28 @@ class ConnectionOwnerResolver(context: Context) {
             return resolveApi29Once(info)
         }
         return resolveProcNet(info)
+    }
+
+    /**
+     * UID of the peer that connected to an accepted loopback server socket (PAC SOCKS).
+     * Uses the app's 5-tuple view: local=peer ephemeral, remote=listen port.
+     */
+    fun resolveAcceptedClientUid(client: Socket): Int {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            return Process.INVALID_UID
+        }
+        val peer = client.remoteSocketAddress as? InetSocketAddress ?: return Process.INVALID_UID
+        val local = client.localSocketAddress as? InetSocketAddress ?: return Process.INVALID_UID
+        return try {
+            @Suppress("NewApi")
+            connectivity.getConnectionOwnerUid(OsConstants.IPPROTO_TCP, peer, local)
+        } catch (error: SecurityException) {
+            Timber.w(error, "getConnectionOwnerUid denied for PAC client")
+            Process.INVALID_UID
+        } catch (error: Exception) {
+            Timber.w(error, "getConnectionOwnerUid failed for PAC client")
+            Process.INVALID_UID
+        }
     }
 
     private fun resolveApi29Once(info: IpPacketInfo): Int {

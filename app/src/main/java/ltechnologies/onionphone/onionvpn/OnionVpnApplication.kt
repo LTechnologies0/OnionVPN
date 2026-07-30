@@ -17,7 +17,7 @@ import ltechnologies.onionphone.onionvpn.logging.LogSource
 import ltechnologies.onionphone.onionvpn.logging.ProcessLogSeverity
 import ltechnologies.onionphone.onionvpn.logging.TunnelLogBuffer
 import ltechnologies.onionphone.onionvpn.logging.TunnelLogTree
-import ltechnologies.onionphone.onionvpn.threat.DomainReputationRepository
+import ltechnologies.onionphone.onionvpn.threat.repo.DomainReputationRepository
 import timber.log.Timber
 
 @HiltAndroidApp

@@ -71,11 +71,34 @@ object TorControlCatalog {
         USR1("USR1", "Unix USR1"),
         USR2("USR2", "Unix USR2"),
         TERM("TERM", "Unix TERM"),
-        NEWNYM("NEWNYM", "New circuits + clear client DNS"),
-        CLEARDNSCACHE("CLEARDNSCACHE", "Forget client DNS cache"),
+        NEWNYM("NEWNYM", "New circuits + clear client DNS (already includes CLEARDNSCACHE)"),
+        CLEARDNSCACHE("CLEARDNSCACHE", "Forget client DNS cache (without new circuits)"),
         HEARTBEAT("HEARTBEAT", "Force heartbeat log"),
         ACTIVE("ACTIVE", "Leave dormant (after net change)"),
         DORMANT("DORMANT", "Idle / battery when Blocking"),
+    }
+
+    /**
+     * CLOSESTREAM reason — must be a **decimal** RELAY_END code (control-spec §3.14 /
+     * tor-spec closing-streams). Named strings like `DONE` are rejected (512/552).
+     * Full catalog + severity: [ltechnologies.onionphone.onionvpn.core.model.stability.TorStabilityCodes.StreamEnd].
+     */
+    object StreamEndReason {
+        const val MISC = "1"
+        const val RESOLVEFAILED = "2"
+        const val CONNECTREFUSED = "3"
+        const val EXITPOLICY = "4"
+        const val DESTROY = "5"
+        /** REASON_DONE — normal anonymized TCP close. */
+        const val DONE = "6"
+        const val TIMEOUT = "7"
+        const val NOROUTE = "8"
+        const val HIBERNATING = "9"
+        const val INTERNAL = "10"
+        const val RESOURCELIMIT = "11"
+        const val CONNRESET = "12"
+        const val TORPROTOCOL = "13"
+        const val NOTDIRECTORY = "14"
     }
 
     /**

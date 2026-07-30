@@ -12,6 +12,7 @@ import java.nio.charset.StandardCharsets
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import ltechnologies.onionphone.onionvpn.core.tor.control.protocol.TorControlReplyParser
 import timber.log.Timber
 
 /**
@@ -42,6 +43,8 @@ internal class TorControlTransport(
     private var replyBuffer: MutableList<String>? = null
     private var replyLatch: CountDownLatch? = null
     private var replyError: IOException? = null
+    /** Inside a `250+…` / `.` data block — body lines must not be treated as `5xx` terminals. */
+    private var inMultilineData: Boolean = false
 
     /** True while the reader loop is expected to run. */
     val isOpen: Boolean get() = running.get()
@@ -83,6 +86,7 @@ internal class TorControlTransport(
                 replyBuffer = mutableListOf()
                 replyError = null
                 replyLatch = latch
+                inMultilineData = false
             }
             w.write(cmd)
             w.write("\r\n")
@@ -120,6 +124,7 @@ internal class TorControlTransport(
             replyLatch?.countDown()
             replyLatch = null
             replyBuffer = null
+            inMultilineData = false
         }
     }
 
@@ -139,14 +144,22 @@ internal class TorControlTransport(
                             replyLatch?.countDown()
                             replyLatch = null
                             replyBuffer = null
+                            inMultilineData = false
                             return@synchronized
                         }
+                        if (TorControlReplyParser.isMultilineDataStart(line)) {
+                            inMultilineData = true
+                        }
                         buf.add(line)
-                        val terminal = line.startsWith("250 ") ||
-                            line.startsWith("251 ") ||
-                            (line.length >= 4 && line[0] == '5' && line[3] == ' ')
-                        if (terminal) {
-                            if (line.startsWith("5")) {
+                        if (inMultilineData) {
+                            if (line == ".") {
+                                inMultilineData = false
+                            }
+                            // Body lines (e.g. "517 EXTENDED …") are never command terminals.
+                            return@synchronized
+                        }
+                        if (TorControlReplyParser.isTerminalReplyLine(line)) {
+                            if (TorControlReplyParser.isErrorReplyLine(line)) {
                                 replyError = IOException(line)
                             }
                             replyLatch?.countDown()

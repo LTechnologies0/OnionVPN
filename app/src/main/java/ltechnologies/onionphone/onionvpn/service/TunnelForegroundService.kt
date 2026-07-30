@@ -36,7 +36,6 @@ import ltechnologies.onionphone.onionvpn.core.model.TunnelSnapshot
 import ltechnologies.onionphone.onionvpn.core.model.ValidationCheck
 import ltechnologies.onionphone.onionvpn.core.model.ValidationStatus
 import ltechnologies.onionphone.onionvpn.core.tor.control.TorControlHealth
-import ltechnologies.onionphone.onionvpn.core.tor.control.model.TorControlStatus
 import ltechnologies.onionphone.onionvpn.core.tor.TorProcessManager
 import ltechnologies.onionphone.onionvpn.core.validation.TunnelValidator
 import ltechnologies.onionphone.onionvpn.core.vpn.OnionVpnService
@@ -44,7 +43,9 @@ import ltechnologies.onionphone.onionvpn.core.vpn.net.TorBandwidthSampler
 import ltechnologies.onionphone.onionvpn.core.vpn.pac.PacProxyServer
 import ltechnologies.onionphone.onionvpn.firewall.InteractiveFirewallEngine
 import ltechnologies.onionphone.onionvpn.prefs.TunnelPreferencesStore
-import ltechnologies.onionphone.onionvpn.threat.DomainReputationRepository
+import ltechnologies.onionphone.onionvpn.service.lifecycle.TunnelStabilityRecovery
+import ltechnologies.onionphone.onionvpn.service.lifecycle.TunnelThroughputTracker
+import ltechnologies.onionphone.onionvpn.threat.repo.DomainReputationRepository
 import timber.log.Timber
 import java.net.InetSocketAddress
 import java.net.Socket
@@ -76,13 +77,10 @@ class TunnelForegroundService : Service() {
     private var forwarderWatchJob: Job? = null
     private var preferences = TunnelPreferences()
     private var runtimePorts: TunnelRuntimePorts? = null
-    private var throughputText = ""
-    /** Cumulative Tor `traffic/read` at last throughput sample (all circuits). */
-    private var lastTrafficReadBytes = -1L
-    /** Cumulative Tor `traffic/written` at last throughput sample (all circuits). */
-    private var lastTrafficWriteBytes = -1L
-    private var lastTrafficAtMs = 0L
     private val bandwidthSampler by lazy { TorBandwidthSampler(applicationInfo.uid) }
+    private val throughputTracker by lazy { TunnelThroughputTracker(bandwidthSampler) }
+    private val stabilityRecovery by lazy { TunnelStabilityRecovery(tor) }
+    private val throughputText: String get() = throughputTracker.displayText
     private val notifications by lazy { TunnelNotifications(this) }
     private val vpnBridge by lazy { TunnelVpnBridge(this) }
     private val pacServer by lazy { PacProxyServer() }
@@ -514,7 +512,7 @@ class TunnelForegroundService : Service() {
         releaseBootstrapWakeLock()
         if (resetSnapshot) {
             runtimePorts = null
-            throughputText = ""
+            throughputTracker.reset()
             _snapshot.value = TunnelSnapshot()
         }
     }
@@ -619,11 +617,7 @@ class TunnelForegroundService : Service() {
 
     private fun startThroughputUpdates() {
         throughputJob?.cancel()
-        bandwidthSampler.reset()
-        throughputText = ""
-        lastTrafficReadBytes = -1L
-        lastTrafficWriteBytes = -1L
-        lastTrafficAtMs = 0L
+        throughputTracker.reset()
         var ticks = 0
         throughputJob = scope.launch {
             while (isActive) {
@@ -644,75 +638,29 @@ class TunnelForegroundService : Service() {
                     tor.refreshControlTraffic()
                 }
                 val st = tor.controlStatus.value
+                if (phase == TunnelPhase.Connected && st.connected) {
+                    stabilityRecovery.maybeApply(st)
+                }
                 val builtLive = circuitLifecycle.liveCircuits.value.count {
                     it.info.status.equals("BUILT", ignoreCase = true)
                 }
                 if (phase == TunnelPhase.Connected && st.connected) {
-                    throughputText = formatAggregateThroughput(
+                    throughputTracker.formatAggregate(
                         st,
                         builtCircuits = if (st.connected) builtLive else st.builtCircuits,
                     )
                 } else if (phase == TunnelPhase.Connected) {
-                    throughputText = bandwidthSampler.sample().displayText
+                    throughputTracker.sampleUidFallback()
                 }
                 updateSnapshot(phase)
             }
         }
     }
 
-    /**
-     * Builds the notification/Status throughput line from **all Tor circuits combined**.
-     *
-     * Priority: cumulative traffic/read|written deltas → control BW event → UID TrafficStats.
-     */
-    private fun formatAggregateThroughput(
-        st: TorControlStatus,
-        builtCircuits: Int = st.builtCircuits,
-    ): String {
-        val now = System.currentTimeMillis()
-        var trafficDown = 0L
-        var trafficUp = 0L
-        if (lastTrafficAtMs > 0L &&
-            lastTrafficReadBytes >= 0L &&
-            st.readBytes >= lastTrafficReadBytes &&
-            st.writeBytes >= lastTrafficWriteBytes
-        ) {
-            val elapsedSec = ((now - lastTrafficAtMs).coerceAtLeast(1L)) / 1000.0
-            trafficDown = ((st.readBytes - lastTrafficReadBytes) / elapsedSec).toLong()
-            trafficUp = ((st.writeBytes - lastTrafficWriteBytes) / elapsedSec).toLong()
-        }
-        lastTrafficReadBytes = st.readBytes
-        lastTrafficWriteBytes = st.writeBytes
-        lastTrafficAtMs = now
-
-        val down: Long
-        val up: Long
-        when {
-            trafficDown > 0L || trafficUp > 0L -> {
-                down = trafficDown
-                up = trafficUp
-            }
-            st.lastBwReadPerSec > 0L || st.lastBwWritePerSec > 0L -> {
-                down = st.lastBwReadPerSec
-                up = st.lastBwWritePerSec
-            }
-            else -> {
-                val sample = bandwidthSampler.sample()
-                return "${sample.displayText}  · $builtCircuits circuits"
-            }
-        }
-        return "Tor ▼ ${TunnelSnapshotBuilder.formatRate(down)}  ▲ ${TunnelSnapshotBuilder.formatRate(up)}" +
-            "  · $builtCircuits circuits"
-    }
-
     private fun stopThroughputUpdates() {
         throughputJob?.cancel()
         throughputJob = null
-        throughputText = ""
-        bandwidthSampler.reset()
-        lastTrafficReadBytes = -1L
-        lastTrafficWriteBytes = -1L
-        lastTrafficAtMs = 0L
+        throughputTracker.reset()
     }
 
     private fun acquireBootstrapWakeLock() {
@@ -789,6 +737,7 @@ class TunnelForegroundService : Service() {
         private const val FULL_VALIDATION_TICKS = 10
         /** UI throughput tick; BW events fill rates without GETINFO each tick. */
         private const val THROUGHPUT_INTERVAL_MS = 2_000L
+        /** Min gap between catalog-driven soft/hard Tor recoveries. */
         /** Every N ticks → lite GETINFO (dormant / liveness). ~10s */
         private const val LITE_CONTROL_REFRESH_TICKS = 5
         /** Every N ticks → circuit/stream dump. ~20s at 2s ticks (Status must track Circuits). */

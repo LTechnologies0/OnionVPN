@@ -11,8 +11,10 @@ class TunnelLogTree : Timber.Tree() {
 
         val prefix = tag?.let { "[$it] " }.orEmpty()
         val text = if (t != null) "$prefix$message (${t.message})" else "$prefix$message"
+        // Keyword heuristics only for WARN+ — DEBUG lines like "DNSCrypt probe … timeout"
+        // must not light up as errors in the UI.
         val isError = priority >= Log.ERROR ||
-            ProcessLogSeverity.isError(LogSource.APP, text)
+            (priority >= Log.WARN && ProcessLogSeverity.isError(LogSource.APP, text))
         TunnelLogBuffer.append(LogSource.APP, text, isError = isError)
     }
 }

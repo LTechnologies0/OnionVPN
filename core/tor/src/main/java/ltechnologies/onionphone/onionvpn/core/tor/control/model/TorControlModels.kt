@@ -65,6 +65,13 @@ data class TorControlStatus(
     val lastBwWritePerSec: Long = 0L,
     /** Last control-plane error message, if any. */
     val lastError: String? = null,
+    /**
+     * Latest recovery hint from STREAM/CIRC/ORCONN REASON= catalogs
+     * ([ltechnologies.onionphone.onionvpn.core.model.stability.StabilityAction] name).
+     */
+    val lastStabilityAction: String = "",
+    /** Wire code that produced [lastStabilityAction] (e.g. NOROUTE, SOCKS_3). */
+    val lastStabilityCode: String = "",
 )
 
 /**

@@ -155,9 +155,9 @@ object SystemLeakInspector {
         } else {
             ValidationCheck(
                 id = "android.captive_portal",
-                label = "Captive portal detection off",
-                status = ValidationStatus.Fail,
-                detail = "captive_portal_mode=$mode — probes may leak on underlying net. " +
+                label = "Captive portal detection",
+                status = ValidationStatus.Skipped,
+                detail = "captive_portal_mode=$mode (advisory: set 0 to avoid clearnet probes). " +
                     "ADB: settings put global captive_portal_mode 0",
                 tripsKillSwitch = false,
             )

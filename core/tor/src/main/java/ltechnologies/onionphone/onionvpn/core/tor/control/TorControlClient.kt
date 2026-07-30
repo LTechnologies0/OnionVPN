@@ -2,6 +2,8 @@ package ltechnologies.onionphone.onionvpn.core.tor.control
 
 import java.io.File
 import java.io.IOException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -9,7 +11,11 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.yield
 import ltechnologies.onionphone.onionvpn.core.tor.control.catalog.TorControlCatalog
 import ltechnologies.onionphone.onionvpn.core.tor.control.model.TorCircuitInfo
 import ltechnologies.onionphone.onionvpn.core.tor.control.model.TorControlEvent
@@ -17,6 +23,7 @@ import ltechnologies.onionphone.onionvpn.core.tor.control.model.TorControlStatus
 import ltechnologies.onionphone.onionvpn.core.tor.control.model.TorStreamInfo
 import ltechnologies.onionphone.onionvpn.core.tor.control.ops.TorControlOperations
 import ltechnologies.onionphone.onionvpn.core.tor.control.protocol.TorControlEventParser
+import ltechnologies.onionphone.onionvpn.core.tor.control.protocol.TorControlWire
 import ltechnologies.onionphone.onionvpn.core.tor.control.transport.TorControlTransport
 import timber.log.Timber
 
@@ -153,11 +160,46 @@ class TorControlClient {
         newCircuitPeriodSec: Int,
     ): Result<Unit> = ops.setCircuitTiming(maxCircuitDirtinessSec, newCircuitPeriodSec)
     fun resolve(hostname: String, timeoutMs: Long = 15_000): Result<String> =
-        ops.resolve(hostname, timeoutMs)
+        resolveViaAddrMap(hostname, timeoutMs)
+
+    /**
+     * control-spec RESOLVE: answers arrive as ADDRMAP events (preferred), with
+     * address-mappings/cache poll as fallback if the event was missed.
+     */
+    private fun resolveViaAddrMap(hostname: String, timeoutMs: Long): Result<String> = runCatching {
+        val host = TorControlWire.requireHostname(hostname)
+        runBlocking {
+            val waiter = async(Dispatchers.Unconfined) {
+                events.first { ev ->
+                    ev is TorControlEvent.AddrMap &&
+                        ev.address.equals(host, ignoreCase = true)
+                } as TorControlEvent.AddrMap
+            }
+            yield()
+            ops.sendResolve(host).getOrThrow()
+            try {
+                withTimeout(timeoutMs) {
+                    val map = waiter.await()
+                    if (map.newAddress.isBlank() || map.newAddress == "<error>") {
+                        throw IOException("RESOLVE failed for $host")
+                    }
+                    map.newAddress
+                }
+            } catch (timeout: kotlinx.coroutines.TimeoutCancellationException) {
+                waiter.cancel()
+                ops.pollResolveMapping(host)
+                    ?: throw IOException("RESOLVE timeout for $host")
+            }
+        }
+    }
+
     fun extendNewCircuit(): Result<String> = ops.extendNewCircuit()
     fun closeCircuit(id: String, ifUnused: Boolean = true): Result<Unit> =
         ops.closeCircuit(id, ifUnused)
-    fun closeStream(id: String, reason: String = "DONE"): Result<Unit> =
+    fun closeStream(
+        id: String,
+        reason: String = TorControlCatalog.StreamEndReason.DONE,
+    ): Result<Unit> =
         ops.closeStream(id, reason)
     fun listCircuits(): List<TorCircuitInfo> = ops.listCircuits()
     fun listStreams(): List<TorStreamInfo> = ops.listStreams()

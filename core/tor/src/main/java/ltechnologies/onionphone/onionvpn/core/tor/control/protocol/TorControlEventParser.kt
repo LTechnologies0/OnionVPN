@@ -1,5 +1,8 @@
 package ltechnologies.onionphone.onionvpn.core.tor.control.protocol
 
+import ltechnologies.onionphone.onionvpn.core.model.stability.StabilityAction
+import ltechnologies.onionphone.onionvpn.core.model.stability.StabilityClassifier
+import ltechnologies.onionphone.onionvpn.core.model.stability.StabilitySignal
 import ltechnologies.onionphone.onionvpn.core.tor.control.model.TorControlEvent
 import ltechnologies.onionphone.onionvpn.core.tor.control.model.TorControlStatus
 
@@ -64,9 +67,10 @@ internal object TorControlEventParser {
         payload.startsWith("STREAM ") -> parseStream(payload)
         payload.startsWith("ORCONN ") -> parseOrConn(payload)
         payload.startsWith("ADDRMAP ") -> {
-            val parts = payload.split(' ')
-            if (parts.size >= 4) {
-                Result(TorControlEvent.AddrMap(parts[1], parts[2], parts[3]))
+            // Address SP NewAddress SP Expiry — Expiry may be quoted with spaces.
+            val parts = TorStatusListParser.tokenize(payload.removePrefix("ADDRMAP "))
+            if (parts.size >= 3) {
+                Result(TorControlEvent.AddrMap(parts[0], parts[1], parts[2]))
             } else {
                 Result()
             }
@@ -126,9 +130,22 @@ internal object TorControlEventParser {
             event = event,
             statusPatch = { status ->
                 if (st == "FAILED" || st == "CLOSED") {
+                    val signal = if (st == "FAILED") {
+                        StabilityClassifier.forCircReason(reason)
+                    } else {
+                        null
+                    }
                     status.copy(
                         failedCircuitsRecent = status.failedCircuitsRecent + 1,
                         lastCircEvent = "$st $id ${reason.orEmpty()}".trim(),
+                        lastStabilityAction = signal?.let { meaningfulAction(it) }
+                            ?.ifEmpty { status.lastStabilityAction }
+                            ?: status.lastStabilityAction,
+                        lastStabilityCode = if (signal != null && signal.action != StabilityAction.NONE) {
+                            signal.code
+                        } else {
+                            status.lastStabilityCode
+                        },
                     )
                 } else {
                     status.copy(lastCircEvent = "$st $id")
@@ -161,9 +178,22 @@ internal object TorControlEventParser {
             event = event,
             statusPatch = { status ->
                 if (st == "FAILED" || st == "CLOSED") {
+                    val signal = if (st == "FAILED") {
+                        StabilityClassifier.forStreamReason(reason)
+                    } else {
+                        null
+                    }
                     status.copy(
                         failedStreamsRecent = status.failedStreamsRecent + 1,
                         lastStreamEvent = "$st $target",
+                        lastStabilityAction = signal?.let { meaningfulAction(it) }
+                            ?.ifEmpty { status.lastStabilityAction }
+                            ?: status.lastStabilityAction,
+                        lastStabilityCode = if (signal != null && signal.action != StabilityAction.NONE) {
+                            signal.code
+                        } else {
+                            status.lastStabilityCode
+                        },
                     )
                 } else {
                     status.copy(lastStreamEvent = "$st $target")
@@ -184,9 +214,20 @@ internal object TorControlEventParser {
                 if (st == "CONNECTED") {
                     status.copy(orConnCount = status.orConnCount + 1)
                 } else {
-                    status
+                    val signal = StabilityClassifier.forOrConnReason(reason)
+                    status.copy(
+                        lastStabilityAction = meaningfulAction(signal).ifEmpty { status.lastStabilityAction },
+                        lastStabilityCode = if (signal.action != StabilityAction.NONE) {
+                            signal.code
+                        } else {
+                            status.lastStabilityCode
+                        },
+                    )
                 }
             },
         )
     }
+
+    private fun meaningfulAction(signal: StabilitySignal): String =
+        if (signal.action == StabilityAction.NONE) "" else signal.action.name
 }

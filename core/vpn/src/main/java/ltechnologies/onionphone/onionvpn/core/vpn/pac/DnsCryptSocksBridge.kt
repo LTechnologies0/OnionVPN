@@ -13,6 +13,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
+import ltechnologies.onionphone.onionvpn.core.vpn.firewall.FirewallBridge
 import ltechnologies.onionphone.onionvpn.core.vpn.forwarder.Socks5Client
 import timber.log.Timber
 
@@ -124,8 +125,19 @@ class DnsCryptSocksBridge(
                     return
                 }
 
+                val resolvedIp: String
                 val remote: Socket = if (TunnelEndpoints.isOnionLikeHostname(host)) {
-                    // Onion / .exit → Tor SOCKS5A (DNSCrypt has no HSDir / Automap).
+                    resolvedIp = ""
+                    if (!FirewallBridge.engine.allowSocksConnect(
+                            uid = resolveClientUid(c),
+                            destHost = host,
+                            destIp = "",
+                            destPort = port,
+                        )
+                    ) {
+                        reply(output, 0x02, InetAddress.getByName("0.0.0.0"), 0) // not allowed
+                        return
+                    }
                     Socks5Client(
                         proxyHost = TunnelEndpoints.LOOPBACK,
                         proxyPort = torPort,
@@ -138,12 +150,23 @@ class DnsCryptSocksBridge(
                         dnsCryptHost = TunnelEndpoints.LOOPBACK,
                         dnsCryptPort = dnsPort,
                     )
+                    resolvedIp = ip.hostAddress ?: ip.hostName
+                    if (!FirewallBridge.engine.allowSocksConnect(
+                            uid = resolveClientUid(c),
+                            destHost = host,
+                            destIp = resolvedIp,
+                            destPort = port,
+                        )
+                    ) {
+                        reply(output, 0x02, InetAddress.getByName("0.0.0.0"), 0)
+                        return
+                    }
                     Socks5Client(
                         proxyHost = TunnelEndpoints.LOOPBACK,
                         proxyPort = torPort,
                         username = TunnelEndpoints.SOCKS_PAC_USER,
                         password = TunnelEndpoints.SOCKS_PAC_PASS,
-                    ).connect(ip.hostAddress ?: ip.hostName, port)
+                    ).connect(resolvedIp, port)
                 }
 
                 reply(output, 0x00, InetAddress.getByName("0.0.0.0"), 0)
@@ -222,4 +245,7 @@ class DnsCryptSocksBridge(
         }
         t.join(5_000)
     }
+
+    private fun resolveClientUid(client: Socket): Int =
+        FirewallBridge.resolveSocksClientUid?.invoke(client) ?: -1
 }

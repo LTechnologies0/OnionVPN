@@ -19,9 +19,13 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
 import ltechnologies.onionphone.onionvpn.core.tor.control.TorControlClient
+import ltechnologies.onionphone.onionvpn.core.tor.control.catalog.TorControlCatalog
+import ltechnologies.onionphone.onionvpn.core.tor.control.geo.RelayCountryLookup
 import ltechnologies.onionphone.onionvpn.core.tor.control.model.TorCircuitInfo
 import ltechnologies.onionphone.onionvpn.core.tor.control.model.TorControlEvent
 import ltechnologies.onionphone.onionvpn.core.tor.control.model.TorStreamInfo
+import ltechnologies.onionphone.onionvpn.core.model.stability.StabilityAction
+import ltechnologies.onionphone.onionvpn.core.model.stability.StabilityClassifier
 import timber.log.Timber
 
 /**
@@ -49,6 +53,7 @@ class CircuitLifecycleManager(
         /** KeepAliveIsolateSOCKSAuth domain — never auto-torn for short streams. */
         val stickyAuth: Boolean = false,
         val longLived: Boolean = false,
+        val hops: List<RelayCountryLookup.Hop> = emptyList(),
     )
 
     data class LiveStream(
@@ -66,6 +71,7 @@ class CircuitLifecycleManager(
     private val circuits = ConcurrentHashMap<String, LiveCircuit>()
     /** Circuit ids waiting for idle grace before CLOSECIRCUIT IfUnused. */
     private val pendingIdleClose = ConcurrentHashMap<String, Long>()
+    private val countryLookup = RelayCountryLookup(control)
 
     private val _circuits = MutableStateFlow<List<LiveCircuit>>(emptyList())
     val liveCircuits: StateFlow<List<LiveCircuit>> = _circuits.asStateFlow()
@@ -135,6 +141,7 @@ class CircuitLifecycleManager(
                     streamByCirc[c.id].orEmpty().any { streamLongLived(it.id, now) } ||
                     sids.size > 1
                 if (sids.isNotEmpty()) pendingIdleClose.remove(c.id)
+                val hops = hopsFor(c.path, existing)
                 circuits[c.id] = LiveCircuit(
                     info = c,
                     streamIds = sids,
@@ -143,6 +150,7 @@ class CircuitLifecycleManager(
                     lastActivityMs = if (sids.isNotEmpty()) now else (existing?.lastActivityMs ?: now),
                     stickyAuth = sticky,
                     longLived = longLived,
+                    hops = hops,
                 )
             }
             val liveIds = circList.map { it.id }.toSet()
@@ -211,6 +219,19 @@ class CircuitLifecycleManager(
                 if (circId != null && circId != "0") {
                     maybeScheduleIdleClose(circId, removed, now, streamFailed = event.status == "FAILED")
                 }
+                if (event.status == "FAILED") {
+                    val signal = StabilityClassifier.forStreamReason(event.reason)
+                    when (signal.action) {
+                        StabilityAction.SOFT_RECOVER, StabilityAction.HARD_RECOVER ->
+                            Timber.d(
+                                "STREAM FAILED id=%s reason=%s action=%s",
+                                event.id,
+                                signal.code,
+                                signal.action,
+                            )
+                        else -> Unit
+                    }
+                }
             }
         }
         publish()
@@ -249,6 +270,7 @@ class CircuitLifecycleManager(
                     lastActivityMs = now,
                     stickyAuth = sticky,
                     longLived = sticky || prev?.longLived == true,
+                    hops = hopsFor(event.path, prev),
                 )
             }
         }
@@ -290,7 +312,14 @@ class CircuitLifecycleManager(
             lastActivityMs = now,
             stickyAuth = sticky,
             longLived = longLived,
+            hops = prev?.hops.orEmpty(),
         )
+    }
+
+    private fun hopsFor(path: String, prev: LiveCircuit?): List<RelayCountryLookup.Hop> {
+        if (path.isBlank()) return prev?.hops.orEmpty()
+        if (prev != null && prev.info.path == path && prev.hops.isNotEmpty()) return prev.hops
+        return countryLookup.hopsForPath(path)
     }
 
     /**
@@ -370,7 +399,7 @@ class CircuitLifecycleManager(
         Timber.i("App gone — closing circuits for socks auth $socksUser")
         streams.values.filter { it.socksUsername == socksUser || it.info.socksUsername == socksUser }
             .forEach { s ->
-                control.closeStream(s.info.id, "DONE")
+                control.closeStream(s.info.id, TorControlCatalog.StreamEndReason.DONE)
             }
         circuits.values.filter { it.socksUsername == socksUser }
             .forEach { c ->

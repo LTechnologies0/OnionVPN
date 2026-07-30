@@ -6,6 +6,7 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
+import android.graphics.drawable.Drawable
 import android.os.Build
 import android.os.Process
 import androidx.core.content.ContextCompat
@@ -218,6 +219,13 @@ class AppUidResolver(
         pm.getApplicationLabel(ai).toString().ifBlank { null }
     } catch (_: Exception) {
         null
+    }
+
+    /** App icon for circuit / firewall cards; null when package unknown. */
+    fun iconDrawable(uid: Int): Drawable? {
+        val id = resolve(uid)
+        if (!id.confident || id.packageName.startsWith("android.uid.")) return null
+        return runCatching { pm.getApplicationIcon(id.packageName) }.getOrNull()
     }
 
     private fun applicationInfo(pkg: String): ApplicationInfo? = try {

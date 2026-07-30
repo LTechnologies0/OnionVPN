@@ -38,6 +38,8 @@ object TorConfigWriter {
      * Hex contents authenticate [ltechnologies.onionphone.onionvpn.core.tor.control.TorControlClient].
      */
     const val COOKIE_FILE_NAME = "control_auth_cookie"
+    const val GEOIP_FILE_NAME = "geoip"
+    const val GEOIP6_FILE_NAME = "geoip6"
 
     /**
      * Full SOCKS isolation (DestAddr+DestPort) — probes / DNSCrypt only.
@@ -118,6 +120,15 @@ object TorConfigWriter {
         appendLine("CookieAuthentication 1")
         appendLine("CookieAuthFile ${File(dataDirectory, COOKIE_FILE_NAME).absolutePath}")
         appendLine("ControlSocket ${File(dataDirectory, CONTROL_SOCKET_NAME).absolutePath}")
+
+        val geoIp = File(dataDirectory, GEOIP_FILE_NAME)
+        val geoIp6 = File(dataDirectory, GEOIP6_FILE_NAME)
+        if (geoIp.isFile && geoIp.length() > 0L) {
+            appendLine("GeoIPFile ${geoIp.absolutePath}")
+        }
+        if (geoIp6.isFile && geoIp6.length() > 0L) {
+            appendLine("GeoIPv6File ${geoIp6.absolutePath}")
+        }
 
         appendLine("ClientRejectInternalAddresses 1")
         appendLine("AllowNonRFC953Hostnames 0")

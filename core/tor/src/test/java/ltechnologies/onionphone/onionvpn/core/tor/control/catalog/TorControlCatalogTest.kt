@@ -66,6 +66,13 @@ class TorControlCatalogTest {
     }
 
     @Test
+    fun streamEndReason_doneIsDecimalSix() {
+        // control-spec CLOSESTREAM + tor-spec RELAY_END REASON_DONE
+        assertEquals("6", TorControlCatalog.StreamEndReason.DONE)
+        assertTrue(TorControlCatalog.StreamEndReason.DONE.all { it.isDigit() })
+    }
+
+    @Test
     fun commands_includeNativeVpnSurface() {
         val wires = TorControlCatalog.Command.entries.map { it.wire }.toSet()
         assertTrue(

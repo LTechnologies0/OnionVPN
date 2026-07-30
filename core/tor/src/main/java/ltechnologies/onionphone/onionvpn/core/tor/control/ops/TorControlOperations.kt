@@ -5,6 +5,7 @@ import ltechnologies.onionphone.onionvpn.core.tor.control.catalog.TorControlCata
 import ltechnologies.onionphone.onionvpn.core.tor.control.model.TorCircuitInfo
 import ltechnologies.onionphone.onionvpn.core.tor.control.model.TorStreamInfo
 import ltechnologies.onionphone.onionvpn.core.tor.control.protocol.TorControlReplyParser
+import ltechnologies.onionphone.onionvpn.core.tor.control.protocol.TorControlWire
 import ltechnologies.onionphone.onionvpn.core.tor.control.protocol.TorStatusListParser
 import ltechnologies.onionphone.onionvpn.core.tor.control.transport.TorControlTransport
 
@@ -35,12 +36,14 @@ internal class TorControlOperations(
 
     fun signal(signal: TorControlCatalog.Signal): Result<Unit> = signal(signal.wire)
 
-    fun newNym(): Result<Unit> = signal(TorControlCatalog.Signal.NEWNYM).also {
-        runCatching { signal(TorControlCatalog.Signal.CLEARDNSCACHE) }
-    }
+    /**
+     * SIGNAL NEWNYM only — control-spec already clears the client DNS cache with NEWNYM;
+     * a follow-up CLEARDNSCACHE is redundant.
+     */
+    fun newNym(): Result<Unit> = signal(TorControlCatalog.Signal.NEWNYM)
 
     /**
-     * Rate-limited NEWNYM (control-spec: Tor rejects rapid NEWNYM ~10s with 551).
+     * Rate-limited NEWNYM (control-spec: Tor MAY rate-limit; ~10s → 551 in practice).
      * @return failure with message if called too soon
      */
     fun newNymRateLimited(minIntervalMs: Long = NEWNYM_MIN_INTERVAL_MS): Result<Unit> {
@@ -106,7 +109,7 @@ internal class TorControlOperations(
                 } else {
                     line
                 }
-                "Bridge=\"$v\""
+                "Bridge=${TorControlWire.quotedString(v)}"
             }
             transport.command("SETCONF UseBridges=1 $bridges")
         }
@@ -114,24 +117,45 @@ internal class TorControlOperations(
     }
 
     /**
-     * Tor-side DNS (async ADDRMAP). Polls address-mappings/all briefly until hit or timeout.
+     * Issues RESOLVE (control-spec §3.20). Answer arrives asynchronously via ADDRMAP;
+     * [awaitResolveMapping] / client event wait should observe it. This only sends the command.
+     */
+    fun sendResolve(hostname: String): Result<Unit> = runCatching {
+        val host = TorControlWire.requireHostname(hostname)
+        transport.command("RESOLVE $host")
+        Unit
+    }
+
+    /**
+     * Fallback poll of address-mappings/cache after RESOLVE (prefer ADDRMAP events).
+     */
+    fun pollResolveMapping(hostname: String): String? {
+        val host = TorControlWire.requireHostname(hostname)
+        val maps = runCatching { getInfo("address-mappings/cache") }.getOrDefault("")
+        maps.lineSequence().forEach { line ->
+            val parts = line.trim().split(' ')
+            if (parts.size >= 2 && parts[0].equals(host, ignoreCase = true)) {
+                val mapped = parts[1]
+                if (mapped.isNotBlank() && mapped != "<error>") return mapped
+            }
+        }
+        return null
+    }
+
+    /**
+     * Tor-side DNS: RESOLVE + poll address-mappings/cache (ADDRMAP is preferred at client).
      */
     fun resolve(hostname: String, timeoutMs: Long = 15_000): Result<String> = runCatching {
-        transport.command("RESOLVE $hostname")
+        val host = TorControlWire.requireHostname(hostname)
+        sendResolve(host).getOrThrow()
         val deadline = System.currentTimeMillis() + timeoutMs
         var sleepMs = 50L
         while (System.currentTimeMillis() < deadline) {
-            val maps = getInfo("address-mappings/all")
-            maps.lineSequence().forEach { line ->
-                val parts = line.trim().split(' ')
-                if (parts.size >= 2 && parts[0].equals(hostname, ignoreCase = true)) {
-                    return@runCatching parts[1]
-                }
-            }
+            pollResolveMapping(host)?.let { return@runCatching it }
             Thread.sleep(sleepMs)
             sleepMs = (sleepMs * 2).coerceAtMost(400L)
         }
-        throw IOException("RESOLVE timeout for $hostname")
+        throw IOException("RESOLVE timeout for $host")
     }
 
     fun extendNewCircuit(): Result<String> = runCatching {
@@ -140,13 +164,23 @@ internal class TorControlOperations(
     }
 
     fun closeCircuit(id: String, ifUnused: Boolean = true): Result<Unit> = runCatching {
+        val circId = TorControlWire.requireCircuitOrStreamId(id, "CircuitID")
         val flags = if (ifUnused) " IfUnused" else ""
-        transport.command("CLOSECIRCUIT $id$flags")
+        transport.command("CLOSECIRCUIT $circId$flags")
         Unit
     }
 
-    fun closeStream(id: String, reason: String = "DONE"): Result<Unit> = runCatching {
-        transport.command("CLOSESTREAM $id $reason")
+    fun closeStream(
+        id: String,
+        reason: String = TorControlCatalog.StreamEndReason.DONE,
+    ): Result<Unit> = runCatching {
+        val streamId = TorControlWire.requireCircuitOrStreamId(id, "StreamID")
+        // control-spec: Reason is a decimal RELAY_END code — not a name like "DONE".
+        val code = reason.trim()
+        if (code.isEmpty() || !code.all { it.isDigit() }) {
+            throw IOException("CLOSESTREAM reason must be decimal RELAY_END code, got: $reason")
+        }
+        transport.command("CLOSESTREAM $streamId $code")
         Unit
     }
 
@@ -160,7 +194,7 @@ internal class TorControlOperations(
         var closed = 0
         listCircuits().forEach { circ ->
             if (circ.status == "BUILT" || circ.status == "EXTENDED" || circ.status == "GUARD_WAIT") {
-                runCatching { transport.command("CLOSECIRCUIT ${circ.id}") }
+                runCatching { closeCircuit(circ.id, ifUnused = false).getOrThrow() }
                 closed++
             }
         }
@@ -203,8 +237,10 @@ internal class TorControlOperations(
             val v = value.trim()
             if (v.isEmpty()) {
                 transport.command("RESETCONF $key")
+            } else if (v.any { it == '\r' || it == '\n' }) {
+                throw IOException("invalid SETCONF $key value (CRLF)")
             } else {
-                transport.command("SETCONF $key=\"$v\"")
+                transport.command("SETCONF $key=${TorControlWire.quotedString(v)}")
             }
         }
         conf("EntryNodes", entry)

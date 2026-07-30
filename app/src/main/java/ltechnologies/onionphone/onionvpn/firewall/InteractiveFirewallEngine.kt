@@ -37,7 +37,10 @@ import ltechnologies.onionphone.onionvpn.core.vpn.firewall.IpPacketInfo
 import ltechnologies.onionphone.onionvpn.core.vpn.firewall.IpPacketParser
 import ltechnologies.onionphone.onionvpn.core.vpn.firewall.PacketFirewall
 import ltechnologies.onionphone.onionvpn.prefs.TunnelPreferencesStore
-import ltechnologies.onionphone.onionvpn.threat.DomainReputationRepository
+import ltechnologies.onionphone.onionvpn.firewall.engine.FirewallCacheKeys
+import ltechnologies.onionphone.onionvpn.firewall.engine.FirewallRuleMatcher
+import ltechnologies.onionphone.onionvpn.firewall.engine.FirewallVerdictCaches
+import ltechnologies.onionphone.onionvpn.threat.repo.DomainReputationRepository
 import timber.log.Timber
 
 /**
@@ -67,11 +70,7 @@ class InteractiveFirewallEngine @Inject constructor(
     private val preferences = AtomicReference(TunnelPreferences())
     private val rules = AtomicReference<List<FirewallRule>>(emptyList())
 
-    private val flowCache = ConcurrentHashMap<Long, FirewallVerdict>()
-    private val decisionCache = ConcurrentHashMap<Long, FirewallVerdict>()
-    /** Reverse index so Automap remaps can drop only related sticky entries. */
-    private val destDecisionKeys = ConcurrentHashMap<String, MutableSet<Long>>()
-    private val destFlowKeys = ConcurrentHashMap<String, MutableSet<Long>>()
+    private val caches = FirewallVerdictCaches()
 
     /** ruleKey → queued or active prompt (dedupe). */
     private val pendingByKey = ConcurrentHashMap<String, QueuedPrompt>()
@@ -100,11 +99,12 @@ class InteractiveFirewallEngine @Inject constructor(
     fun start() {
         promptNotifier.ensureChannel()
         appUidResolver.start()
+        FirewallBridge.resolveSocksClientUid = { sock -> ownerResolver.resolveAcceptedClientUid(sock) }
         FirewallBridge.onAutomapRemap = { ip, oldHost, newHost ->
             // Scoped only — never wipe every ALLOWED flow (CDN remaps used to blackhole mid-TCP).
-            invalidateDestination(ip)
-            invalidateDestination(oldHost)
-            invalidateDestination(newHost)
+            caches.invalidateDestination(ip)
+            caches.invalidateDestination(oldHost)
+            caches.invalidateDestination(newHost)
         }
         scope.launch {
             for (entry in journalChannel) {
@@ -130,10 +130,7 @@ class InteractiveFirewallEngine @Inject constructor(
         scope.launch {
             rulesStore.removeWhere { it.scope == FirewallRuleScope.SESSION }
         }
-        flowCache.clear()
-        decisionCache.clear()
-        destDecisionKeys.clear()
-        destFlowKeys.clear()
+        caches.clearAll()
         synchronized(queueLock) {
             waitQueue.clear()
             pendingByKey.clear()
@@ -170,20 +167,20 @@ class InteractiveFirewallEngine @Inject constructor(
         }
 
         val matchDest = matchDestination(info) ?: return false // Automap without hostname
-        val flowKey = flowKey(uid, info)
-        flowCache[flowKey]?.let { return it == FirewallVerdict.ALLOW }
+        val flowKey = FirewallCacheKeys.flowKey(uid, info)
+        caches.flowCache[flowKey]?.let { return it == FirewallVerdict.ALLOW }
 
         // Mid-flow: never open ASK/DENY prompts. Prefer sticky decision / rules when the
         // flow-cache entry was trimmed or wiped by a remap — hard-drop only if never allowed.
         if (info.isTcp && !info.isTcpSyn) {
             val matching = findRule(uid, matchDest, info)
             if (matching != null) {
-                rememberFlow(flowKey, matching.verdict, matchDest)
+                caches.rememberFlow(flowKey, matching.verdict, matchDest)
                 return matching.verdict == FirewallVerdict.ALLOW
             }
-            val rk = decisionKey(uid, matchDest, info)
-            decisionCache[rk]?.let { v ->
-                rememberFlow(flowKey, v, matchDest)
+            val rk = FirewallCacheKeys.decisionKey(uid, matchDest, info)
+            caches.decisionCache[rk]?.let { v ->
+                caches.rememberFlow(flowKey, v, matchDest)
                 return v == FirewallVerdict.ALLOW
             }
             return false
@@ -191,17 +188,17 @@ class InteractiveFirewallEngine @Inject constructor(
 
         val matching = findRule(uid, matchDest, info)
         if (matching != null) {
-            rememberFlow(flowKey, matching.verdict, matchDest)
+            caches.rememberFlow(flowKey, matching.verdict, matchDest)
             return matching.verdict == FirewallVerdict.ALLOW
         }
 
-        val rk = decisionKey(uid, matchDest, info)
-        decisionCache[rk]?.let { v ->
-            rememberFlow(flowKey, v, matchDest)
+        val rk = FirewallCacheKeys.decisionKey(uid, matchDest, info)
+        caches.decisionCache[rk]?.let { v ->
+            caches.rememberFlow(flowKey, v, matchDest)
             return v == FirewallVerdict.ALLOW
         }
 
-        val pendingKey = ruleKey(uid, matchDest, info.dstPort, info.protocol)
+        val pendingKey = FirewallCacheKeys.ruleKey(uid, matchDest, info.dstPort, info.protocol)
         if (pendingByKey.containsKey(pendingKey)) {
             return false
         }
@@ -210,11 +207,11 @@ class InteractiveFirewallEngine @Inject constructor(
         val dpi = ApplicationLayerDetector.classify(packet, length, info)
         return when (prefs.firewallDefaultAction) {
             FirewallDefaultAction.ALLOW -> {
-                rememberDecision(rk, flowKey, FirewallVerdict.ALLOW, matchDest)
+                caches.rememberDecision(rk, flowKey, FirewallVerdict.ALLOW, matchDest)
                 true
             }
             FirewallDefaultAction.DENY -> {
-                rememberDecision(rk, flowKey, FirewallVerdict.DENY, matchDest)
+                caches.rememberDecision(rk, flowKey, FirewallVerdict.DENY, matchDest)
                 appendJournal(
                     uid = uid,
                     app = app,
@@ -229,6 +226,147 @@ class InteractiveFirewallEngine @Inject constructor(
             FirewallDefaultAction.ASK ->
                 enqueuePrompt(uid, app, info, flowKey, pendingKey, rk, dpi, matchDest)
         }
+    }
+
+    /**
+     * PAC / loopback SOCKS CONNECT gate — same rules as TUN SYN, keyed by dest host/IP.
+     */
+    override fun allowSocksConnect(
+        uid: Int,
+        destHost: String,
+        destIp: String,
+        destPort: Int,
+    ): Boolean {
+        val prefs = preferences.get()
+        if (!prefs.firewallEnabled) return true
+        if (uid == ownUid) return true
+        if (!ConnectionOwnerResolver.isValidUid(uid)) return false
+
+        val host = destHost.trim()
+        val ip = destIp.trim()
+        val matchDest = when {
+            TunnelEndpoints.isOnionLikeHostname(host) -> host
+            ip.isNotBlank() -> ip
+            host.isNotBlank() -> host
+            else -> return false
+        }
+        val displayHost = host.ifBlank { null }
+        val protocol = IpPacketParser.PROTO_TCP
+        val flowKey = FirewallCacheKeys.socksFlowKey(uid, matchDest, destPort)
+        caches.flowCache[flowKey]?.let { return it == FirewallVerdict.ALLOW }
+
+        val matching = findRule(uid, matchDest, destPort, protocol)
+        if (matching != null) {
+            caches.rememberFlow(flowKey, matching.verdict, matchDest)
+            return matching.verdict == FirewallVerdict.ALLOW
+        }
+
+        val rk = FirewallCacheKeys.socksDecisionKey(uid, matchDest, destPort, protocol)
+        caches.decisionCache[rk]?.let { v ->
+            caches.rememberFlow(flowKey, v, matchDest)
+            return v == FirewallVerdict.ALLOW
+        }
+
+        val pendingKey = FirewallCacheKeys.ruleKey(uid, matchDest, destPort, protocol)
+        if (pendingByKey.containsKey(pendingKey)) {
+            return false
+        }
+
+        val app = resolveApp(uid)
+        val dpi = ApplicationLayerDetector.Result(
+            label = "SOCKS/PAC",
+            detail = "via PAC bridge",
+        )
+        return when (prefs.firewallDefaultAction) {
+            FirewallDefaultAction.ALLOW -> {
+                caches.rememberDecision(rk, flowKey, FirewallVerdict.ALLOW, matchDest)
+                true
+            }
+            FirewallDefaultAction.DENY -> {
+                caches.rememberDecision(rk, flowKey, FirewallVerdict.DENY, matchDest)
+                appendJournal(
+                    uid = uid,
+                    app = app,
+                    destIp = ip.ifBlank { matchDest },
+                    destHost = displayHost,
+                    threatCategory = domainReputation.classify(displayHost),
+                    destPort = destPort,
+                    protocolLabel = dpi.label,
+                    verdict = FirewallVerdict.DENY,
+                    ruleScope = FirewallRuleScope.SESSION,
+                    note = dpiJournalNote("default deny", dpi),
+                )
+                false
+            }
+            FirewallDefaultAction.ASK ->
+                enqueueSocksPrompt(
+                    uid = uid,
+                    app = app,
+                    matchDest = matchDest,
+                    destIp = ip.ifBlank { matchDest },
+                    destHost = displayHost,
+                    destPort = destPort,
+                    flowKey = flowKey,
+                    ruleKey = pendingKey,
+                    decisionKey = rk,
+                    dpi = dpi,
+                )
+        }
+    }
+
+    private fun enqueueSocksPrompt(
+        uid: Int,
+        app: AppIdentity,
+        matchDest: String,
+        destIp: String,
+        destHost: String?,
+        destPort: Int,
+        flowKey: Long,
+        ruleKey: String,
+        decisionKey: Long,
+        dpi: ApplicationLayerDetector.Result,
+    ): Boolean {
+        val threat = domainReputation.classify(destHost)
+        val request = FirewallConnectionInfo(
+            requestId = UUID.randomUUID().toString(),
+            uid = uid,
+            packageName = app.packageName,
+            appLabel = app.label,
+            destIp = destIp,
+            destPort = destPort,
+            protocol = IpPacketParser.PROTO_TCP,
+            protocolLabel = dpi.label,
+            destHost = destHost,
+            threatCategory = threat,
+            dpiDetail = dpi.detail,
+        )
+        val queued = QueuedPrompt(request, flowKey, app, ruleKey, decisionKey, matchDest)
+        synchronized(queueLock) {
+            if (pendingByKey.putIfAbsent(ruleKey, queued) != null) {
+                return false
+            }
+            if (waitQueue.size >= MAX_QUEUE) {
+                pendingByKey.remove(ruleKey, queued)
+                Timber.w("Firewall prompt queue full (%d) — dropping PAC %s", MAX_QUEUE, ruleKey)
+                appendJournal(
+                    uid = uid,
+                    app = app,
+                    destIp = destIp,
+                    destHost = destHost,
+                    threatCategory = threat,
+                    destPort = destPort,
+                    protocolLabel = dpi.label,
+                    verdict = FirewallVerdict.DENY,
+                    ruleScope = FirewallRuleScope.SESSION,
+                    note = dpiJournalNote("queue full — drop (no sticky rule)", dpi),
+                )
+                return false
+            }
+            waitQueue.addLast(ruleKey)
+            publishQueueDepthLocked()
+            promoteLocked()
+        }
+        return false
     }
 
     /**
@@ -355,7 +493,7 @@ class InteractiveFirewallEngine @Inject constructor(
                     it.protocol == rule.protocol
             } + rule
         }
-        rememberDecision(answered.decisionKey, answered.flowKey, verdict, answered.matchDest)
+        caches.rememberDecision(answered.decisionKey, answered.flowKey, verdict, answered.matchDest)
         val note = when (ruleScope) {
             FirewallRuleScope.TEMPORARY -> "temporary ${prefs.firewallTempMinutes}m"
             FirewallRuleScope.SESSION -> "until VPN stops"
@@ -380,36 +518,16 @@ class InteractiveFirewallEngine @Inject constructor(
         scope.launch { rulesStore.remove(id) }
         rules.updateAndGet { it.filterNot { r -> r.id == id } }
         // Rule identity is not keyed the same as flow hashes — clear sticky caches.
-        flowCache.clear()
-        decisionCache.clear()
-        destDecisionKeys.clear()
-        destFlowKeys.clear()
+        caches.clearAll()
     }
 
     fun rulesFlow(): StateFlow<List<FirewallRule>> = rulesStore.rules
 
-    private fun findRule(uid: Int, matchDest: String, info: IpPacketInfo): FirewallRule? {
-        val now = System.currentTimeMillis()
-        var best: FirewallRule? = null
-        var bestScore = -1
-        var bestCreated = Long.MIN_VALUE
-        for (rule in rules.get()) {
-            if (rule.isExpired(now)) continue
-            if (!rule.matches(uid, matchDest, info.dstPort, info.protocol)) continue
-            val score =
-                (if (rule.destHost.isNotEmpty()) 4 else 0) +
-                    (if (rule.destPort >= 0) 2 else 0) +
-                    (if (rule.protocol >= 0) 1 else 0)
-            if (score > bestScore ||
-                (score == bestScore && rule.createdAtEpochMs > bestCreated)
-            ) {
-                best = rule
-                bestScore = score
-                bestCreated = rule.createdAtEpochMs
-            }
-        }
-        return best
-    }
+    private fun findRule(uid: Int, matchDest: String, info: IpPacketInfo): FirewallRule? =
+        FirewallRuleMatcher.find(rules.get(), uid, matchDest, info)
+
+    private fun findRule(uid: Int, matchDest: String, destPort: Int, protocol: Int): FirewallRule? =
+        FirewallRuleMatcher.find(rules.get(), uid, matchDest, destPort, protocol)
 
     /**
      * Clearnet → packet IP. Automap → `.onion`/`.exit` hostname (IP reuse must not reuse rules).
@@ -420,74 +538,6 @@ class InteractiveFirewallEngine @Inject constructor(
         if (!TunnelEndpoints.isAutomapVirtualIpv4(ip)) return ip
         val host = DnsHostnameCache.lookup(ip) ?: return null
         return if (TunnelEndpoints.isOnionLikeHostname(host)) host else null
-    }
-
-    /**
-     * Drop only cache entries tied to [dest] (IP or `.onion` hostname).
-     * A global clear after any remap killed mid-flow ACKs for every app while Tor
-     * still showed STREAM SUCCEEDED.
-     */
-    private fun invalidateDestination(dest: String) {
-        if (dest.isBlank()) return
-        val needle = dest.lowercase()
-        destDecisionKeys.remove(needle)?.forEach { decisionCache.remove(it) }
-        destFlowKeys.remove(needle)?.forEach { flowCache.remove(it) }
-    }
-
-    private fun rememberDecision(decisionKey: Long, flowKey: Long, verdict: FirewallVerdict, matchDest: String) {
-        decisionCache[decisionKey] = verdict
-        destDecisionKeys.getOrPut(matchDest.lowercase()) { ConcurrentHashMap.newKeySet() }.add(decisionKey)
-        rememberFlow(flowKey, verdict, matchDest)
-        trimDecisionCache()
-    }
-
-    private fun rememberFlow(flowKey: Long, verdict: FirewallVerdict, matchDest: String? = null) {
-        flowCache[flowKey] = verdict
-        if (matchDest != null) {
-            destFlowKeys.getOrPut(matchDest.lowercase()) { ConcurrentHashMap.newKeySet() }.add(flowKey)
-        }
-        if (flowCache.size > MAX_FLOW_CACHE) {
-            // Prefer trimming ALLOW over DENY (DENY miss used to open the mid-flow gate).
-            var n = 0
-            val it = flowCache.entries.iterator()
-            while (it.hasNext() && n < FLOW_TRIM_BUDGET) {
-                val e = it.next()
-                if (e.value == FirewallVerdict.ALLOW) {
-                    it.remove()
-                    n++
-                }
-            }
-            // Still over budget — trim anything.
-            if (flowCache.size > MAX_FLOW_CACHE) {
-                val it2 = flowCache.keys.iterator()
-                while (it2.hasNext() && n < FLOW_TRIM_BUDGET * 2) {
-                    it2.next()
-                    it2.remove()
-                    n++
-                }
-            }
-        }
-    }
-
-    private fun trimDecisionCache() {
-        if (decisionCache.size <= MAX_DECISION_CACHE) return
-        var n = 0
-        val it = decisionCache.entries.iterator()
-        while (it.hasNext() && n < DECISION_TRIM_BUDGET) {
-            val e = it.next()
-            if (e.value == FirewallVerdict.ALLOW) {
-                it.remove()
-                n++
-            }
-        }
-        if (decisionCache.size > MAX_DECISION_CACHE) {
-            val it2 = decisionCache.keys.iterator()
-            while (it2.hasNext() && n < DECISION_TRIM_BUDGET * 2) {
-                it2.next()
-                it2.remove()
-                n++
-            }
-        }
     }
 
     private fun publishQueueDepthLocked() {
@@ -563,28 +613,6 @@ class InteractiveFirewallEngine @Inject constructor(
         journalChannel.trySend(entry)
     }
 
-    /** Packed uid+5-tuple for flow cache (hot path — no String alloc). */
-    private fun flowKey(uid: Int, info: IpPacketInfo): Long {
-        var h = uid.toLong()
-        h = h * MIX + (info.srcIpInt.toLong() and 0xffffffffL)
-        h = h * MIX + (info.dstIpInt.toLong() and 0xffffffffL)
-        h = h * MIX + info.srcPort
-        h = h * MIX + info.dstPort
-        h = h * MIX + info.protocol
-        return h
-    }
-
-    private fun decisionKey(uid: Int, matchDest: String, info: IpPacketInfo): Long {
-        var h = uid.toLong()
-        h = h * MIX + matchDest.lowercase().hashCode().toLong()
-        h = h * MIX + info.dstPort
-        h = h * MIX + info.protocol
-        return h
-    }
-
-    private fun ruleKey(uid: Int, matchDest: String, destPort: Int, protocol: Int): String =
-        "$uid|$matchDest|$destPort|$protocol"
-
     private data class AppIdentity(
         val packageName: String,
         val label: String,
@@ -604,12 +632,6 @@ class InteractiveFirewallEngine @Inject constructor(
         private const val MAX_JOURNAL = 200
         private const val JOURNAL_CHANNEL_CAP = 64
         private const val MAX_QUEUE = 64
-        private const val MAX_FLOW_CACHE = 8_000
-        private const val MAX_DECISION_CACHE = 4_000
-        private const val FLOW_TRIM_BUDGET = 128
-        private const val DECISION_TRIM_BUDGET = 64
-        /** Golden-ratio mix (signed Long form of 0x9E3779B97F4A7C15). */
-        private const val MIX = -7046029254386353131L
     }
 }
 

@@ -3,6 +3,8 @@ package ltechnologies.onionphone.onionvpn.core.tor
 import android.content.Context
 import java.io.File
 import java.io.IOException
+import java.net.HttpURLConnection
+import java.net.URL
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.StateFlow
@@ -12,6 +14,7 @@ import ltechnologies.onionphone.onionvpn.core.model.TunnelPreferences
 import ltechnologies.onionphone.onionvpn.core.model.TunnelRuntimePorts
 import ltechnologies.onionphone.onionvpn.core.tor.config.TorConfigWriter
 import ltechnologies.onionphone.onionvpn.core.tor.control.TorControlClient
+import ltechnologies.onionphone.onionvpn.core.tor.control.catalog.TorControlCatalog
 import ltechnologies.onionphone.onionvpn.core.tor.control.model.TorControlStatus
 import ltechnologies.onionphone.onionvpn.core.tor.lifecycle.TorReadiness
 import timber.log.Timber
@@ -90,6 +93,7 @@ class TorProcessManager(
         runtimePorts = ports
         try {
             ensureExecutable(binaryFile)
+            ensureGeoIpFiles()
             // Step 2
             writeTorrc(ports)
             // Step 3
@@ -172,7 +176,7 @@ class TorProcessManager(
         return control.closeCircuit(id, ifUnused)
     }
 
-    fun closeStream(id: String, reason: String = "DONE"): Result<Unit> {
+    fun closeStream(id: String, reason: String = TorControlCatalog.StreamEndReason.DONE): Result<Unit> {
         if (!control.isConnected) return Result.failure(IOException("control not connected"))
         return control.closeStream(id, reason)
     }
@@ -402,6 +406,53 @@ class TorProcessManager(
         }
     }
 
+    /** Seeds GeoIP so circuit UI can resolve relay countries (`ip-to-country`). */
+    private fun ensureGeoIpFiles() {
+        seedGeoIpAsset(TorConfigWriter.GEOIP_FILE_NAME, GEOIP_URL, minBytes = 100_000L)
+        seedGeoIpAsset(TorConfigWriter.GEOIP6_FILE_NAME, GEOIP6_URL, minBytes = 50_000L)
+    }
+
+    private fun seedGeoIpAsset(name: String, url: String, minBytes: Long) {
+        val dest = File(configDirectory, name)
+        if (dest.isFile && dest.length() >= minBytes) return
+        val fromAsset = runCatching {
+            context.assets.open("tor/$name").use { input ->
+                dest.outputStream().use { output -> input.copyTo(output) }
+            }
+            dest.isFile && dest.length() >= minBytes
+        }.getOrDefault(false)
+        if (fromAsset) {
+            Timber.i("GeoIP seeded from assets: %s (%d bytes)", name, dest.length())
+            return
+        }
+        runCatching {
+            val conn = (URL(url).openConnection() as HttpURLConnection).apply {
+                connectTimeout = 20_000
+                readTimeout = 120_000
+                instanceFollowRedirects = true
+            }
+            try {
+                conn.inputStream.use { input ->
+                    val tmp = File(configDirectory, "$name.part")
+                    tmp.outputStream().use { output -> input.copyTo(output) }
+                    if (tmp.length() < minBytes) {
+                        tmp.delete()
+                        error("GeoIP download too small: ${tmp.length()}")
+                    }
+                    if (!tmp.renameTo(dest)) {
+                        tmp.copyTo(dest, overwrite = true)
+                        tmp.delete()
+                    }
+                }
+            } finally {
+                conn.disconnect()
+            }
+            Timber.i("GeoIP downloaded: %s (%d bytes)", name, dest.length())
+        }.onFailure {
+            Timber.w(it, "GeoIP seed failed for %s — circuit flags may be empty", name)
+        }
+    }
+
     private fun stopInternal() {
         runCatching { control.disconnect(sendShutdown = true) }
         process?.destroyForcibly()
@@ -423,5 +474,9 @@ class TorProcessManager(
 
     companion object {
         const val LOG_TAG = "tor"
+        private const val GEOIP_URL =
+            "https://gitlab.torproject.org/tpo/core/tor/-/raw/main/src/config/geoip"
+        private const val GEOIP6_URL =
+            "https://gitlab.torproject.org/tpo/core/tor/-/raw/main/src/config/geoip6"
     }
 }

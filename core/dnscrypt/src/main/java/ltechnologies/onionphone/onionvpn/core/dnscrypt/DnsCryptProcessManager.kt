@@ -116,7 +116,12 @@ class DnsCryptProcessManager(
                     }
                 }
             } catch (error: Exception) {
-                if (process?.isAlive == true) {
+                // destroyForcibly() closes the pipe while the process may still look alive.
+                val intentional =
+                    error is java.io.InterruptedIOException ||
+                        error.message?.contains("interrupted by close", ignoreCase = true) == true ||
+                        process?.isAlive != true
+                if (!intentional) {
                     Timber.w(error, "DNSCrypt log reader stopped unexpectedly")
                 }
             }

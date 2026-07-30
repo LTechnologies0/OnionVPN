@@ -43,7 +43,7 @@ import javax.inject.Inject
 import ltechnologies.onionphone.onionvpn.firewall.InteractiveFirewallEngine
 import ltechnologies.onionphone.onionvpn.security.AppLockAuthenticator
 import ltechnologies.onionphone.onionvpn.security.AppLockManager
-import ltechnologies.onionphone.onionvpn.threat.DomainReputationRepository
+import ltechnologies.onionphone.onionvpn.threat.repo.DomainReputationRepository
 import ltechnologies.onionphone.onionvpn.core.tor.control.lifecycle.CircuitLifecycleManager
 import ltechnologies.onionphone.onionvpn.ui.FirewallScreen
 import ltechnologies.onionphone.onionvpn.ui.LogsScreen

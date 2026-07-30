@@ -50,7 +50,7 @@ import ltechnologies.onionphone.onionvpn.core.model.DnsResolverMode
 import ltechnologies.onionphone.onionvpn.core.model.FirewallDefaultAction
 import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
 import ltechnologies.onionphone.onionvpn.core.model.TunnelPreferences
-import ltechnologies.onionphone.onionvpn.threat.DomainReputationRepository
+import ltechnologies.onionphone.onionvpn.threat.repo.DomainReputationRepository
 import ltechnologies.onionphone.onionvpn.ui.components.SectionHeader
 import ltechnologies.onionphone.onionvpn.ui.components.TonalSection
 import ltechnologies.onionphone.onionvpn.util.SystemSecurityIntents
@@ -194,7 +194,8 @@ fun SettingsScreen(
                 "${TunnelEndpoints.pacUrl()}\n\n" +
                 "PAC points at socks5://${TunnelEndpoints.pacSocksBridge()} — a local bridge that:\n" +
                 "1. Resolves names via DNSCrypt (not Tor DNSPort / exit DNS)\n" +
-                "2. CONNECTs to Tor SocksPort by IPv4\n" +
+                "2. Applies the interactive firewall (same rules as TUN)\n" +
+                "3. CONNECTs to Tor SocksPort by IPv4\n" +
                 ".onion hostnames skip DNSCrypt and go to Tor as hostname.\n" +
                 "Do not point apps at raw Tor SOCKS (that uses Tor DNS).",
         )
@@ -325,6 +326,7 @@ fun SettingsScreen(
                 R.string.domain_lists_status,
                 reputation.trackingEntries,
                 reputation.malwareEntries,
+                reputation.sourceFilesCached,
                 lastUpdate,
                 transport,
             ),

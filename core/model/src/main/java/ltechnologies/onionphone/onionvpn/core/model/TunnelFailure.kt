@@ -11,12 +11,16 @@ import java.net.SocketException
 import java.net.SocketTimeoutException
 import java.net.UnknownHostException
 import java.util.concurrent.CancellationException
+import ltechnologies.onionphone.onionvpn.core.model.stability.AndroidStabilityCodes
+import ltechnologies.onionphone.onionvpn.core.model.stability.StabilityAction
+import ltechnologies.onionphone.onionvpn.core.model.stability.StabilityClassifier
+import ltechnologies.onionphone.onionvpn.core.model.stability.TorStabilityCodes
 
 /**
  * Typed tunnel failures mapped from Tor / VpnService / DNSCrypt / TCP·UDP errno-class errors.
  *
  * [userMessage] is safe for Status UI (no cookie bytes / paths with secrets).
- * [stopTor] / [preferBlocking] drive [TunnelPhase.Error] vs kill-switch Blocking.
+ * [stopTor] / [preferBlocking] / [stabilityAction] drive [TunnelPhase.Error] vs kill-switch Blocking.
  */
 sealed class TunnelFailure(
     message: String,
@@ -60,6 +64,28 @@ sealed class TunnelFailure(
             is DnsCrypt, is VpnEstablish, is ForwarderDead, is Soft -> false
         }
 
+    /** Prefer kill-switch Blocking TUN (Android VPN stability). */
+    val preferBlocking: Boolean
+        get() = when (this) {
+            is VpnEstablish, is ForwarderDead -> true
+            is TorBinary, is TorControl, is TorBootstrap -> true
+            is DnsCrypt -> stage == "listen" || stage == "start"
+            is Soft -> false
+        }
+
+    /** Hint from Tor/DNSCrypt/OS catalogs for recovery pipelines. */
+    val stabilityAction: StabilityAction
+        get() = when (this) {
+            is TorBinary, is TorControl -> StabilityAction.STOP_TOR
+            is TorBootstrap -> StabilityAction.SOFT_RECOVER
+            is VpnEstablish, is ForwarderDead -> StabilityAction.PREFER_BLOCKING
+            is DnsCrypt -> when (stage) {
+                "listen", "start" -> StabilityAction.PREFER_BLOCKING
+                else -> StabilityAction.SOFT_RECOVER
+            }
+            is Soft -> StabilityAction.SOFT_RECOVER
+        }
+
     companion object {
         private val ABS_PATH = Regex("""(/data/|/storage/|/sdcard/|file://)[^\s)]+""")
 
@@ -98,6 +124,27 @@ sealed class TunnelFailure(
                     return Soft("Network timeout ($raw)", error)
                 OsConstants.ENETUNREACH, OsConstants.EHOSTUNREACH ->
                     return Soft("Network unreachable ($raw)", error)
+            }
+            // Catalog-driven errno (ECONNRESET, ENOMEM, …) when not handled above.
+            AndroidStabilityCodes.signalForErrno(errno)?.let { signal ->
+                if (signal.action == StabilityAction.STOP_TOR) {
+                    return TorBinary("$raw (${signal.code})", error)
+                }
+                if (signal.action == StabilityAction.PREFER_BLOCKING) {
+                    return VpnEstablish("$raw (${signal.code})", error)
+                }
+            }
+
+            // SOCKS5 status=N from Socks5Client
+            Regex("""status=(\d+)""").find(raw)?.groupValues?.get(1)?.toIntOrNull()?.let { status ->
+                val socks = TorStabilityCodes.SocksReply.signalFor(status)
+                return when (socks.action) {
+                    StabilityAction.SOFT_RECOVER, StabilityAction.HARD_RECOVER ->
+                        Soft("SOCKS ${socks.detail.ifBlank { status.toString() }} ($raw)", error)
+                    StabilityAction.PREFER_BLOCKING ->
+                        Soft("SOCKS ${socks.detail} ($raw)", error)
+                    else -> Soft("SOCKS ${socks.detail.ifBlank { status.toString() }} ($raw)", error)
+                }
             }
 
             return when (error) {

@@ -17,10 +17,10 @@
     <string name="firewall_threat_malware">Malware / C2</string>
     <string name="firewall_threat_tracking">Ads / tracking / telemetry</string>
     <string name="domain_lists_title">Domain threat lists</string>
-    <string name="domain_lists_desc">HaGeZi lists colour firewall prompts: orange = ads/tracking/telemetry (Light + Native Tracker), red = malware/C2 (TIF mini). Updates prefer Tor when the tunnel is up.</string>
+    <string name="domain_lists_desc">Local reputation DB merged from HaGeZi, URLhaus, Yoyo adservers, and uBlock uAssets. Orange = ads/tracking/telemetry; red = malware/C2/PUP. Updates fetch over Tor only, then rebuild malware.txt / tracking.txt.</string>
     <string name="domain_lists_update">Update domain lists</string>
     <string name="domain_lists_updating">Updating…</string>
-    <string name="domain_lists_status">Tracking: %1$d · Malware: %2$d · Last update: %3$s%4$s</string>
+    <string name="domain_lists_status">Tracking: %1$d · Malware: %2$d · Sources: %3$d · Last update: %4$s%5$s</string>
     <string name="domain_lists_via_tor"> · via Tor</string>
     <string name="domain_lists_via_direct"> · direct</string>
     <string name="domain_lists_never">never</string>

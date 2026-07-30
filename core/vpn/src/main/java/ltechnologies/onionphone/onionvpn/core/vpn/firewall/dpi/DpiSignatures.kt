@@ -1,0 +1,422 @@
+package ltechnologies.onionphone.onionvpn.core.vpn.firewall.dpi
+
+import ltechnologies.onionphone.onionvpn.core.vpn.dns.DnsPacketParser
+import ltechnologies.onionphone.onionvpn.core.vpn.firewall.IpPacketInfo
+import java.nio.charset.StandardCharsets
+import java.util.Locale
+
+/** Nested DPI signature probes (branch predicates for the payload graph). */
+internal object DpiSignatures {
+    fun looksLikeDns(packet: ByteArray, offset: Int, len: Int, info: IpPacketInfo): Boolean {
+        if (len < 12) return false
+        val onDnsPort = info.dstPort == 53 || info.srcPort == 53 ||
+            info.dstPort == 5353 || info.dstPort == 5355
+        // DNS-over-TCP starts with 2-byte length prefix.
+        var off = offset
+        var dnsLen = len
+        if (info.isTcp && len >= 14) {
+            val prefixed = ((packet[offset].toInt() and 0xff) shl 8) or
+                (packet[offset + 1].toInt() and 0xff)
+            if (prefixed in 12..len - 2 && prefixed + 2 <= len) {
+                off = offset + 2
+                dnsLen = prefixed
+            }
+        }
+        val flags = ((packet[off + 2].toInt() and 0xff) shl 8) or
+            (packet[off + 3].toInt() and 0xff)
+        val opcode = (flags ushr 11) and 0x0f
+        if (opcode > 2) return false
+        val qd = DpiBytes.u16(packet, off + 4)
+        val an = DpiBytes.u16(packet, off + 6)
+        val ns = DpiBytes.u16(packet, off + 8)
+        val ar = DpiBytes.u16(packet, off + 10)
+        if (qd > 16 || an > 64 || ns > 64 || ar > 64) return false
+        if (qd == 0 && an == 0) return false
+        val parsed = DnsPacketParser.parse(packet, off, dnsLen)
+        if (parsed?.qname != null) return true
+        return onDnsPort && qd >= 1
+    }
+
+    fun looksLikeHttp2Preface(packet: ByteArray, offset: Int, len: Int): Boolean =
+        DpiBytes.startsWithAscii(packet, offset, len, "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")
+
+    fun looksLikeHttp(packet: ByteArray, offset: Int, len: Int): Boolean {
+        if (len < 4) return false
+        for (m in HTTP_METHODS) {
+            if (DpiBytes.startsWithAscii(packet, offset, len, m)) return true
+        }
+        return false
+    }
+
+    fun httpPreview(text: String): String? {
+        val firstLine = text.lineSequence().firstOrNull()?.trim().orEmpty()
+        if (firstLine.isEmpty()) return null
+        val host = Regex("""(?im)^Host:\s*(\S+)""")
+            .find(text)?.groupValues?.getOrNull(1)
+        val line = firstLine.take(80)
+        return if (host != null) "$line · Host $host" else line
+    }
+
+    fun looksLikeTls(packet: ByteArray, offset: Int, len: Int): Boolean {
+        if (len < 5) return false
+        val type = packet[offset].toInt() and 0xff
+        if (type !in 0x14..0x17) return false
+        val major = packet[offset + 1].toInt() and 0xff
+        val minor = packet[offset + 2].toInt() and 0xff
+        return major == 0x03 && minor <= 0x04
+    }
+
+    fun looksLikeDtls(packet: ByteArray, offset: Int, len: Int): Boolean {
+        if (len < 13) return false
+        val type = packet[offset].toInt() and 0xff
+        if (type !in 0x14..0x17) return false
+        val major = packet[offset + 1].toInt() and 0xff
+        val minor = packet[offset + 2].toInt() and 0xff
+        // DTLS 1.0 = FE FF, 1.2 = FE FD, 1.3 = FE FC
+        return major == 0xFE && minor in 0xFC..0xFF
+    }
+
+    fun extractTlsSni(packet: ByteArray, offset: Int, len: Int): String? {
+        if (len < 9) return null
+        if ((packet[offset].toInt() and 0xff) != 0x16) return null
+        val recordLen = DpiBytes.u16(packet, offset + 3)
+        var p = offset + 5
+        val end = offset + minOf(len, 5 + maxOf(recordLen, 0))
+        if (p >= end) return null
+        if ((packet[p].toInt() and 0xff) != 0x01) return null
+        p += 1
+        if (p + 3 > end) return null
+        val helloLen = ((packet[p].toInt() and 0xff) shl 16) or
+            ((packet[p + 1].toInt() and 0xff) shl 8) or
+            (packet[p + 2].toInt() and 0xff)
+        p += 3
+        val helloEnd = minOf(end, p + helloLen)
+        if (p + 2 + 32 + 1 > helloEnd) return null
+        p += 2
+        p += 32
+        if (p >= helloEnd) return null
+        val sessionLen = packet[p].toInt() and 0xff
+        p += 1 + sessionLen
+        if (p + 2 > helloEnd) return null
+        val cipherLen = DpiBytes.u16(packet, p)
+        p += 2 + cipherLen
+        if (p + 1 > helloEnd) return null
+        val compLen = packet[p].toInt() and 0xff
+        p += 1 + compLen
+        if (p + 2 > helloEnd) return null
+        val extLen = DpiBytes.u16(packet, p)
+        p += 2
+        val extEnd = minOf(helloEnd, p + extLen)
+        while (p + 4 <= extEnd) {
+            val type = DpiBytes.u16(packet, p)
+            val elen = DpiBytes.u16(packet, p + 2)
+            p += 4
+            if (p + elen > extEnd) break
+            if (type == 0x0000 && elen >= 5) {
+                var q = p + 2
+                if (q + 3 > p + elen) break
+                val nameType = packet[q].toInt() and 0xff
+                q += 1
+                val nameLen = DpiBytes.u16(packet, q)
+                q += 2
+                if (nameType == 0 && q + nameLen <= p + elen && nameLen in 1..253) {
+                    return String(packet, q, nameLen, StandardCharsets.US_ASCII)
+                        .lowercase(Locale.US)
+                }
+            }
+            p += elen
+        }
+        return null
+    }
+
+    fun looksLikeQuic(packet: ByteArray, offset: Int, len: Int): Boolean {
+        if (len < 5) return false
+        val b0 = packet[offset].toInt() and 0xff
+        // Long header (bit7=1) or short header with fixed bit (bit6=1) — RFC 9000.
+        return (b0 and 0x80) != 0 || (b0 and 0x40) != 0
+    }
+
+    fun looksLikeSsh(packet: ByteArray, offset: Int, len: Int): Boolean =
+        DpiBytes.startsWithAscii(packet, offset, len, "SSH-")
+
+    fun looksLikeFtp(packet: ByteArray, offset: Int, len: Int): Boolean {
+        if (DpiBytes.startsWithAscii(packet, offset, len, "USER ") ||
+            DpiBytes.startsWithAscii(packet, offset, len, "PASS ") ||
+            DpiBytes.startsWithAscii(packet, offset, len, "QUIT")
+        ) {
+            return true
+        }
+        // Server greeting "220 "
+        return len >= 4 &&
+            (packet[offset].toInt() and 0xff) == '2'.code &&
+            (packet[offset + 1].toInt() and 0xff) == '2'.code &&
+            (packet[offset + 2].toInt() and 0xff) == '0'.code &&
+            (packet[offset + 3].toInt() and 0xff) == ' '.code
+    }
+
+    fun looksLikeSmtp(packet: ByteArray, offset: Int, len: Int): Boolean {
+        for (p in SMTP_PREFIXES) {
+            if (DpiBytes.startsWithAscii(packet, offset, len, p)) return true
+        }
+        return len >= 4 &&
+            (packet[offset].toInt() and 0xff) == '2'.code &&
+            (packet[offset + 1].toInt() and 0xff) == '2'.code &&
+            (packet[offset + 2].toInt() and 0xff) == '0'.code &&
+            (packet[offset + 3].toInt() and 0xff) == ' '.code &&
+            DpiBytes.asciiContains(packet, offset, minOf(len, 64), "ESMTP")
+    }
+
+    fun looksLikeImap(packet: ByteArray, offset: Int, len: Int): Boolean =
+        DpiBytes.startsWithAscii(packet, offset, len, "* OK") ||
+            DpiBytes.startsWithAscii(packet, offset, len, "* PREAUTH") ||
+            DpiBytes.asciiStartsWithTagCommand(packet, offset, len, "LOGIN") ||
+            DpiBytes.asciiStartsWithTagCommand(packet, offset, len, "AUTHENTICATE")
+
+    fun looksLikePop3(packet: ByteArray, offset: Int, len: Int): Boolean =
+        DpiBytes.startsWithAscii(packet, offset, len, "+OK") ||
+            DpiBytes.startsWithAscii(packet, offset, len, "-ERR") ||
+            DpiBytes.startsWithAscii(packet, offset, len, "USER ") ||
+            DpiBytes.startsWithAscii(packet, offset, len, "PASS ") ||
+            DpiBytes.startsWithAscii(packet, offset, len, "STAT") ||
+            DpiBytes.startsWithAscii(packet, offset, len, "RETR ")
+
+    fun looksLikeSip(packet: ByteArray, offset: Int, len: Int): Boolean {
+        for (p in SIP_PREFIXES) {
+            if (DpiBytes.startsWithAscii(packet, offset, len, p)) return true
+        }
+        return false
+    }
+
+    fun looksLikeRtsp(packet: ByteArray, offset: Int, len: Int): Boolean {
+        for (p in RTSP_PREFIXES) {
+            if (DpiBytes.startsWithAscii(packet, offset, len, p)) return true
+        }
+        return false
+    }
+
+    fun looksLikeSsdp(packet: ByteArray, offset: Int, len: Int): Boolean =
+        DpiBytes.startsWithAscii(packet, offset, len, "M-SEARCH ") ||
+            DpiBytes.startsWithAscii(packet, offset, len, "NOTIFY ")
+
+    fun looksLikeXmpp(packet: ByteArray, offset: Int, len: Int): Boolean =
+        DpiBytes.startsWithAscii(packet, offset, len, "<?xml") ||
+            DpiBytes.startsWithAscii(packet, offset, len, "<stream:stream") ||
+            DpiBytes.startsWithAscii(packet, offset, len, "<stream:")
+
+    fun looksLikeIrc(packet: ByteArray, offset: Int, len: Int): Boolean {
+        for (p in IRC_PREFIXES) {
+            if (DpiBytes.startsWithAscii(packet, offset, len, p)) return true
+        }
+        return false
+    }
+
+    fun looksLikeRedis(packet: ByteArray, offset: Int, len: Int): Boolean {
+        if (len < 3) return false
+        val c0 = packet[offset].toInt() and 0xff
+        // RESP: *n\r\n  or +OK / -ERR / $ / :
+        if (c0 == '*'.code || c0 == '+'.code || c0 == '-'.code ||
+            c0 == '$'.code || c0 == ':'.code
+        ) {
+            // Prefer clear Redis verbs in the first chunk.
+            return DpiBytes.asciiContains(packet, offset, minOf(len, 64), "\r\n") &&
+                (
+                    DpiBytes.asciiContains(packet, offset, minOf(len, 64), "PING") ||
+                        DpiBytes.asciiContains(packet, offset, minOf(len, 64), "AUTH") ||
+                        DpiBytes.asciiContains(packet, offset, minOf(len, 64), "INFO") ||
+                        DpiBytes.asciiContains(packet, offset, minOf(len, 64), "HELLO") ||
+                        c0 == '*'.code
+                    )
+        }
+        return false
+    }
+
+    fun looksLikeBitTorrent(packet: ByteArray, offset: Int, len: Int): Boolean =
+        len >= 20 &&
+            (packet[offset].toInt() and 0xff) == 19 &&
+            DpiBytes.startsWithAscii(packet, offset + 1, len - 1, "BitTorrent protocol")
+
+    fun looksLikeSocks(packet: ByteArray, offset: Int, len: Int): Boolean {
+        if (len < 2) return false
+        val ver = packet[offset].toInt() and 0xff
+        return when (ver) {
+            5 -> {
+                // VER NMETHODS METHODS…
+                val n = packet[offset + 1].toInt() and 0xff
+                n in 1..16 && len >= 2 + n
+            }
+            4 -> len >= 8 && (packet[offset + 1].toInt() and 0xff) in 1..2
+            else -> false
+        }
+    }
+
+    fun looksLikeRdp(packet: ByteArray, offset: Int, len: Int): Boolean {
+        // TPKT version 3 + X.224 Connection Request (CR length / type 0xE0)
+        if (len < 7) return false
+        if ((packet[offset].toInt() and 0xff) != 3) return false
+        if ((packet[offset + 1].toInt() and 0xff) != 0) return false
+        val tpktLen = DpiBytes.u16(packet, offset + 2)
+        if (tpktLen < 7 || tpktLen > len + 64) return false
+        val li = packet[offset + 4].toInt() and 0xff
+        val code = packet[offset + 5].toInt() and 0xff
+        return li >= 6 && (code == 0xE0 || code == 0xD0)
+    }
+
+    fun looksLikeVnc(packet: ByteArray, offset: Int, len: Int): Boolean =
+        DpiBytes.startsWithAscii(packet, offset, len, "RFB ")
+
+    fun looksLikePostgres(packet: ByteArray, offset: Int, len: Int): Boolean {
+        // StartupMessage: int32 len + int32 protocol (3<<16|0) = 196608
+        if (len < 8) return false
+        val msgLen = ((packet[offset].toInt() and 0xff) shl 24) or
+            ((packet[offset + 1].toInt() and 0xff) shl 16) or
+            ((packet[offset + 2].toInt() and 0xff) shl 8) or
+            (packet[offset + 3].toInt() and 0xff)
+        if (msgLen < 8 || msgLen > 10_000) return false
+        val proto = ((packet[offset + 4].toInt() and 0xff) shl 24) or
+            ((packet[offset + 5].toInt() and 0xff) shl 16) or
+            ((packet[offset + 6].toInt() and 0xff) shl 8) or
+            (packet[offset + 7].toInt() and 0xff)
+        return proto == 196608 || proto == 80877103 // SSLRequest
+    }
+
+    fun looksLikeMysql(packet: ByteArray, offset: Int, len: Int): Boolean {
+        // Server greeting: 3-byte len + seq 0 + protocol version 10 + version string
+        if (len < 10) return false
+        val payloadLen = (packet[offset].toInt() and 0xff) or
+            ((packet[offset + 1].toInt() and 0xff) shl 8) or
+            ((packet[offset + 2].toInt() and 0xff) shl 16)
+        val seq = packet[offset + 3].toInt() and 0xff
+        val proto = packet[offset + 4].toInt() and 0xff
+        return seq == 0 && proto == 10 && payloadLen in 20..1024
+    }
+
+    fun looksLikeMqtt(packet: ByteArray, offset: Int, len: Int): Boolean {
+        // CONNECT: type=1 (0x10), remaining length, protocol name MQTT / MQIsdp
+        if (len < 10) return false
+        if ((packet[offset].toInt() and 0xff) != 0x10) return false
+        // Skip remaining length (1–4 bytes varint)
+        var p = offset + 1
+        var mul = 1
+        var rem = 0
+        repeat(4) {
+            if (p >= offset + len) return false
+            val b = packet[p].toInt() and 0xff
+            p++
+            rem += (b and 0x7f) * mul
+            mul *= 128
+            if (b and 0x80 == 0) {
+                if (p + 2 > offset + len) return false
+                val nameLen = DpiBytes.u16(packet, p)
+                p += 2
+                if (p + nameLen > offset + len || nameLen !in 4..6) return false
+                val name = String(packet, p, nameLen, StandardCharsets.US_ASCII)
+                return name == "MQTT" || name == "MQIsdp"
+            }
+        }
+        return false
+    }
+
+    fun looksLikeStun(packet: ByteArray, offset: Int, len: Int): Boolean {
+        if (len < 20) return false
+        // First two bits must be 0; magic cookie at bytes 4..7
+        if ((packet[offset].toInt() and 0xC0) != 0) return false
+        return (packet[offset + 4].toInt() and 0xff) == 0x21 &&
+            (packet[offset + 5].toInt() and 0xff) == 0x12 &&
+            (packet[offset + 6].toInt() and 0xff) == 0xA4 &&
+            (packet[offset + 7].toInt() and 0xff) == 0x42
+    }
+
+    fun looksLikeWireGuard(packet: ByteArray, offset: Int, len: Int): Boolean {
+        if (len < 4) return false
+        val type = packet[offset].toInt() and 0xff
+        // Types 1..4 with reserved zeros; handshake initiation is 148 bytes.
+        if (type !in 1..4) return false
+        if ((packet[offset + 1].toInt() and 0xff) != 0 ||
+            (packet[offset + 2].toInt() and 0xff) != 0 ||
+            (packet[offset + 3].toInt() and 0xff) != 0
+        ) {
+            return false
+        }
+        return when (type) {
+            1 -> len == 148
+            2 -> len == 92
+            3 -> len == 64
+            4 -> len >= 32
+            else -> false
+        }
+    }
+
+    fun looksLikeOpenVpn(packet: ByteArray, offset: Int, len: Int): Boolean {
+        if (len < 2) return false
+        val opcode = (packet[offset].toInt() and 0xff) shr 3
+        // P_CONTROL_HARD_RESET_CLIENT_V2 = 7, V3 = 10, etc.
+        return opcode in 1..10 && len >= 14
+    }
+
+    fun looksLikeNtp(
+        packet: ByteArray,
+        offset: Int,
+        len: Int,
+        info: IpPacketInfo,
+    ): Boolean {
+        if (len < 48) return false
+        if (info.dstPort != 123 && info.srcPort != 123) return false
+        val liVnMode = packet[offset].toInt() and 0xff
+        val version = (liVnMode ushr 3) and 0x07
+        val mode = liVnMode and 0x07
+        return version in 1..4 && mode in 1..5
+    }
+
+    fun looksLikeDhcp(
+        packet: ByteArray,
+        offset: Int,
+        len: Int,
+        info: IpPacketInfo,
+    ): Boolean {
+        if (len < 240) return false
+        if (info.dstPort != 67 && info.dstPort != 68 &&
+            info.srcPort != 67 && info.srcPort != 68
+        ) {
+            return false
+        }
+        val op = packet[offset].toInt() and 0xff
+        if (op != 1 && op != 2) return false
+        // Magic cookie
+        return (packet[offset + 236].toInt() and 0xff) == 0x63 &&
+            (packet[offset + 237].toInt() and 0xff) == 0x82 &&
+            (packet[offset + 238].toInt() and 0xff) == 0x53 &&
+            (packet[offset + 239].toInt() and 0xff) == 0x63
+    }
+
+    fun looksLikeTftp(
+        packet: ByteArray,
+        offset: Int,
+        len: Int,
+        info: IpPacketInfo,
+    ): Boolean {
+        if (len < 4) return false
+        if (info.dstPort != 69 && info.srcPort != 69) return false
+        val opcode = DpiBytes.u16(packet, offset)
+        return opcode in 1..5
+    }
+
+    val HTTP_METHODS = arrayOf(
+        "GET ", "POST ", "HEAD ", "PUT ", "DELETE ", "OPTIONS ", "CONNECT ", "PATCH ",
+        "HTTP/1.", "HTTP/2",
+    )
+    val SMTP_PREFIXES = arrayOf(
+        "EHLO ", "HELO ", "MAIL FROM:", "RCPT TO:", "DATA\r\n", "QUIT\r\n", "STARTTLS",
+    )
+    val SIP_PREFIXES = arrayOf(
+        "INVITE ", "REGISTER ", "OPTIONS ", "BYE ", "ACK ", "CANCEL ", "SUBSCRIBE ",
+        "NOTIFY ", "SIP/2.0",
+    )
+    val RTSP_PREFIXES = arrayOf(
+        "OPTIONS ", "DESCRIBE ", "SETUP ", "PLAY ", "TEARDOWN ", "PAUSE ", "RTSP/1.0",
+    )
+    val IRC_PREFIXES = arrayOf(
+        "NICK ", "USER ", "JOIN ", "PRIVMSG ", "NOTICE ", "PING ", "PONG ", "CAP ",
+    )
+    val HTTP_PORTS = setOf(80, 8080, 8000, 8008, 8888, 5000)
+    val HTTPS_PORTS = setOf(443, 8443)
+}

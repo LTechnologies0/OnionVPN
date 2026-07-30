@@ -1,5 +1,8 @@
-package ltechnologies.onionphone.onionvpn.threat
+package ltechnologies.onionphone.onionvpn.threat.repo
 
+import ltechnologies.onionphone.onionvpn.threat.catalog.DomainBlocklistCatalog
+import ltechnologies.onionphone.onionvpn.threat.index.DomainReputationIndex
+import ltechnologies.onionphone.onionvpn.threat.parse.DomainListParser
 import android.content.Context
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.io.File
@@ -29,14 +32,13 @@ import okhttp3.Request
 import timber.log.Timber
 
 /**
- * Downloads and refreshes HaGeZi DNS blocklists used to colour firewall prompts:
+ * Maintains a **local unified domain reputation DB** under `files/domain-reputation/`:
  *
- * - **Malware / C2 (red):** HaGeZi Threat Intelligence Feeds (TIF) mini
- * - **Ads / tracking / telemetry (orange):** HaGeZi Light + Native Tracker lists
+ * - `malware.txt` / `tracking.txt` — merged, one domain per line (runtime lookup)
+ * - `sources/{id}.txt` — raw cache per [DomainBlocklistCatalog] feed
  *
- * Prefer Tor probe SOCKS when the tunnel is up. Never downloads over clearnet
- * (excluded-UID OkHttp would leak DNS + SNI on the ISP path — Privacy Guides /
- * Tor threat model). Seed lists via cache until [onTorReady].
+ * Feeds (HaGeZi, URLhaus, Yoyo adservers, uAssets, …) are fetched over Tor probe
+ * SOCKS only — never clearnet. Classification colours firewall prompts.
  */
 @Singleton
 class DomainReputationRepository @Inject constructor(
@@ -56,21 +58,15 @@ class DomainReputationRepository @Inject constructor(
     fun start() {
         if (!started.compareAndSet(false, true)) return
         scope.launch {
-            // Cache only at cold start — never hit the network before Tor probe SOCKS.
+            migrateLegacyFilenames()
             loadCached()
         }
     }
 
-    /** Force a refresh (Settings button / post-Tor-ready hook). */
     fun requestUpdate() {
         scope.launch { update() }
     }
 
-    /**
-     * Prefer a Tor-backed refresh when probe SOCKS appears.
-     * Waits until [TorProcessManager.currentProbeSocksPort] is published — Tor.start used
-     * to clear runtimePorts in stopInternal, so a naive immediate update always failed.
-     */
     fun onTorReady() {
         scope.launch {
             if (!awaitProbeSocks()) {
@@ -106,15 +102,17 @@ class DomainReputationRepository @Inject constructor(
 
     private suspend fun loadCached() = withContext(Dispatchers.IO) {
         val dir = listDir()
-        val malwareOk = index.loadMalwareFrom(File(dir, MALWARE_FILE))
-        val trackingOk = index.loadTrackingFrom(File(dir, TRACKING_FILE))
+        val malwareOk = index.loadMalwareFrom(File(dir, MALWARE_DB))
+        val trackingOk = index.loadTrackingFrom(File(dir, TRACKING_DB))
         val meta = File(dir, META_FILE)
         val lastSuccess = meta.takeIf { it.isFile }?.readText()?.toLongOrNull() ?: 0L
         val lastViaTor = File(dir, VIA_TOR_FILE).takeIf { it.isFile }
             ?.readText()?.trim() == "1"
+        val sourcesOk = sourceCacheDir().listFiles()?.count { it.isFile && it.length() > 0L } ?: 0
         _status.value = DomainReputationStatus(
             malwareEntries = index.malwareCount(),
             trackingEntries = index.trackingCount(),
+            sourceFilesCached = sourcesOk,
             lastSuccessEpochMs = lastSuccess,
             lastError = null,
             updating = false,
@@ -128,16 +126,18 @@ class DomainReputationRepository @Inject constructor(
             if (_status.value.updating) return@withLock
             _status.value = _status.value.copy(updating = true, lastError = null)
             val result = runCatching {
-                withContext(Dispatchers.IO) { downloadAndSwap() }
+                withContext(Dispatchers.IO) { downloadMergeAndSwap() }
             }
             result.onSuccess { viaTor ->
                 val now = System.currentTimeMillis()
                 val dir = listDir()
                 File(dir, META_FILE).writeText(now.toString())
                 File(dir, VIA_TOR_FILE).writeText(if (viaTor) "1" else "0")
+                val sourcesOk = sourceCacheDir().listFiles()?.count { it.isFile && it.length() > 0L } ?: 0
                 _status.value = DomainReputationStatus(
                     malwareEntries = index.malwareCount(),
                     trackingEntries = index.trackingCount(),
+                    sourceFilesCached = sourcesOk,
                     lastSuccessEpochMs = now,
                     lastError = null,
                     updating = false,
@@ -145,9 +145,10 @@ class DomainReputationRepository @Inject constructor(
                     lastViaTor = viaTor,
                 )
                 Timber.i(
-                    "Domain reputation updated malware=%d tracking=%d viaTor=%s",
+                    "Domain reputation DB updated malware=%d tracking=%d sources=%d viaTor=%s",
                     index.malwareCount(),
                     index.trackingCount(),
+                    sourcesOk,
                     viaTor,
                 )
             }.onFailure { error ->
@@ -161,57 +162,61 @@ class DomainReputationRepository @Inject constructor(
     }
 
     /** @return true when the download used Tor probe SOCKS. */
-    private fun downloadAndSwap(): Boolean {
-        val dir = listDir()
+    private fun downloadMergeAndSwap(): Boolean {
         val transport = buildClient()
         val client = transport.client
         try {
-            val malwareTmp = File(dir, "$MALWARE_FILE.tmp")
-            val trackingTmp = File(dir, "$TRACKING_FILE.tmp")
-
-            downloadFirstAvailable(client, MALWARE_URLS, malwareTmp)
-            // Tracking = Light (ads/tracking/metrics) + Native OEM telemetry lists.
-            trackingTmp.bufferedWriter(Charsets.UTF_8).use { out ->
-                out.appendLine("# OnionVPN merged tracking/telemetry list")
-                out.appendLine("# Base: HaGeZi Light + Native Tracker")
-                val light = downloadBodyFirstAvailable(client, TRACKING_LIGHT_URLS)
-                out.appendLine("# source: HaGeZi Light")
-                out.append(light)
-                if (!light.endsWith('\n')) out.appendLine()
-                for (url in TRACKING_NATIVE_URLS) {
-                    try {
-                        val body = fetchBody(client, url)
-                        out.appendLine("# source: $url")
-                        out.append(body)
-                        if (!body.endsWith('\n')) out.appendLine()
-                    } catch (error: Exception) {
-                        Timber.d(error, "Optional native list skipped: %s", url)
+            var requiredFailures = 0
+            var fetched = 0
+            for (source in DomainBlocklistCatalog.ALL) {
+                try {
+                    val body = downloadBodyFirstAvailable(client, source.urls)
+                    if (body.isBlank()) {
+                        throw IllegalStateException("empty body")
+                    }
+                    val dest = sourceCacheFile(source.id)
+                    val tmp = File(dest.absolutePath + ".tmp")
+                    tmp.writeText(body, Charsets.UTF_8)
+                    if (!tmp.renameTo(dest)) {
+                        tmp.copyTo(dest, overwrite = true)
+                        tmp.delete()
+                    }
+                    fetched++
+                    Timber.d("Domain source ok id=%s bytes=%d", source.id, body.length)
+                } catch (error: Exception) {
+                    Timber.w(error, "Domain source failed id=%s required=%s", source.id, source.required)
+                    if (source.required && !sourceCacheFile(source.id).isFile) {
+                        requiredFailures++
                     }
                 }
             }
-
-            val malwareSet = HashSet<String>(180_000)
-            malwareTmp.bufferedReader(Charsets.UTF_8).use {
-                DomainReputationIndex.parseDomains(it, malwareSet)
+            if (fetched == 0 && requiredFailures > 0) {
+                throw IllegalStateException("No blocklist sources downloaded")
             }
-            val trackingSet = HashSet<String>(64_000)
-            trackingTmp.bufferedReader(Charsets.UTF_8).use {
-                DomainReputationIndex.parseDomains(it, trackingSet)
+
+            val malwareSet = HashSet<String>(200_000)
+            val trackingSet = HashSet<String>(80_000)
+            for (source in DomainBlocklistCatalog.ALL) {
+                val cache = sourceCacheFile(source.id)
+                if (!cache.isFile || cache.length() == 0L) continue
+                cache.bufferedReader(Charsets.UTF_8).use { reader ->
+                    DomainListParser.parse(reader, source.format, when (source.category) {
+                        DomainThreatCategory.MALWARE -> malwareSet
+                        DomainThreatCategory.TRACKING -> trackingSet
+                        DomainThreatCategory.NONE -> trackingSet
+                    })
+                }
+            }
+            // Malware wins: drop tracking duplicates that are already malware.
+            if (malwareSet.isNotEmpty()) {
+                trackingSet.removeAll(malwareSet)
             }
             if (malwareSet.isEmpty() && trackingSet.isEmpty()) {
-                throw IllegalStateException("Downloaded domain lists were empty")
+                throw IllegalStateException("Merged domain DB was empty")
             }
 
-            val malwareFinal = File(dir, MALWARE_FILE)
-            val trackingFinal = File(dir, TRACKING_FILE)
-            if (!malwareTmp.renameTo(malwareFinal)) {
-                malwareTmp.copyTo(malwareFinal, overwrite = true)
-                malwareTmp.delete()
-            }
-            if (!trackingTmp.renameTo(trackingFinal)) {
-                trackingTmp.copyTo(trackingFinal, overwrite = true)
-                trackingTmp.delete()
-            }
+            writeUnifiedDb(MALWARE_DB, malwareSet, "malware")
+            writeUnifiedDb(TRACKING_DB, trackingSet, "tracking")
 
             if (malwareSet.isNotEmpty()) index.replaceMalware(malwareSet)
             if (trackingSet.isNotEmpty()) index.replaceTracking(trackingSet)
@@ -222,8 +227,20 @@ class DomainReputationRepository @Inject constructor(
         }
     }
 
-    private fun downloadFirstAvailable(client: OkHttpClient, urls: List<String>, dest: File) {
-        dest.writeText(downloadBodyFirstAvailable(client, urls), Charsets.UTF_8)
+    private fun writeUnifiedDb(name: String, domains: Set<String>, kind: String) {
+        val dir = listDir()
+        val final = File(dir, name)
+        val tmp = File(dir, "$name.tmp")
+        tmp.bufferedWriter(Charsets.UTF_8).use { out ->
+            out.appendLine("# OnionVPN unified $kind domain DB")
+            out.appendLine("# Merged from DomainBlocklistCatalog sources — do not edit")
+            out.appendLine("# entries=${domains.size}")
+            domains.asSequence().sorted().forEach { out.appendLine(it) }
+        }
+        if (!tmp.renameTo(final)) {
+            tmp.copyTo(final, overwrite = true)
+            tmp.delete()
+        }
     }
 
     private fun downloadBodyFirstAvailable(client: OkHttpClient, urls: List<String>): String {
@@ -245,7 +262,7 @@ class DomainReputationRepository @Inject constructor(
             Request.Builder()
                 .url(url)
                 .header("User-Agent", "OnionVPN-DomainReputation/1.0")
-                .header("Accept", "text/plain")
+                .header("Accept", "text/plain,*/*")
                 .build(),
         ).execute()
         return response.use {
@@ -281,51 +298,48 @@ class DomainReputationRepository @Inject constructor(
         return HttpTransport(client, viaTor = true)
     }
 
+    /** Rename pre-unified HaGeZi cache files once. */
+    private fun migrateLegacyFilenames() {
+        val dir = listDir()
+        val legacyMalware = File(dir, "hagezi-tif-mini.txt")
+        val legacyTracking = File(dir, "hagezi-tracking.txt")
+        val malware = File(dir, MALWARE_DB)
+        val tracking = File(dir, TRACKING_DB)
+        if (!malware.isFile && legacyMalware.isFile) {
+            legacyMalware.copyTo(malware, overwrite = false)
+            sourceCacheDir().mkdirs()
+            legacyMalware.copyTo(sourceCacheFile("hagezi-tif-mini"), overwrite = false)
+        }
+        if (!tracking.isFile && legacyTracking.isFile) {
+            legacyTracking.copyTo(tracking, overwrite = false)
+        }
+    }
+
     private fun listDir(): File =
         File(context.filesDir, "domain-reputation").also { it.mkdirs() }
 
+    private fun sourceCacheDir(): File =
+        File(listDir(), "sources").also { it.mkdirs() }
+
+    private fun sourceCacheFile(id: String): File =
+        File(sourceCacheDir(), "$id.txt")
+
     companion object {
-        private const val MALWARE_FILE = "hagezi-tif-mini.txt"
-        private const val TRACKING_FILE = "hagezi-tracking.txt"
+        private const val MALWARE_DB = "malware.txt"
+        private const val TRACKING_DB = "tracking.txt"
         private const val META_FILE = "last-success.txt"
         private const val VIA_TOR_FILE = "last-via-tor.txt"
-        /** HaGeZi lists expire ~12h–1d; refresh daily. */
         private const val REFRESH_INTERVAL_MS = 24L * 60L * 60L * 1000L
-        /** ~15s — cover Tor ready → ports published + brief SOCKS settle. */
         private const val PROBE_WAIT_ATTEMPTS = 30
         private const val PROBE_WAIT_DELAY_MS = 500L
-
-        private val MALWARE_URLS = listOf(
-            "https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/wildcard/tif.mini-onlydomains.txt",
-            "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/tif.mini-onlydomains.txt",
-            "https://gitlab.com/hagezi/mirror/-/raw/main/dns-blocklists/wildcard/tif.mini-onlydomains.txt",
-        )
-
-        private val TRACKING_LIGHT_URLS = listOf(
-            "https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/wildcard/light-onlydomains.txt",
-            "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/light-onlydomains.txt",
-            "https://gitlab.com/hagezi/mirror/-/raw/main/dns-blocklists/wildcard/light-onlydomains.txt",
-        )
-
-        private val TRACKING_NATIVE_URLS = listOf(
-            "https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/wildcard/native.apple-onlydomains.txt",
-            "https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/wildcard/native.amazon-onlydomains.txt",
-            "https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/wildcard/native.huawei-onlydomains.txt",
-            "https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/wildcard/native.samsung-onlydomains.txt",
-            "https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/wildcard/native.xiaomi-onlydomains.txt",
-            "https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/wildcard/native.oppo-realme-onlydomains.txt",
-            "https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/wildcard/native.vivo-onlydomains.txt",
-            "https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/wildcard/native.winoffice-onlydomains.txt",
-            "https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/wildcard/native.tiktok-onlydomains.txt",
-            "https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/wildcard/native.roku-onlydomains.txt",
-            "https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/wildcard/native.lgwebos-onlydomains.txt",
-        )
     }
 }
 
 data class DomainReputationStatus(
     val malwareEntries: Int = 0,
     val trackingEntries: Int = 0,
+    /** Number of non-empty per-source cache files under `sources/`. */
+    val sourceFilesCached: Int = 0,
     val lastSuccessEpochMs: Long = 0L,
     val lastError: String? = null,
     val updating: Boolean = false,

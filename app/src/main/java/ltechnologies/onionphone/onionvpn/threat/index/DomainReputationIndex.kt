@@ -1,6 +1,7 @@
-package ltechnologies.onionphone.onionvpn.threat
+package ltechnologies.onionphone.onionvpn.threat.index
 
-import java.io.BufferedReader
+import ltechnologies.onionphone.onionvpn.threat.parse.DomainListFormat
+import ltechnologies.onionphone.onionvpn.threat.parse.DomainListParser
 import java.io.File
 import java.io.Reader
 import java.util.concurrent.atomic.AtomicReference
@@ -8,10 +9,8 @@ import ltechnologies.onionphone.onionvpn.core.model.DomainThreatCategory
 import timber.log.Timber
 
 /**
- * In-memory domain blocklists with parent-domain matching.
- *
- * HaGeZi `*-onlydomains.txt` lists are "domains without subdomains": an entry
- * `tracker.example` matches `a.b.tracker.example` and `tracker.example`.
+ * In-memory domain blocklists with parent-domain matching against the unified
+ * local DB (`malware.txt` / `tracking.txt`).
  *
  * Classification priority: [DomainThreatCategory.MALWARE] over
  * [DomainThreatCategory.TRACKING].
@@ -60,29 +59,9 @@ class DomainReputationIndex {
     }
 
     companion object {
-        fun parseDomains(reader: Reader, into: MutableSet<String>): Boolean {
-            val br = reader as? BufferedReader ?: BufferedReader(reader)
-            var count = 0
-            br.lineSequence().forEach { raw ->
-                val line = raw.trim()
-                if (line.isEmpty() || line.startsWith("#") || line.startsWith("!")) return@forEach
-                // Accept plain domain, or "0.0.0.0 domain" / "127.0.0.1 domain" hosts lines.
-                val domain = when {
-                    line.startsWith("0.0.0.0 ") || line.startsWith("127.0.0.1 ") ->
-                        line.substringAfter(' ').trim().substringBefore(' ').trim()
-                    line.contains(' ') || line.contains('\t') ->
-                        line.substringAfterLast(' ').trim().ifEmpty {
-                            line.substringAfterLast('\t').trim()
-                        }
-                    else -> line
-                }.trimEnd('.').lowercase()
-                if (domain.isEmpty() || domain == "localhost" || looksLikeIp(domain)) return@forEach
-                if (!domain.any { it == '.' }) return@forEach // skip TLDs-only noise
-                into.add(domain)
-                count++
-            }
-            return count > 0
-        }
+        /** Accepts plain domains and hosts-file lines. */
+        fun parseDomains(reader: Reader, into: MutableSet<String>): Boolean =
+            DomainListParser.parse(reader, DomainListFormat.HOSTS, into) > 0
 
         fun matches(set: Set<String>, hostname: String): Boolean {
             if (set.isEmpty()) return false
@@ -92,8 +71,6 @@ class DomainReputationIndex {
                 val dot = h.indexOf('.')
                 if (dot < 0) return false
                 h = h.substring(dot + 1)
-                // Need at least one more dot for a registrable-looking suffix, but
-                // lists may include single-label CDN names — still check them.
                 if (h.isEmpty()) return false
             }
         }
