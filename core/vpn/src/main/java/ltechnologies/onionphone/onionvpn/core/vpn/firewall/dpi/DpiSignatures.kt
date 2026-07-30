@@ -400,6 +400,262 @@ internal object DpiSignatures {
         return opcode in 1..5
     }
 
+    /** Telnet IAC (RFC 854) — command stream starts with 0xFF. */
+    fun looksLikeTelnet(packet: ByteArray, offset: Int, len: Int): Boolean {
+        if (len < 3) return false
+        return (packet[offset].toInt() and 0xff) == 0xFF &&
+            (packet[offset + 1].toInt() and 0xff) in 0xF0..0xFE
+    }
+
+    /** LDAP BER SEQUENCE (RFC 4511) — tag 0x30 + reasonable length. */
+    fun looksLikeLdap(packet: ByteArray, offset: Int, len: Int): Boolean {
+        if (len < 6) return false
+        if ((packet[offset].toInt() and 0xff) != 0x30) return false
+        val lenByte = packet[offset + 1].toInt() and 0xff
+        return when {
+            lenByte < 0x80 -> lenByte + 2 <= len && lenByte >= 4
+            lenByte == 0x81 && len >= 3 -> {
+                val l = packet[offset + 2].toInt() and 0xff
+                l + 3 <= len && l >= 4
+            }
+            lenByte == 0x82 && len >= 4 -> {
+                val l = DpiBytes.u16(packet, offset + 2)
+                l + 4 <= len && l in 4..4096
+            }
+            else -> false
+        }
+    }
+
+    /** SMB1 `\xFFSMB` or SMB2 `\xFESMB` / `\xFDSMB`. */
+    fun looksLikeSmb(packet: ByteArray, offset: Int, len: Int): Boolean {
+        if (len < 4) return false
+        val b0 = packet[offset].toInt() and 0xff
+        return (b0 == 0xFF || b0 == 0xFE || b0 == 0xFD) &&
+            DpiBytes.startsWithAscii(packet, offset + 1, len - 1, "SMB")
+    }
+
+    /** Kerberos AS-REQ / TGS-REQ APPLICATION tags (RFC 4120). */
+    fun looksLikeKerberos(packet: ByteArray, offset: Int, len: Int): Boolean {
+        if (len < 4) return false
+        val tag = packet[offset].toInt() and 0xff
+        // APPLICATION 10 AS-REQ, 12 TGS-REQ, 11 AS-REP, 13 TGS-REP
+        return tag in setOf(0x6A, 0x6B, 0x6C, 0x6D)
+    }
+
+    /** SNMPv1/v2c BER SEQUENCE + version INTEGER (RFC 3411 family). */
+    fun looksLikeSnmp(packet: ByteArray, offset: Int, len: Int): Boolean {
+        if (len < 8) return false
+        if ((packet[offset].toInt() and 0xff) != 0x30) return false
+        // Quickly find version INTEGER 0/1/3 after length
+        var p = offset + 1
+        val lb = packet[p].toInt() and 0xff
+        p += when {
+            lb < 0x80 -> 1
+            lb == 0x81 -> 2
+            lb == 0x82 -> 3
+            else -> return false
+        }
+        if (p + 3 > offset + len) return false
+        if ((packet[p].toInt() and 0xff) != 0x02) return false // INTEGER
+        val il = packet[p + 1].toInt() and 0xff
+        if (il !in 1..4 || p + 2 + il > offset + len) return false
+        val ver = packet[p + 2].toInt() and 0xff
+        return ver in 0..3
+    }
+
+    /** Memcached ASCII (get/set/stats) or binary magic 0x80/0x81. */
+    fun looksLikeMemcached(packet: ByteArray, offset: Int, len: Int): Boolean {
+        if (len < 4) return false
+        val m = packet[offset].toInt() and 0xff
+        if (m == 0x80 || m == 0x81) return true
+        for (p in MEMCACHED_PREFIXES) {
+            if (DpiBytes.startsWithAscii(packet, offset, len, p)) return true
+        }
+        return false
+    }
+
+    /** AMQP protocol header "AMQP" (OASIS AMQP 1.0). */
+    fun looksLikeAmqp(packet: ByteArray, offset: Int, len: Int): Boolean =
+        len >= 8 && DpiBytes.startsWithAscii(packet, offset, len, "AMQP")
+
+    /** CoAP (RFC 7252): Ver=1 in bits 7..6 of first byte. */
+    fun looksLikeCoap(packet: ByteArray, offset: Int, len: Int): Boolean {
+        if (len < 4) return false
+        val b0 = packet[offset].toInt() and 0xff
+        val ver = (b0 ushr 6) and 0x03
+        if (ver != 1) return false
+        val code = packet[offset + 1].toInt() and 0xff
+        val cls = code ushr 5
+        val detail = code and 0x1f
+        return cls <= 5 && detail <= 31
+    }
+
+    /** MSSQL TDS PRELOGIN (type 0x12) or LOGIN7 (0x10). */
+    fun looksLikeMssql(packet: ByteArray, offset: Int, len: Int): Boolean {
+        if (len < 8) return false
+        val type = packet[offset].toInt() and 0xff
+        if (type !in setOf(0x12, 0x10, 0x04, 0x01)) return false
+        val status = packet[offset + 1].toInt() and 0xff
+        val pktLen = DpiBytes.u16(packet, offset + 2)
+        return status <= 0x01 && pktLen in 8..len + 64
+    }
+
+    /** MongoDB wire protocol: msgLen + requestID + responseTo + opCode. */
+    fun looksLikeMongodb(packet: ByteArray, offset: Int, len: Int): Boolean {
+        if (len < 16) return false
+        val msgLen = (packet[offset].toInt() and 0xff) or
+            ((packet[offset + 1].toInt() and 0xff) shl 8) or
+            ((packet[offset + 2].toInt() and 0xff) shl 16) or
+            ((packet[offset + 3].toInt() and 0xff) shl 24)
+        if (msgLen !in 16..48 * 1024 || msgLen > len + 1024) return false
+        val op = (packet[offset + 12].toInt() and 0xff) or
+            ((packet[offset + 13].toInt() and 0xff) shl 8) or
+            ((packet[offset + 14].toInt() and 0xff) shl 16) or
+            ((packet[offset + 15].toInt() and 0xff) shl 24)
+        // OP_REPLY=1, OP_MSG=2013, OP_QUERY=2004, OP_COMPRESSED=2012, etc.
+        return op in setOf(1, 2001, 2002, 2004, 2005, 2006, 2007, 2010, 2011, 2012, 2013)
+    }
+
+    /** Git pkt-line / smart HTTP: "xxxx# service=" or "git-" */
+    fun looksLikeGit(packet: ByteArray, offset: Int, len: Int): Boolean {
+        if (len < 8) return false
+        if (DpiBytes.startsWithAscii(packet, offset, len, "git-")) return true
+        // 4 hex length prefix then command
+        fun isHex(c: Int) =
+            c in '0'.code..'9'.code || c in 'a'.code..'f'.code || c in 'A'.code..'F'.code
+        if (!(0..3).all { isHex(packet[offset + it].toInt() and 0xff) }) return false
+        return DpiBytes.asciiContains(packet, offset, minOf(len, 64), "git-upload-pack") ||
+            DpiBytes.asciiContains(packet, offset, minOf(len, 64), "git-receive-pack") ||
+            DpiBytes.asciiContains(packet, offset, minOf(len, 64), "# service=")
+    }
+
+    /** NNTP (RFC 3977) banners / commands. */
+    fun looksLikeNntp(packet: ByteArray, offset: Int, len: Int): Boolean {
+        if (DpiBytes.startsWithAscii(packet, offset, len, "200 ") ||
+            DpiBytes.startsWithAscii(packet, offset, len, "201 ") ||
+            DpiBytes.startsWithAscii(packet, offset, len, "MODE ") ||
+            DpiBytes.startsWithAscii(packet, offset, len, "GROUP ") ||
+            DpiBytes.startsWithAscii(packet, offset, len, "ARTICLE")
+        ) {
+            return true
+        }
+        return false
+    }
+
+    /** RADIUS Access-Request (RFC 2865): code 1..5, length match. */
+    fun looksLikeRadius(packet: ByteArray, offset: Int, len: Int): Boolean {
+        if (len < 20) return false
+        val code = packet[offset].toInt() and 0xff
+        if (code !in 1..13) return false
+        val rLen = DpiBytes.u16(packet, offset + 2)
+        return rLen in 20..4096 && rLen <= len + 64
+    }
+
+    /** Modbus TCP MBAP (unit id + PDU). */
+    fun looksLikeModbus(packet: ByteArray, offset: Int, len: Int): Boolean {
+        if (len < 8) return false
+        val proto = DpiBytes.u16(packet, offset + 2)
+        if (proto != 0) return false
+        val length = DpiBytes.u16(packet, offset + 4)
+        return length in 2..256 && length + 6 <= len + 32
+    }
+
+    /** RTMP handshake: version byte 0x03 then typically 1536-byte random (Adobe RTMP). */
+    fun looksLikeRtmp(packet: ByteArray, offset: Int, len: Int): Boolean {
+        if (len < 9) return false
+        if ((packet[offset].toInt() and 0xff) != 0x03) return false
+        // Full C0+C1 is 1537 bytes; accept partial first segment on common port.
+        return len >= 1537 || len >= 64
+    }
+
+    /** IKEv2 header (RFC 7296): next payload, version 2.0, exchange type. */
+    fun looksLikeIke(packet: ByteArray, offset: Int, len: Int): Boolean {
+        if (len < 28) return false
+        val version = packet[offset + 17].toInt() and 0xff
+        // Major=2 → 0x20
+        if (version != 0x20 && version != 0x10) return false
+        val exchange = packet[offset + 18].toInt() and 0xff
+        return exchange in 1..44
+    }
+
+    /** L2TP (RFC 2661): flags T=1 for control, version=2. */
+    fun looksLikeL2tp(packet: ByteArray, offset: Int, len: Int): Boolean {
+        if (len < 6) return false
+        val flags = DpiBytes.u16(packet, offset)
+        val ver = flags and 0x0F
+        return ver == 2
+    }
+
+    /** Cassandra native protocol: version 3/4/5 in first byte, opcode. */
+    fun looksLikeCassandra(packet: ByteArray, offset: Int, len: Int): Boolean {
+        if (len < 9) return false
+        val ver = packet[offset].toInt() and 0xff
+        // request 0x03..0x05, response 0x83..0x85
+        if (ver !in 0x03..0x05 && ver !in 0x83..0x85) return false
+        val opcode = packet[offset + 4].toInt() and 0xff
+        return opcode in 0x00..0x10
+    }
+
+    /** Kafka request: size + apiKey + apiVersion (small ints). */
+    fun looksLikeKafka(packet: ByteArray, offset: Int, len: Int): Boolean {
+        if (len < 12) return false
+        val size = ((packet[offset].toInt() and 0xff) shl 24) or
+            ((packet[offset + 1].toInt() and 0xff) shl 16) or
+            ((packet[offset + 2].toInt() and 0xff) shl 8) or
+            (packet[offset + 3].toInt() and 0xff)
+        if (size !in 8..1_000_000) return false
+        val apiKey = DpiBytes.u16(packet, offset + 4)
+        val apiVer = DpiBytes.u16(packet, offset + 6)
+        return apiKey <= 70 && apiVer <= 20
+    }
+
+    /** Redis already covered; Beanstalkd ASCII. */
+    fun looksLikeBeanstalkd(packet: ByteArray, offset: Int, len: Int): Boolean {
+        for (p in BEANSTALK_PREFIXES) {
+            if (DpiBytes.startsWithAscii(packet, offset, len, p)) return true
+        }
+        return false
+    }
+
+    /** Minecraft Java handshake (VarInt packet id 0 in first payload after length). */
+    fun looksLikeMinecraft(packet: ByteArray, offset: Int, len: Int): Boolean {
+        if (len < 5) return false
+        // Packet length VarInt then packet id 0x00 (handshake)
+        var p = offset
+        var value = 0
+        var shift = 0
+        repeat(3) {
+            if (p >= offset + len) return false
+            val b = packet[p++].toInt() and 0xff
+            value = value or ((b and 0x7f) shl shift)
+            if (b and 0x80 == 0) {
+                if (value !in 1..512) return false
+                if (p >= offset + len) return false
+                return (packet[p].toInt() and 0xff) == 0x00
+            }
+            shift += 7
+        }
+        return false
+    }
+
+    /** Bitcoin P2P magic mainnet F9 BE B4 D9. */
+    fun looksLikeBitcoin(packet: ByteArray, offset: Int, len: Int): Boolean {
+        if (len < 16) return false
+        return (packet[offset].toInt() and 0xff) == 0xF9 &&
+            (packet[offset + 1].toInt() and 0xff) == 0xBE &&
+            (packet[offset + 2].toInt() and 0xff) == 0xB4 &&
+            (packet[offset + 3].toInt() and 0xff) == 0xD9
+    }
+
+    /** Whois / Finger / Gopher: short ASCII client queries. */
+    fun looksLikeWhois(packet: ByteArray, offset: Int, len: Int): Boolean {
+        if (len < 2 || len > 256) return false
+        // domain\r\n style
+        return DpiBytes.asciiContains(packet, offset, len, "\r\n") &&
+            !DpiBytes.startsWithAscii(packet, offset, len, "GET ") &&
+            !DpiBytes.startsWithAscii(packet, offset, len, "HTTP/")
+    }
+
     val HTTP_METHODS = arrayOf(
         "GET ", "POST ", "HEAD ", "PUT ", "DELETE ", "OPTIONS ", "CONNECT ", "PATCH ",
         "HTTP/1.", "HTTP/2",
@@ -416,6 +672,12 @@ internal object DpiSignatures {
     )
     val IRC_PREFIXES = arrayOf(
         "NICK ", "USER ", "JOIN ", "PRIVMSG ", "NOTICE ", "PING ", "PONG ", "CAP ",
+    )
+    val MEMCACHED_PREFIXES = arrayOf(
+        "get ", "gets ", "set ", "add ", "replace ", "delete ", "stats", "version", "quit",
+    )
+    val BEANSTALK_PREFIXES = arrayOf(
+        "use ", "put ", "reserve", "delete ", "stats", "list-tubes", "peek-",
     )
     val HTTP_PORTS = setOf(80, 8080, 8000, 8008, 8888, 5000)
     val HTTPS_PORTS = setOf(443, 8443)

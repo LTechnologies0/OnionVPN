@@ -1,6 +1,8 @@
 package ltechnologies.onionphone.onionvpn.core.tor.control.geo
 
+import ltechnologies.onionphone.onionvpn.core.tor.control.TorControlClient
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -20,8 +22,21 @@ class RelayCountryLookupTest {
 
     @Test
     fun hopsForPath_parsesFingerprints() {
-        // Pure parse without control — exercise path splitting via reflection-free public API
-        // by constructing hops manually is covered in manager; here flag only.
         assertTrue(RelayCountryLookup.flagEmoji("de").contains("🇩"))
+    }
+
+    /**
+     * Regression: ConcurrentHashMap rejects null values. Disconnected control used to
+     * `countryByFp[fp] = null` and crash Circuits refresh on Dispatchers.IO.
+     */
+    @Test
+    fun countryForFingerprint_disconnected_cachesUnknownWithoutNpe() {
+        val lookup = RelayCountryLookup(TorControlClient())
+        val fp = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        assertNull(lookup.countryForFingerprint(fp))
+        assertNull(lookup.countryForFingerprint(fp))
+        val hops = lookup.hopsForPath("\$$fp~Unnamed")
+        assertEquals(1, hops.size)
+        assertNull(hops[0].countryCode)
     }
 }

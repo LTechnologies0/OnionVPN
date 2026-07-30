@@ -135,8 +135,9 @@ class HevSocks5TunForwarder(
         appendLine("  address: '$socksHost'")
         // Force UDP associate over TCP — no clearnet UDP side-channel.
         appendLine("  udp: 'tcp'")
-        // IsolateSOCKSAuth token for hev (static — hev has no per-stream auth).
-        // Per-destination circuits come from Tor IsolateDestAddr/IsolateDestPort.
+        // IsolateSOCKSAuth: hev only supports one static username/password for all flows.
+        // OnionVPN data plane uses UidIsolatingTunForwarder (per-UID u{uid}/p{uid}) instead.
+        // Kept for offline/config experiments — do not use as the Connected VPN forwarder.
         appendLine("  username: '${TunnelEndpoints.SOCKS_ISOLATION_USER}'")
         appendLine("  password: '${TunnelEndpoints.SOCKS_ISOLATION_PASS}'")
         if (useMapDns) {

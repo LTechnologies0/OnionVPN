@@ -1,15 +1,24 @@
 #!/usr/bin/env bash
 # Fetches Tor, DNSCrypt, and hev-socks5-tunnel .so into app/src/main/jniLibs.
 # Supported ABIs (matching release splits): arm64-v8a, x86_64
+#
+# Tor binaries: LTechnologies0 fork of Tor-Android-build-script (GitHub Releases).
+#   https://github.com/LTechnologies0/Tor-Android-build-script
+# DNSCrypt + hev: still extracted from InviZible Lite / sockstun APKs.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="${TMPDIR:-/tmp}/onionvpn-bin-fetch"
 mkdir -p "$TMP"
 
-INVIZIBLE_X86_URL="https://github.com/Gedsh/InviZible/releases/download/v7.4.0-stable/Invizible_Lite_ver.7.4.0_x86_64.apk"
-INVIZIBLE_ARM64_URL="https://github.com/Gedsh/InviZible/releases/download/v7.4.0-stable/Invizible_Lite_ver.7.4.0_arm64.apk"
+INVIZIBLE_X86_URL="https://github.com/Gedsh/InviZible/releases/download/v7.5.0-stable/Invizible_Lite_ver.7.5.0_x86_64.apk"
+INVIZIBLE_ARM64_URL="https://github.com/Gedsh/InviZible/releases/download/v7.5.0-stable/Invizible_Lite_ver.7.5.0_arm64.apk"
 SOCKSTUN_URL="https://github.com/heiher/sockstun/releases/download/7.0/hev.sockstun-7.0-release.apk"
+
+# LTechnologies0/Tor-Android-build-script GitHub Releases (controlled fork)
+TOR_RELEASE_BASE="https://github.com/LTechnologies0/Tor-Android-build-script/releases/latest/download"
+TOR_ARM64_URL="${TOR_RELEASE_BASE}/libtor-arm64-v8a.so"
+TOR_X86_64_URL="${TOR_RELEASE_BASE}/libtor-x86_64.so"
 
 fetch() {
   local url="$1" dest="$2"
@@ -18,21 +27,30 @@ fetch() {
   curl -fsSL -L -o "$dest" "$url"
 }
 
+fetch_force() {
+  local url="$1" dest="$2"
+  echo "Downloading $(basename "$dest")..."
+  curl -fsSL -L -o "$dest" "$url"
+}
+
 fetch "$INVIZIBLE_X86_URL" "$TMP/invizible_x86.apk"
 fetch "$INVIZIBLE_ARM64_URL" "$TMP/invizible_arm64.apk"
 fetch "$SOCKSTUN_URL" "$TMP/sockstun.apk"
+fetch_force "$TOR_ARM64_URL" "$TMP/libtor-arm64.so"
+fetch_force "$TOR_X86_64_URL" "$TMP/libtor-x86_64.so"
 
 install_abi() {
-  local invizible_apk="$1" jni_abi="$2"
+  local invizible_apk="$1" jni_abi="$2" tor_so="$3"
   local lib_dir="$ROOT/app/src/main/jniLibs/$jni_abi"
   mkdir -p "$lib_dir"
-  unzip -p "$invizible_apk" "lib/$jni_abi/libtor.so" >"$lib_dir/libtor.so"
+  cp -f "$tor_so" "$lib_dir/libtor.so"
   unzip -p "$invizible_apk" "lib/$jni_abi/libdnscrypt-proxy.so" >"$lib_dir/libdnscrypt-proxy.so"
   unzip -p "$TMP/sockstun.apk" "lib/$jni_abi/libhev-socks5-tunnel.so" >"$lib_dir/libhev-socks5-tunnel.so"
   chmod +x "$lib_dir"/*.so
-  echo "OK $jni_abi"
+  echo "OK $jni_abi (tor=$(wc -c <"$lib_dir/libtor.so") bytes)"
 }
 
-install_abi "$TMP/invizible_arm64.apk" "arm64-v8a"
-install_abi "$TMP/invizible_x86.apk" "x86_64"
+install_abi "$TMP/invizible_arm64.apk" "arm64-v8a" "$TMP/libtor-arm64.so"
+install_abi "$TMP/invizible_x86.apk" "x86_64" "$TMP/libtor-x86_64.so"
 echo "Native binaries installed under app/src/main/jniLibs/"
+echo "Tor source: LTechnologies0/Tor-Android-build-script releases"

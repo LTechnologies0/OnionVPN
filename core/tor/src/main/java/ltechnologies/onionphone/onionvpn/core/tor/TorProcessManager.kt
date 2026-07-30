@@ -4,11 +4,14 @@ import android.content.Context
 import java.io.File
 import java.io.IOException
 import java.net.HttpURLConnection
+import java.net.InetSocketAddress
+import java.net.Proxy
 import java.net.URL
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.withContext
+import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
 import ltechnologies.onionphone.onionvpn.core.model.TunnelFailure
 import ltechnologies.onionphone.onionvpn.core.model.TunnelPreferences
 import ltechnologies.onionphone.onionvpn.core.model.TunnelRuntimePorts
@@ -110,7 +113,10 @@ class TorProcessManager(
             )
             // Step 6
             waitForBootstrap(ports)
-            // Step 7
+            // Step 7 — GeoIP over Tor SOCKS (clearnet is blackholed under kill-switch Blocking).
+            ensureGeoIpFiles(socksPort = ports.torSocksPort)
+            applyGeoIpIfPresent()
+            // Step 8
             control.setActive()
             Timber.i(
                 "Tor ready socks=${ports.torSocksPort} " +
@@ -406,13 +412,44 @@ class TorProcessManager(
         }
     }
 
-    /** Seeds GeoIP so circuit UI can resolve relay countries (`ip-to-country`). */
-    private fun ensureGeoIpFiles() {
-        seedGeoIpAsset(TorConfigWriter.GEOIP_FILE_NAME, GEOIP_URL, minBytes = 100_000L)
-        seedGeoIpAsset(TorConfigWriter.GEOIP6_FILE_NAME, GEOIP6_URL, minBytes = 50_000L)
+    /**
+     * Seeds GeoIP so circuit UI can resolve relay countries (`ip-to-country`).
+     *
+     * Order: APK assets → optional clearnet mirrors (often blocked under kill-switch) →
+     * Tor SOCKS when [socksPort] is set (preferred under Blocking TUN).
+     */
+    private fun ensureGeoIpFiles(socksPort: Int? = null) {
+        seedGeoIpAsset(TorConfigWriter.GEOIP_FILE_NAME, GEOIP_URLS, minBytes = 100_000L, socksPort)
+        seedGeoIpAsset(TorConfigWriter.GEOIP6_FILE_NAME, GEOIP6_URLS, minBytes = 50_000L, socksPort)
     }
 
-    private fun seedGeoIpAsset(name: String, url: String, minBytes: Long) {
+    private fun geoIpFile(): File = File(configDirectory, TorConfigWriter.GEOIP_FILE_NAME)
+    private fun geoIp6File(): File = File(configDirectory, TorConfigWriter.GEOIP6_FILE_NAME)
+
+    private fun geoIpReady(): Boolean {
+        val v4 = geoIpFile()
+        val v6 = geoIp6File()
+        return v4.isFile && v4.length() >= 100_000L && v6.isFile && v6.length() >= 50_000L
+    }
+
+    private fun applyGeoIpIfPresent() {
+        if (!geoIpReady() || !control.isConnected) return
+        control.setGeoIpFiles(geoIpFile().absolutePath, geoIp6File().absolutePath)
+            .onSuccess {
+                Timber.i(
+                    "GeoIP applied live (ip-to-country/ipv4-available=%s)",
+                    runCatching { control.getInfo("ip-to-country/ipv4-available") }.getOrNull()?.trim(),
+                )
+            }
+            .onFailure { Timber.w(it, "SETCONF GeoIPFile failed") }
+    }
+
+    private fun seedGeoIpAsset(
+        name: String,
+        urls: List<String>,
+        minBytes: Long,
+        socksPort: Int?,
+    ) {
         val dest = File(configDirectory, name)
         if (dest.isFile && dest.length() >= minBytes) return
         val fromAsset = runCatching {
@@ -425,33 +462,69 @@ class TorProcessManager(
             Timber.i("GeoIP seeded from assets: %s (%d bytes)", name, dest.length())
             return
         }
-        runCatching {
-            val conn = (URL(url).openConnection() as HttpURLConnection).apply {
-                connectTimeout = 20_000
-                readTimeout = 120_000
-                instanceFollowRedirects = true
-            }
-            try {
-                conn.inputStream.use { input ->
-                    val tmp = File(configDirectory, "$name.part")
-                    tmp.outputStream().use { output -> input.copyTo(output) }
-                    if (tmp.length() < minBytes) {
-                        tmp.delete()
-                        error("GeoIP download too small: ${tmp.length()}")
-                    }
-                    if (!tmp.renameTo(dest)) {
-                        tmp.copyTo(dest, overwrite = true)
-                        tmp.delete()
-                    }
-                }
-            } finally {
-                conn.disconnect()
-            }
-            Timber.i("GeoIP downloaded: %s (%d bytes)", name, dest.length())
-        }.onFailure {
-            Timber.w(it, "GeoIP seed failed for %s — circuit flags may be empty", name)
+        // Prefer Tor SOCKS under kill-switch. Skip clearnet: Blocking TUN blackholes it
+        // and the old gitlab `main` URLs 404/403 anyway.
+        if (socksPort == null) {
+            Timber.d("GeoIP %s: waiting for Tor SOCKS (no assets / no clearnet)", name)
+            return
         }
+        for (url in urls) {
+            val ok = downloadGeoIp(dest, url, minBytes, socksPort)
+            if (ok) {
+                Timber.i(
+                    "GeoIP downloaded: %s (%d bytes) via socks:%d",
+                    name,
+                    dest.length(),
+                    socksPort,
+                )
+                return
+            }
+        }
+        Timber.w("GeoIP seed failed for %s — circuit flags may be empty", name)
     }
+
+    private fun downloadGeoIp(
+        dest: File,
+        url: String,
+        minBytes: Long,
+        socksPort: Int?,
+    ): Boolean = runCatching {
+        val proxy = if (socksPort != null) {
+            Proxy(Proxy.Type.SOCKS, InetSocketAddress(TunnelEndpoints.LOOPBACK, socksPort))
+        } else {
+            Proxy.NO_PROXY
+        }
+        val conn = (URL(url).openConnection(proxy) as HttpURLConnection).apply {
+            connectTimeout = 20_000
+            readTimeout = 180_000
+            instanceFollowRedirects = true
+            setRequestProperty("User-Agent", "OnionVPN/geoip")
+            setRequestProperty("Accept", "text/plain,*/*")
+        }
+        try {
+            val code = conn.responseCode
+            if (code !in 200..299) {
+                error("HTTP $code for $url")
+            }
+            conn.inputStream.use { input ->
+                val tmp = File(configDirectory, "${dest.name}.part")
+                tmp.outputStream().use { output -> input.copyTo(output) }
+                if (tmp.length() < minBytes) {
+                    tmp.delete()
+                    error("GeoIP download too small: ${tmp.length()}")
+                }
+                if (!tmp.renameTo(dest)) {
+                    tmp.copyTo(dest, overwrite = true)
+                    tmp.delete()
+                }
+            }
+            true
+        } finally {
+            conn.disconnect()
+        }
+    }.onFailure {
+        Timber.d(it, "GeoIP mirror failed %s", url)
+    }.getOrDefault(false)
 
     private fun stopInternal() {
         runCatching { control.disconnect(sendShutdown = true) }
@@ -474,9 +547,18 @@ class TorProcessManager(
 
     companion object {
         const val LOG_TAG = "tor"
-        private const val GEOIP_URL =
-            "https://gitlab.torproject.org/tpo/core/tor/-/raw/main/src/config/geoip"
-        private const val GEOIP6_URL =
-            "https://gitlab.torproject.org/tpo/core/tor/-/raw/main/src/config/geoip6"
+
+        /**
+         * Official metrics geoip-data (kept current) + Tor release-branch fallback.
+         * `main/src/config/geoip` was removed / blocked on GitLab — do not use it.
+         */
+        private val GEOIP_URLS = listOf(
+            "https://tpo.pages.torproject.net/network-health/metrics/geoip-data/geoip",
+            "https://gitlab.torproject.org/tpo/core/tor/-/raw/release-0.4.8/src/config/geoip",
+        )
+        private val GEOIP6_URLS = listOf(
+            "https://tpo.pages.torproject.net/network-health/metrics/geoip-data/geoip6",
+            "https://gitlab.torproject.org/tpo/core/tor/-/raw/release-0.4.8/src/config/geoip6",
+        )
     }
 }

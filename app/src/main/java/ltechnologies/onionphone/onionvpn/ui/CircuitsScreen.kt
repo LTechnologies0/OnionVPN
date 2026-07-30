@@ -75,7 +75,7 @@ fun CircuitsScreen(
             }
             SectionHeader(
                 title = "Tor circuits",
-                subtitle = "Per-app isolation via SOCKS u{uid}. Close uses CLOSECIRCUIT IfUnused.",
+                subtitle = "Per-app IsolateSOCKSAuth (RFC 1929) — SOCKS u{uid}. Close uses CLOSECIRCUIT IfUnused.",
                 modifier = Modifier.weight(1f),
             )
         }

@@ -18,6 +18,7 @@ import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
 import ltechnologies.onionphone.onionvpn.core.model.TunnelFailure
 import ltechnologies.onionphone.onionvpn.core.vpn.dns.DnsHostnameCache
 import ltechnologies.onionphone.onionvpn.core.vpn.firewall.ConnectionOwnerResolver
+import ltechnologies.onionphone.onionvpn.core.vpn.firewall.IpPacketInfo
 import ltechnologies.onionphone.onionvpn.core.vpn.firewall.IpPacketParser
 import ltechnologies.onionphone.onionvpn.core.vpn.profile.TunForwarder
 import timber.log.Timber
@@ -159,7 +160,7 @@ class UidIsolatingTunForwarder(
                 return
             }
             val info = IpPacketParser.parse(buf, length)
-            val uid = info?.let { ownerResolver.resolveUid(it) } ?: Process.INVALID_UID
+            val uid = resolveUidWithRetry(info)
             // Never IsolateSOCKSAuth as uunknown — wait for owner (matches firewall fail-closed).
             if (!ConnectionOwnerResolver.isValidUid(uid)) {
                 Timber.d("Drop SYN — UID not resolved yet ${destIp}:${meta.dstPort}")
@@ -208,5 +209,26 @@ class UidIsolatingTunForwarder(
         if (!TunnelEndpoints.isAutomapVirtualIpv4(destIp)) return destIp
         val host = DnsHostnameCache.lookup(destIp) ?: return null
         return if (TunnelEndpoints.isOnionLikeHostname(host)) host else null
+    }
+
+    /**
+     * First SYN often races [ConnectivityManager.getConnectionOwnerUid] — brief retry
+     * so IsolateSOCKSAuth tokens (`u{uid}`) reach Tor and the circuit manager.
+     */
+    private fun resolveUidWithRetry(info: IpPacketInfo?): Int {
+        if (info == null) return Process.INVALID_UID
+        repeat(UID_RESOLVE_ATTEMPTS) { attempt ->
+            val uid = ownerResolver.resolveUid(info)
+            if (ConnectionOwnerResolver.isValidUid(uid)) return uid
+            if (attempt < UID_RESOLVE_ATTEMPTS - 1) {
+                LockSupport.parkNanos(UID_RESOLVE_PARK_NS)
+            }
+        }
+        return Process.INVALID_UID
+    }
+
+    companion object {
+        private const val UID_RESOLVE_ATTEMPTS = 8
+        private const val UID_RESOLVE_PARK_NS = 2_000_000L // 2ms
     }
 }

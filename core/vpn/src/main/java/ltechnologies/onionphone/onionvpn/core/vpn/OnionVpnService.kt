@@ -15,19 +15,19 @@ import ltechnologies.onionphone.onionvpn.core.model.TunnelFailure
 import ltechnologies.onionphone.onionvpn.core.model.TunnelPreferences
 import ltechnologies.onionphone.onionvpn.core.model.VpnEstablishResult
 import ltechnologies.onionphone.onionvpn.core.model.VpnProfileMode
-import ltechnologies.onionphone.onionvpn.core.vpn.forwarder.HevSocks5TunForwarder
+import ltechnologies.onionphone.onionvpn.core.vpn.forwarder.UidIsolatingTunForwarder
 import ltechnologies.onionphone.onionvpn.core.vpn.net.UnderlyingNetworkTracker
 import ltechnologies.onionphone.onionvpn.core.vpn.profile.TunForwarder
 import ltechnologies.onionphone.onionvpn.core.vpn.profile.VpnProfileBuilder
 import timber.log.Timber
 
 /**
- * Android [VpnService] data plane — builds TUN profiles and runs hev-socks5-tunnel.
+ * Android [VpnService] data plane — builds TUN profiles and runs the UID-isolating SOCKS forwarder.
  *
  * Sequential applyProfile:
  * 1. Parse intent prefs/mode/ports/generation
  * 2. [VpnProfileBuilder.configure] + establish TUN (before closing old)
- * 3. Start [HevSocks5TunForwarder] (TunDnsMux + hev TCP/UDP↔SOCKS)
+ * 3. Start [UidIsolatingTunForwarder] (TunDnsMux + per-app IsolateSOCKSAuth `u{uid}`)
  * 4. [UnderlyingNetworkTracker] for SIGNAL ACTIVE on net change
  *
  * Coordinator: [ltechnologies.onionphone.onionvpn.service.TunnelForegroundService].
@@ -226,9 +226,12 @@ class OnionVpnService : VpnService() {
         dnsMode: DnsResolverMode,
     ) {
         val tun = tunInterface ?: return
-        val forwarder = HevSocks5TunForwarder(
+        // Per-app SOCKS auth (RFC 1929) so Tor IsolateSOCKSAuth exposes u{uid} on circuits.
+        // hev-socks5-tunnel only supports a single static username — unusable for circuit UX.
+        val forwarder = UidIsolatingTunForwarder(
             context = applicationContext,
             dnsMode = dnsMode,
+            protectSocket = { socket -> protect(socket) },
             onFatal = { error ->
                 Timber.e(error, "TUN forwarder died — signalling fail-closed")
                 forwarderAlive.value = false

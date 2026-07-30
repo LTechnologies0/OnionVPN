@@ -274,6 +274,56 @@ class ApplicationLayerDetectorTest {
         assertEquals("DTLS", ApplicationLayerDetector.classify(packet, packet.size, info).label)
     }
 
+    @Test
+    fun catalogCoversHundredPlusKinds() {
+        val kinds = ApplicationLayerDetector.Kind.entries.size
+        // Original ~40 + 100 additions (minus UNKNOWN overlap).
+        assertTrue("expected ≥110 kinds, got $kinds", kinds >= 110)
+    }
+
+    @Test
+    fun tcpSyn389LabeledLdap() {
+        val packet = tcpSynPacket(dstPort = 389)
+        val info = IpPacketParser.parse(packet, packet.size)!!
+        assertEquals("LDAP", ApplicationLayerDetector.classify(packet, packet.size, info).label)
+    }
+
+    @Test
+    fun smbMagicDetected() {
+        val payload = byteArrayOf(0xFF.toByte(), 'S'.code.toByte(), 'M'.code.toByte(), 'B'.code.toByte()) +
+            ByteArray(32)
+        val packet = tcpDataPacket(dstPort = 445, payload = payload, syn = false)
+        val info = IpPacketParser.parse(packet, packet.size)!!
+        assertEquals("SMB", ApplicationLayerDetector.classify(packet, packet.size, info).label)
+    }
+
+    @Test
+    fun amqpHeaderDetected() {
+        val payload = "AMQP\u0000\u0001\u0000\u0000".toByteArray()
+        val packet = tcpDataPacket(dstPort = 5672, payload = payload, syn = false)
+        val info = IpPacketParser.parse(packet, packet.size)!!
+        assertEquals("AMQP", ApplicationLayerDetector.classify(packet, packet.size, info).label)
+    }
+
+    @Test
+    fun coapVersion1Detected() {
+        // Ver=1, T=0 CON, TKL=0, code 0.01 GET
+        val payload = byteArrayOf(0x40, 0x01, 0x00, 0x01)
+        val packet = udpPacket(dstPort = 5683, payload = payload)
+        val info = IpPacketParser.parse(packet, packet.size)!!
+        assertEquals("CoAP", ApplicationLayerDetector.classify(packet, packet.size, info).label)
+    }
+
+    @Test
+    fun bitcoinMagicDetected() {
+        val payload = byteArrayOf(
+            0xF9.toByte(), 0xBE.toByte(), 0xB4.toByte(), 0xD9.toByte(),
+        ) + ByteArray(20)
+        val packet = tcpDataPacket(dstPort = 8333, payload = payload, syn = false)
+        val info = IpPacketParser.parse(packet, packet.size)!!
+        assertEquals("Bitcoin", ApplicationLayerDetector.classify(packet, packet.size, info).label)
+    }
+
     private fun tcpSynPacket(dstPort: Int): ByteArray {
         val packet = ByteArray(40)
         packet[0] = 0x45.toByte()

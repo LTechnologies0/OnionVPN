@@ -159,6 +159,10 @@ class TorControlClient {
         maxCircuitDirtinessSec: Int,
         newCircuitPeriodSec: Int,
     ): Result<Unit> = ops.setCircuitTiming(maxCircuitDirtinessSec, newCircuitPeriodSec)
+
+    fun setGeoIpFiles(geoIpPath: String, geoIp6Path: String): Result<Unit> =
+        ops.setGeoIpFiles(geoIpPath, geoIp6Path)
+
     fun resolve(hostname: String, timeoutMs: Long = 15_000): Result<String> =
         resolveViaAddrMap(hostname, timeoutMs)
 

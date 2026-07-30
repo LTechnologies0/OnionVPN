@@ -75,7 +75,15 @@ Locally: copy `keystore.properties.example` → `keystore.properties` (gitignore
 
 ## Native binaries
 
-Prebuilt Tor / DNSCrypt (from InviZible Lite) and hev-socks5-tunnel (sockstun) live under `app/src/main/jniLibs/{arm64-v8a,x86_64}/`. Refresh with `scripts/fetch-native-binaries.sh`.
+Prebuilt Tor / DNSCrypt and hev-socks5-tunnel live under `app/src/main/jniLibs/{arm64-v8a,x86_64}/`.
+Refresh with `scripts/fetch-native-binaries.sh`:
+
+- **Tor** — [LTechnologies0/Tor-Android-build-script](https://github.com/LTechnologies0/Tor-Android-build-script)
+  (our fork of Gedsh’s Android Tor build; GitHub Release `libtor-*.so`)
+- **DNSCrypt** — InviZible Lite **v7.5.0** APK extract
+- **hev-socks5-tunnel** — sockstun APK extract
+
+There is **no** runtime Tor binary OTA; ship updates by refreshing jniLibs and releasing a new OnionVPN APK.
 
 ## License
 

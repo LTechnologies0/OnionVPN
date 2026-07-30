@@ -23,7 +23,11 @@ class RelayCountryLookup(
         val countryCode: String?,
     )
 
-    private val countryByFp = ConcurrentHashMap<String, String?>()
+    /**
+     * Fingerprint → ISO cc. ConcurrentHashMap forbids null values, so unknown/miss uses
+     * [UNKNOWN_CC] (`""`) as a sentinel after a probe.
+     */
+    private val countryByFp = ConcurrentHashMap<String, String>()
     private val ipByFp = ConcurrentHashMap<String, String>()
     private val geoIpAvailable = AtomicBoolean(true)
     private val geoIpProbed = AtomicBoolean(false)
@@ -49,9 +53,10 @@ class RelayCountryLookup(
     fun countryForFingerprint(fingerprint: String): String? {
         val fp = runCatching { TorControlWire.requireFingerprintHex(fingerprint) }.getOrNull()
             ?: return null
-        if (countryByFp.containsKey(fp)) return countryByFp[fp]
+        // Hit (including UNKNOWN_CC sentinel) vs miss (null get).
+        countryByFp[fp]?.let { cached -> return cached.ifEmpty { null } }
         if (!control.isConnected || !ensureGeoIpAvailable()) {
-            countryByFp[fp] = null
+            countryByFp[fp] = UNKNOWN_CC
             return null
         }
         val cc = runCatching {
@@ -62,7 +67,7 @@ class RelayCountryLookup(
         }.onFailure {
             Timber.d(it, "Relay country lookup failed for %s", fp.take(8))
         }.getOrNull()
-        countryByFp[fp] = cc
+        countryByFp[fp] = cc ?: UNKNOWN_CC
         return cc
     }
 
@@ -116,6 +121,9 @@ class RelayCountryLookup(
     }
 
     companion object {
+        /** Sentinel for “probed, country unknown” — ConcurrentHashMap rejects null values. */
+        private const val UNKNOWN_CC = ""
+
         /** ISO alpha-2 → regional-indicator flag emoji. */
         fun flagEmoji(countryCode: String?): String {
             val cc = countryCode?.lowercase() ?: return ""

@@ -31,7 +31,11 @@ class Socks5Client(
         val input = DataInputStream(socket.getInputStream())
         val output = DataOutputStream(socket.getOutputStream())
 
-        // Greeting: offer USERNAME/PASSWORD only
+        // Greeting: offer USERNAME/PASSWORD only (RFC 1929) — never anonymous SOCKS.
+        // Tor IsolateSOCKSAuth needs a non-empty token for per-app circuit attribution.
+        require(username.isNotBlank() && password.isNotBlank()) {
+            "SOCKS5 username/password required for IsolateSOCKSAuth"
+        }
         output.write(byteArrayOf(0x05, 0x01, 0x02))
         output.flush()
         val ver = input.readUnsignedByte()

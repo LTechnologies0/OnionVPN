@@ -38,6 +38,28 @@ internal object DpiPayloadGraph {
         ::probePostgres,
         ::probeMysql,
         ::probeMqtt,
+        ::probeTelnet,
+        ::probeLdap,
+        ::probeSmb,
+        ::probeKerberos,
+        ::probeSnmp,
+        ::probeMemcached,
+        ::probeAmqp,
+        ::probeCoap,
+        ::probeMssql,
+        ::probeMongodb,
+        ::probeGit,
+        ::probeNntp,
+        ::probeRadius,
+        ::probeModbus,
+        ::probeRtmp,
+        ::probeIke,
+        ::probeL2tp,
+        ::probeCassandra,
+        ::probeKafka,
+        ::probeBeanstalkd,
+        ::probeMinecraft,
+        ::probeBitcoin,
         ::probeStun,
         ::probeWireGuard,
         ::probeOpenVpn,
@@ -335,6 +357,239 @@ internal object DpiPayloadGraph {
         return Result(label = "MQTT", detail = "CONNECT", kind = Kind.MQTT)
     }
 
+    private fun probeTelnet(
+        packet: ByteArray,
+        offset: Int,
+        len: Int,
+        info: IpPacketInfo,
+    ): Result? {
+        if (!info.isTcp || !DpiSignatures.looksLikeTelnet(packet, offset, len)) return null
+        return Result(label = "Telnet", detail = "IAC", kind = Kind.TELNET)
+    }
+
+    private fun probeLdap(
+        packet: ByteArray,
+        offset: Int,
+        len: Int,
+        info: IpPacketInfo,
+    ): Result? {
+        if (!info.isTcp || !DpiSignatures.looksLikeLdap(packet, offset, len)) return null
+        return Result(label = "LDAP", detail = "BER", kind = Kind.LDAP)
+    }
+
+    private fun probeSmb(
+        packet: ByteArray,
+        offset: Int,
+        len: Int,
+        info: IpPacketInfo,
+    ): Result? {
+        if (!info.isTcp || !DpiSignatures.looksLikeSmb(packet, offset, len)) return null
+        return Result(label = "SMB", detail = "magic", kind = Kind.SMB)
+    }
+
+    private fun probeKerberos(
+        packet: ByteArray,
+        offset: Int,
+        len: Int,
+        info: IpPacketInfo,
+    ): Result? {
+        if (!(info.isTcp || info.isUdp) || !DpiSignatures.looksLikeKerberos(packet, offset, len)) {
+            return null
+        }
+        return Result(label = "Kerberos", detail = "AS/TGS", kind = Kind.KERBEROS)
+    }
+
+    private fun probeSnmp(
+        packet: ByteArray,
+        offset: Int,
+        len: Int,
+        info: IpPacketInfo,
+    ): Result? {
+        if (!info.isUdp || !DpiSignatures.looksLikeSnmp(packet, offset, len)) return null
+        return Result(label = "SNMP", detail = "UDP/${info.dstPort}", kind = Kind.SNMP)
+    }
+
+    private fun probeMemcached(
+        packet: ByteArray,
+        offset: Int,
+        len: Int,
+        info: IpPacketInfo,
+    ): Result? {
+        if (!(info.isTcp || info.isUdp) || !DpiSignatures.looksLikeMemcached(packet, offset, len)) {
+            return null
+        }
+        return Result(label = "Memcached", detail = null, kind = Kind.MEMCACHED)
+    }
+
+    private fun probeAmqp(
+        packet: ByteArray,
+        offset: Int,
+        len: Int,
+        info: IpPacketInfo,
+    ): Result? {
+        if (!info.isTcp || !DpiSignatures.looksLikeAmqp(packet, offset, len)) return null
+        return Result(label = "AMQP", detail = "header", kind = Kind.AMQP)
+    }
+
+    private fun probeCoap(
+        packet: ByteArray,
+        offset: Int,
+        len: Int,
+        info: IpPacketInfo,
+    ): Result? {
+        if (!info.isUdp || !DpiSignatures.looksLikeCoap(packet, offset, len)) return null
+        return Result(label = "CoAP", detail = "UDP/${info.dstPort}", kind = Kind.COAP)
+    }
+
+    private fun probeMssql(
+        packet: ByteArray,
+        offset: Int,
+        len: Int,
+        info: IpPacketInfo,
+    ): Result? {
+        if (!info.isTcp || !DpiSignatures.looksLikeMssql(packet, offset, len)) return null
+        return Result(label = "MSSQL", detail = "TDS", kind = Kind.MSSQL)
+    }
+
+    private fun probeMongodb(
+        packet: ByteArray,
+        offset: Int,
+        len: Int,
+        info: IpPacketInfo,
+    ): Result? {
+        if (!info.isTcp || !DpiSignatures.looksLikeMongodb(packet, offset, len)) return null
+        return Result(label = "MongoDB", detail = "wire", kind = Kind.MONGODB)
+    }
+
+    private fun probeGit(
+        packet: ByteArray,
+        offset: Int,
+        len: Int,
+        info: IpPacketInfo,
+    ): Result? {
+        if (!info.isTcp || !DpiSignatures.looksLikeGit(packet, offset, len)) return null
+        return Result(label = "Git", detail = "pkt-line", kind = Kind.GIT)
+    }
+
+    private fun probeNntp(
+        packet: ByteArray,
+        offset: Int,
+        len: Int,
+        info: IpPacketInfo,
+    ): Result? {
+        if (!info.isTcp || !DpiSignatures.looksLikeNntp(packet, offset, len)) return null
+        return Result(
+            label = "NNTP",
+            detail = DpiBytes.asciiPrefix(packet, offset, len, 40),
+            kind = Kind.NNTP,
+        )
+    }
+
+    private fun probeRadius(
+        packet: ByteArray,
+        offset: Int,
+        len: Int,
+        info: IpPacketInfo,
+    ): Result? {
+        if (!info.isUdp || !DpiSignatures.looksLikeRadius(packet, offset, len)) return null
+        return Result(label = "RADIUS", detail = "UDP/${info.dstPort}", kind = Kind.RADIUS)
+    }
+
+    private fun probeModbus(
+        packet: ByteArray,
+        offset: Int,
+        len: Int,
+        info: IpPacketInfo,
+    ): Result? {
+        if (!info.isTcp || !DpiSignatures.looksLikeModbus(packet, offset, len)) return null
+        return Result(label = "Modbus", detail = "MBAP", kind = Kind.MODBUS)
+    }
+
+    private fun probeRtmp(
+        packet: ByteArray,
+        offset: Int,
+        len: Int,
+        info: IpPacketInfo,
+    ): Result? {
+        if (!info.isTcp || info.dstPort != 1935) return null
+        if (!DpiSignatures.looksLikeRtmp(packet, offset, len)) return null
+        return Result(label = "RTMP", detail = "handshake", kind = Kind.RTMP)
+    }
+
+    private fun probeIke(
+        packet: ByteArray,
+        offset: Int,
+        len: Int,
+        info: IpPacketInfo,
+    ): Result? {
+        if (!info.isUdp || !DpiSignatures.looksLikeIke(packet, offset, len)) return null
+        return Result(label = "IKE", detail = "UDP/${info.dstPort}", kind = Kind.IKE)
+    }
+
+    private fun probeL2tp(
+        packet: ByteArray,
+        offset: Int,
+        len: Int,
+        info: IpPacketInfo,
+    ): Result? {
+        if (!info.isUdp || !DpiSignatures.looksLikeL2tp(packet, offset, len)) return null
+        return Result(label = "L2TP", detail = "UDP/${info.dstPort}", kind = Kind.L2TP)
+    }
+
+    private fun probeCassandra(
+        packet: ByteArray,
+        offset: Int,
+        len: Int,
+        info: IpPacketInfo,
+    ): Result? {
+        if (!info.isTcp || !DpiSignatures.looksLikeCassandra(packet, offset, len)) return null
+        return Result(label = "Cassandra", detail = "native", kind = Kind.CASSANDRA)
+    }
+
+    private fun probeKafka(
+        packet: ByteArray,
+        offset: Int,
+        len: Int,
+        info: IpPacketInfo,
+    ): Result? {
+        if (!info.isTcp || !DpiSignatures.looksLikeKafka(packet, offset, len)) return null
+        return Result(label = "Kafka", detail = "API", kind = Kind.KAFKA)
+    }
+
+    private fun probeBeanstalkd(
+        packet: ByteArray,
+        offset: Int,
+        len: Int,
+        info: IpPacketInfo,
+    ): Result? {
+        if (!info.isTcp || !DpiSignatures.looksLikeBeanstalkd(packet, offset, len)) return null
+        return Result(
+            label = "Beanstalkd",
+            detail = DpiBytes.asciiPrefix(packet, offset, len, 32),
+            kind = Kind.BEANSTALKD,
+        )
+    }
+
+    private fun probeMinecraft(
+        packet: ByteArray,
+        offset: Int,
+        len: Int,
+        info: IpPacketInfo,
+    ): Result? {
+        if (!info.isTcp || !DpiSignatures.looksLikeMinecraft(packet, offset, len)) return null
+        return Result(label = "Minecraft", detail = "handshake", kind = Kind.MINECRAFT)
+    }
+
+    private fun probeBitcoin(
+        packet: ByteArray,
+        offset: Int,
+        len: Int,
+        info: IpPacketInfo,
+    ): Result? {
+        if (!info.isTcp || !DpiSignatures.looksLikeBitcoin(packet, offset, len)) return null
+        return Result(label = "Bitcoin", detail = "mainnet magic", kind = Kind.BITCOIN)
+    }
+
     private fun probeStun(
         packet: ByteArray,
         offset: Int,
@@ -467,7 +722,7 @@ internal object DpiPayloadGraph {
             995 -> Result(label = "POP3S", detail = detail, kind = Kind.POP3S)
             5223, 5222 -> Result(label = "XMPP", detail = detail ?: "TLS", kind = Kind.XMPP)
             8883 -> Result(label = "MQTT", detail = detail ?: "TLS :8883", kind = Kind.MQTT)
-            636 -> Result(label = "TLS", detail = detail ?: "LDAPS :636", kind = Kind.TLS)
+            636 -> Result(label = "LDAPS", detail = detail ?: "LDAPS :636", kind = Kind.LDAPS)
             else -> Result(label = "TLS", detail = detail, kind = Kind.TLS)
         }
     }

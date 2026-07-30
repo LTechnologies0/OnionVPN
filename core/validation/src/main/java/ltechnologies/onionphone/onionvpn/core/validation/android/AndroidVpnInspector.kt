@@ -44,7 +44,7 @@ object AndroidVpnInspector {
 
     private fun inspectInternal(
         context: Context,
-        killSwitchExpected: Boolean,
+        @Suppress("UNUSED_PARAMETER") killSwitchExpected: Boolean,
     ): List<ValidationCheck> {
         val connectivity = context.getSystemService<ConnectivityManager>()
             ?: return listOf(
@@ -65,10 +65,9 @@ object AndroidVpnInspector {
             add(checkOwnVpnRegistered(connectivity, ours, ownUid))
             add(checkCompetingVpns(connectivity, others, ownUid))
             addAll(checkVpnLinkProperties(connectivity, ours))
+            // Validated Wi‑Fi/cell alongside the VPN is required (Tor is self-excluded from TUN).
+            // Do NOT flag it as a kill-switch failure — that was a false "Skip" alarm in the UI.
             add(checkUnderlyingNonVpnNetwork(connectivity))
-            if (killSwitchExpected) {
-                add(checkNoParallelValidatedClearnet(connectivity))
-            }
         }.also { checks ->
             checks.filter { it.status == ValidationStatus.Fail }.forEach { check ->
                 Timber.e(
@@ -96,25 +95,26 @@ object AndroidVpnInspector {
                 ?.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) == true
         } ?: underlying.firstOrNull()
         val caps = best?.let { cm.getNetworkCapabilities(it) }
-        return             ValidationCheck(
-                id = "android.vpn.underlying",
-                label = "Underlying network for Tor upstream",
-                status = if (best != null) ValidationStatus.Pass else ValidationStatus.Fail,
-                detail = if (best != null) {
-                    buildString {
-                        append("net=$best")
-                        if (caps?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true) append(" WIFI")
-                        if (caps?.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) == true) append(" CELL")
-                        if (caps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) == true) {
-                            append(" VALIDATED")
-                        }
+        return ValidationCheck(
+            id = "android.vpn.underlying",
+            label = "Clearnet upstream for Tor (self-excluded)",
+            status = if (best != null) ValidationStatus.Pass else ValidationStatus.Fail,
+            detail = if (best != null) {
+                buildString {
+                    append("OK — Tor needs a parallel NOT_VPN path; ")
+                    append("net=$best")
+                    if (caps?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true) append(" WIFI")
+                    if (caps?.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) == true) append(" CELL")
+                    if (caps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) == true) {
+                        append(" VALIDATED")
                     }
-                } else {
-                    "No INTERNET+NOT_VPN upstream — Tor cannot reach guards"
-                },
-                // Soft: Wi‑Fi blip — keep Tor; Blocking would drop correctly-routable streams.
-                tripsKillSwitch = false,
-            )
+                }
+            } else {
+                "No INTERNET+NOT_VPN upstream — Tor cannot reach guards"
+            },
+            // Soft: Wi‑Fi blip — keep Tor; Blocking would drop correctly-routable streams.
+            tripsKillSwitch = false,
+        )
     }
 
     private fun checkOwnVpnRegistered(
@@ -288,33 +288,6 @@ object AndroidVpnInspector {
         val hasLow = routes.any { (h, p) -> h == "0.0.0.0" && p <= 1 }
         val hasHigh = routes.any { (h, p) -> h == "128.0.0.0" && p <= 1 }
         return hasLow && hasHigh
-    }
-
-    private fun checkNoParallelValidatedClearnet(cm: ConnectivityManager): ValidationCheck {
-        val clearnetValidated = cm.allNetworks.mapNotNull { network ->
-            val caps = cm.getNetworkCapabilities(network) ?: return@mapNotNull null
-            if (
-                caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
-                caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN) &&
-                caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
-            ) {
-                caps.describe()
-            } else {
-                null
-            }
-        }
-
-        return ValidationCheck(
-            id = "android.killswitch.no.clearnet",
-            label = "No validated clearnet parallel to VPN",
-            status = if (clearnetValidated.isEmpty()) ValidationStatus.Pass else ValidationStatus.Skipped,
-            detail = if (clearnetValidated.isEmpty()) {
-                "No validated non-VPN internet network reported"
-            } else {
-                "Clearnet still validated (${clearnetValidated.joinToString()}); " +
-                    "expected while OnionVPN is self-excluded from TUN"
-            },
-        )
     }
 
     private fun listVpnNetworks(cm: ConnectivityManager): List<Network> =

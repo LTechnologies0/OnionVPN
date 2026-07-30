@@ -255,7 +255,7 @@ fun SettingsScreen(
                 "Requests wait in a FIFO queue (one at a time) until you answer — no timeout. " +
                 "A heads-up notification shows the app icon with Accept / Deny " +
                 "(permanent rule). Tap the notification for more scope options. " +
-                "Tor circuits are isolated per app UID (SOCKS u{uid}).",
+                "Tor circuits are isolated per app UID (SOCKS5 USERNAME/PASSWORD → u{uid}).",
         )
         PrefSwitch(
             label = "Enable firewall",

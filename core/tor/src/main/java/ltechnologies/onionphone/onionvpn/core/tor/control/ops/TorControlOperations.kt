@@ -96,6 +96,15 @@ internal class TorControlOperations(
         Unit
     }
 
+    /** Point Tor at on-disk GeoIP DBs so ip-to-country lookups work without a full restart. */
+    fun setGeoIpFiles(geoIpPath: String, geoIp6Path: String): Result<Unit> = runCatching {
+        transport.command(
+            "SETCONF GeoIPFile=${TorControlWire.quotedString(geoIpPath)} " +
+                "GeoIPv6File=${TorControlWire.quotedString(geoIp6Path)}",
+        )
+        Unit
+    }
+
     /** Apply bridge lines live (replaces Bridge config group). */
     fun setBridges(bridgeLines: List<String>): Result<Unit> = runCatching {
         val cleaned = bridgeLines.map { it.trim() }.filter { it.isNotEmpty() && !it.startsWith("#") }
