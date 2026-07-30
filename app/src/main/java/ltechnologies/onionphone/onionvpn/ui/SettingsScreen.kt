@@ -550,11 +550,14 @@ fun SettingsScreen(
             checked = local.dnsCryptRequireNoFilter,
             onChecked = { commit(local.copy(dnsCryptRequireNoFilter = it)) },
         )
-        PrefSwitch(
-            label = "Force TCP to upstream",
-            checked = local.dnsCryptForceTcp,
-            onChecked = { commit(local.copy(dnsCryptForceTcp = it)) },
+        Text(
+            text = "Force TCP to upstream — always on (required for DNSCrypt-over-Tor).",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+        if (!local.dnsCryptForceTcp) {
+            SideEffect { commit(local.copy(dnsCryptForceTcp = true)) }
+        }
         PrefSwitch(
             label = "Require DNSSEC",
             checked = local.dnsCryptRequireDnssec,

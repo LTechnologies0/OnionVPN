@@ -1,0 +1,48 @@
+ClientOnly 1
+AvoidDiskWrites 1
+DormantCanceledByStartup 1
+DormantClientTimeout 30 minutes
+SafeLogging 1
+Log notice stderr
+SocksPolicy accept 127.0.0.1
+SocksPolicy reject *
+AutomapHostsOnResolve 1
+AutomapHostsSuffixes .onion,.exit
+SafeSocks 0
+TestSocks 0
+VirtualAddrNetwork 10.192.0.0/10
+TransPort 0
+HTTPTunnelPort 0
+ControlPort 0
+CookieAuthentication 1
+ClientRejectInternalAddresses 1
+AllowNonRFC953Hostnames 0
+RefuseUnknownExits 1
+FetchUselessDescriptors 0
+DownloadExtraInfo 0
+ClientPreferIPv6ORPort 0
+HardwareAccel 1
+VanguardsLiteEnabled 1
+ConfluxEnabled auto
+UseMicrodescriptors 1
+UseEntryGuards 1
+NumEntryGuards 2
+NumPrimaryGuards 2
+NumDirectoryGuards 3
+EnforceDistinctSubnets 1
+StrictNodes 0
+MaxClientCircuitsPending 48
+CircuitBuildTimeout 60
+LearnCircuitBuildTimeout 1
+SocksTimeout 120
+CircuitStreamTimeout 0
+ConnectionPadding auto
+ReducedConnectionPadding 0
+CircuitPadding 1
+ReducedCircuitPadding 0
+WarnPlaintextPorts 23,109,110,143
+RejectPlaintextPorts 23,109
+UseBridges 1
+StrictNodes 1
+StrictNodes 1
+StrictNodes 1

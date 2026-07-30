@@ -55,7 +55,7 @@ internal object TorReadiness {
             0x00, 0x01,
             0x00, 0x01,
         )
-        DatagramSocket().use { socket ->
+        DatagramSocket(0, InetAddress.getByName(TunnelEndpoints.LOOPBACK)).use { socket ->
             socket.soTimeout = timeoutMs
             socket.send(
                 DatagramPacket(

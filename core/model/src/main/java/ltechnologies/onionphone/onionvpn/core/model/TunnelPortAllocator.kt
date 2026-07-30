@@ -22,7 +22,12 @@ object TunnelPortAllocator {
     private const val MAX_ATTEMPTS = 64
 
     fun allocate(): TunnelRuntimePorts {
-        val used = mutableSetOf<Int>()
+        val used = mutableSetOf(
+            TunnelEndpoints.PAC_LISTEN_PORT,
+            TunnelEndpoints.PAC_BRIDGE_SOCKS_PORT,
+            TunnelEndpoints.SOCKS_UID_BRIDGE_PORT,
+            TunnelEndpoints.DNSCRYPT_LISTEN_PORT,
+        )
         return TunnelRuntimePorts(
             torSocksPort = allocateTcpPort(used),
             torDnsCryptSocksPort = allocateTcpPort(used),

@@ -95,7 +95,7 @@ object TorPathValidator {
 
     private fun checkDnsPort(id: String, label: String, host: String, port: Int): ValidationCheck {
         return try {
-            DatagramSocket().use { socket ->
+            DatagramSocket(0, InetAddress.getByName(TunnelEndpoints.LOOPBACK)).use { socket ->
                 // Exit resolve via DNSPort can exceed 5s on cold circuits ("Poll timed out").
                 socket.soTimeout = DNS_PORT_TIMEOUT_MS
                 val query = minimalDnsQuery()

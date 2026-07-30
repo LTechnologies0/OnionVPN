@@ -79,7 +79,7 @@ object DnsCryptPathValidator {
             )
         }
         return try {
-            DatagramSocket().use { socket ->
+            DatagramSocket(0, InetAddress.getByName(TunnelEndpoints.LOOPBACK)).use { socket ->
                 socket.soTimeout = 10_000
                 val query = byteArrayOf(
                     0x12, 0x34,

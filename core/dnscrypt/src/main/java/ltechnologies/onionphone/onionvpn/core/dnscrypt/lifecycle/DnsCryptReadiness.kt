@@ -33,7 +33,7 @@ internal object DnsCryptReadiness {
 
     /** Any UDP DNS response from the stub (listener up). */
     fun probeLocalDns(port: Int): Boolean = try {
-        DatagramSocket().use { socket ->
+        DatagramSocket(0, InetAddress.getByName(TunnelEndpoints.LOOPBACK)).use { socket ->
             socket.soTimeout = 1_000
             val query = wwwExampleQuery(id = 1)
             socket.send(
@@ -57,7 +57,7 @@ internal object DnsCryptReadiness {
      * Successful A query (RCODE 0 + answers) — proves upstream via Tor SOCKS is usable.
      */
     fun probeResolvesExample(port: Int): Boolean = try {
-        DatagramSocket().use { socket ->
+        DatagramSocket(0, InetAddress.getByName(TunnelEndpoints.LOOPBACK)).use { socket ->
             socket.soTimeout = 3_000
             val query = exampleComQuery(id = 2)
             socket.send(

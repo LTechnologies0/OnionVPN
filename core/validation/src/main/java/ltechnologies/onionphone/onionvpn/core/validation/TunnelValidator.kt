@@ -140,6 +140,13 @@ object TunnelValidator {
             }
             // UID SOCKS / forwarder wiring broken → TUN packets won't reach Tor.
             "uid.forwarder.wiring", "hev.config.missing", "hev.forwarder.wiring" -> true
+            // DNSCrypt not actually over Tor → clearnet DNS from VPN-excluded process.
+            "dnscrypt.tor.wiring",
+            "dnscrypt.tor.wiring.missing",
+            "dnscrypt.config.runtime",
+            "dnscrypt.config.missing",
+            "dns.mode.mapdns",
+            -> true
             // VPN interface / route ownership lost or stolen.
             "vpn.not.established",
             "android.vpn.link.missing",
@@ -149,7 +156,7 @@ object TunnelValidator {
             -> true
             // Only when another app owns Always-on (tripsKillSwitch set by inspector).
             "android.vpn.always_on" -> true
-            // Soft: DNSCrypt / DNSPort / SOCKS5A example.com / underlying / timeout / config cosmetics.
+            // Soft: DNSCrypt listener flake / DNSPort / SOCKS5A / underlying / timeout.
             else -> false
         }
     }
@@ -187,6 +194,7 @@ object TunnelValidator {
                 label = "DNSCrypt upstream via Tor SOCKS + DNSPort bootstrap",
                 status = ValidationStatus.Fail,
                 detail = "dnscrypt config missing",
+                tripsKillSwitch = true,
             )
 
         val proxy =
@@ -199,16 +207,17 @@ object TunnelValidator {
         val netprobeOk = config.contains("netprobe_address = '$bootstrap'")
         val listenOk = config.contains("listen_addresses = ['$listen']")
         val ignoreSystem = config.contains("ignore_system_dns = true")
-        val ok = proxyOk && bootstrapOk && netprobeOk && listenOk && ignoreSystem
+        val forceTcp = config.contains("force_tcp = true")
+        val ok = proxyOk && bootstrapOk && netprobeOk && listenOk && ignoreSystem && forceTcp
 
         return ValidationCheck(
             id = "dnscrypt.tor.wiring",
             label = "DNSCrypt uses dedicated Tor SocksPort",
             status = if (ok) ValidationStatus.Pass else ValidationStatus.Fail,
             detail = "listen=$listenOk proxy=$proxyOk bootstrap=$bootstrapOk " +
-                "netprobe=$netprobeOk ignore_system_dns=$ignoreSystem " +
+                "netprobe=$netprobeOk ignore_system_dns=$ignoreSystem force_tcp=$forceTcp " +
                 "socks=${ports.torDnsCryptSocksPort}",
-            tripsKillSwitch = false,
+            tripsKillSwitch = true,
         )
     }
 
@@ -271,16 +280,37 @@ object TunnelValidator {
      */
     private fun validateDnsModeLeakProperties(
         dnsMode: DnsResolverMode,
-        @Suppress("UNUSED_PARAMETER") hevConfigFile: File?,
+        hevConfigFile: File?,
     ): ValidationCheck {
-        return ValidationCheck(
-            id = "dns.mode.dnscrypt",
-            label = "DNSCrypt-over-Tor (no clearnet DNS)",
-            status = ValidationStatus.Pass,
-            detail = "mode=$dnsMode: any UDP/53 diverted to DNSCrypt via Tor SOCKS; " +
-                "TCP via hev → SocksUidBridge (u{uid})",
-            tripsKillSwitch = false,
-        )
+        val hev = hevConfigFile?.takeIf { it.isFile }?.readText().orEmpty()
+        val hasMapDns = hev.contains("mapdns:")
+        val socksToBridge = hev.contains("port: ${TunnelEndpoints.SOCKS_UID_BRIDGE_PORT}") ||
+            hev.contains("port: ${TunnelEndpoints.SOCKS_UID_BRIDGE_PORT}\n") ||
+            Regex("""port:\s*${TunnelEndpoints.SOCKS_UID_BRIDGE_PORT}\b""").containsMatchIn(hev)
+        return when {
+            hev.isNotBlank() && hasMapDns -> ValidationCheck(
+                id = "dns.mode.mapdns",
+                label = "hev FakeDNS disabled (Automap/DNSCrypt only)",
+                status = ValidationStatus.Fail,
+                detail = "mode=$dnsMode hev.yaml still has mapdns — clearnet/Automap conflict",
+                tripsKillSwitch = true,
+            )
+            hev.isNotBlank() && !socksToBridge -> ValidationCheck(
+                id = "dns.mode.mapdns",
+                label = "hev FakeDNS disabled (Automap/DNSCrypt only)",
+                status = ValidationStatus.Fail,
+                detail = "mode=$dnsMode hev socks not aimed at UID bridge :${TunnelEndpoints.SOCKS_UID_BRIDGE_PORT}",
+                tripsKillSwitch = true,
+            )
+            else -> ValidationCheck(
+                id = "dns.mode.dnscrypt",
+                label = "DNSCrypt-over-Tor (no clearnet DNS)",
+                status = ValidationStatus.Pass,
+                detail = "mode=$dnsMode: UDP/53 → DNSCrypt via Tor SOCKS; " +
+                    "TCP → hev → SocksUidBridge u{uid}; mapdns absent",
+                tripsKillSwitch = false,
+            )
+        }
     }
 
     /**

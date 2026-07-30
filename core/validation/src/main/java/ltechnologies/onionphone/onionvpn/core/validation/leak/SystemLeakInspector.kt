@@ -207,7 +207,8 @@ object SystemLeakInspector {
             label = "Interactive firewall engine wired",
             status = if (wired) ValidationStatus.Pass else ValidationStatus.Fail,
             detail = if (wired) {
-                "FirewallBridge != AllowAll (enable in Settings to enforce)"
+                "FirewallBridge != AllowAll — enable in Settings for OpenSnitch-style prompts; " +
+                    "UDP/ICMP kill-switch is always enforced by LeakPacketFilter"
             } else {
                 "FirewallBridge still AllowAll — Application did not install engine"
             },
