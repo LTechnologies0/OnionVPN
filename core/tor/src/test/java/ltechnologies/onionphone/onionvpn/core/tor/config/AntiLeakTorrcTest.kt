@@ -64,6 +64,8 @@ class AntiLeakTorrcTest(private val requiredSubstring: String) {
             "FetchUselessDescriptors 0",
             "DownloadExtraInfo 0",
             "ClientPreferIPv6ORPort 0",
+            "ClientUseIPv6 1",
+            "VirtualAddrNetworkIPv6 [FC00::]/7",
             "EnforceDistinctSubnets 1",
             "NumEntryGuards 2",
             "NumPrimaryGuards 2",

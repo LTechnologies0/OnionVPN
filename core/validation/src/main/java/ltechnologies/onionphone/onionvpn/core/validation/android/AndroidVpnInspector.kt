@@ -201,6 +201,7 @@ object AndroidVpnInspector {
         }
 
         val hasDefaultRoute = hasIpv4DefaultRoute(link)
+        val hasIpv6Default = hasIpv6DefaultRoute(link)
         val dnsServers = link.dnsServers.mapNotNull { it.hostAddress }
         val dnsOk = dnsServers.any {
             it == TunnelEndpoints.VPN_DNS_ADDRESS || it == TunnelEndpoints.FALLBACK_BLOCKING_DNS
@@ -219,17 +220,19 @@ object AndroidVpnInspector {
                         "${route.destination?.address?.hostAddress}/${route.destination?.prefixLength} " +
                             "dev ${route.`interface`}"
                     },
+                tripsKillSwitch = !hasDefaultRoute,
             ),
             ValidationCheck(
                 id = "android.vpn.route.ipv6",
                 label = "VPN captures default IPv6 route (::/0)",
-                status = if (hasIpv6DefaultRoute(link)) ValidationStatus.Pass else ValidationStatus.Fail,
+                status = if (hasIpv6Default) ValidationStatus.Pass else ValidationStatus.Fail,
                 detail = "Orbot/InviZible pattern — without ::/0, IPv6 can leak clearnet. " +
                     "routes=" + link.routes.filter {
                         it.destination?.address?.hostAddress?.contains(':') == true
                     }.joinToString { r ->
                         "${r.destination?.address?.hostAddress}/${r.destination?.prefixLength}"
                     },
+                tripsKillSwitch = !hasIpv6Default,
             ),
             ValidationCheck(
                 id = "android.vpn.dns.servers",

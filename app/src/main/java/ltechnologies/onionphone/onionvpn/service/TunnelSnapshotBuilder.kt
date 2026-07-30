@@ -35,7 +35,7 @@ internal object TunnelSnapshotBuilder {
         val streams = if (liveStreamCount >= 0) liveStreamCount else torStatus.streamCount
         return TunnelSnapshot(
             phase = phase,
-            killSwitchEnabled = preferences.killSwitchEnabled,
+            killSwitchEnabled = true,
             torRunning = torRunning,
             dnsCryptRunning = dnsCryptRunning,
             vpnEstablished = vpnEstablished,

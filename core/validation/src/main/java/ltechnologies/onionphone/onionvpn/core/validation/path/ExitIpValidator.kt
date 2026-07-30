@@ -147,8 +147,10 @@ object ExitIpValidator {
                 id = "tor.exit.istor",
                 label = "check.torproject.org IsTor=true",
                 status = ValidationStatus.Fail,
-                detail = "IsTor=false IP=${egress.ip} — traffic not leaving via Tor",
-                tripsKillSwitch = true,
+                detail = "IsTor=false IP=${egress.ip} — Soft warn (API/unlisted exit); " +
+                    "Hard only if egress equals ISP (tor.exit.ip)",
+                // Soft: check.tp.org can lag for new exits — do not blackhole working Tor.
+                tripsKillSwitch = false,
             )
             null -> ValidationCheck(
                 id = "tor.exit.istor",
@@ -187,8 +189,9 @@ object ExitIpValidator {
                 id = "vpn.address.not.public",
                 label = "VPN addresses are virtual (not ISP)",
                 status = ValidationStatus.Fail,
-                detail = "No VPN link addresses found",
-                tripsKillSwitch = true,
+                detail = "No VPN link addresses found (CM race while TUN up) — Soft",
+                // Soft: ConnectivityManager can briefly omit VPN addrs during rebind.
+                tripsKillSwitch = false,
             )
         }
 

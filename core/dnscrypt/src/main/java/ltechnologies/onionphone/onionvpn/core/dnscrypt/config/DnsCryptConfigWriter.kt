@@ -115,8 +115,8 @@ object DnsCryptConfigWriter {
             listen_addresses = ['${TunnelEndpoints.LOOPBACK}:$listenPort']
             max_clients = 128
             ipv4_servers = true
-            ipv6_servers = false
-            block_ipv6 = true
+            ipv6_servers = true
+            block_ipv6 = false
             dnscrypt_ephemeral_keys = true
             tls_disable_session_tickets = true
             tls_cipher_suite = [52393, 49199]

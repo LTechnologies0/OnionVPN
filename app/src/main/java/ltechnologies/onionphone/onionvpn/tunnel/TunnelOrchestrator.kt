@@ -24,7 +24,7 @@ class TunnelOrchestrator @Inject constructor(
             Intent(context, TunnelForegroundService::class.java).apply {
                 action = TunnelForegroundService.ACTION_START
                 putExtra(TunnelForegroundService.EXTRA_ROUTE_ALL, preferences.routeAllTrafficThroughTor)
-                putExtra(TunnelForegroundService.EXTRA_KILL_SWITCH, preferences.killSwitchEnabled)
+                putExtra(TunnelForegroundService.EXTRA_KILL_SWITCH, true)
                 putExtra(TunnelForegroundService.EXTRA_DNSCRYPT_SERVER, preferences.dnsCryptServerName)
                 putExtra(TunnelForegroundService.EXTRA_DNS_MODE, preferences.dnsResolverMode.name)
                 putExtra(TunnelForegroundService.EXTRA_TOR_BRIDGES, preferences.torBridges)

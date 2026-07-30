@@ -26,7 +26,8 @@ import timber.log.Timber
  * Splits VPN TUN traffic:
  * - When [divertDnsToDnsCrypt]: UDP/53 clearnet → DNSCrypt; `.onion`/`.exit` → Tor DNSPort
  *   (AutomapHostsOnResolve → virtual IPs in [TunnelEndpoints.VIRTUAL_ADDR_NETWORK]/10)
- * - Non-DNS UDP / ICMP / IPv6 → blackhole (force apps onto TCP; Tor has no UDP)
+ * - Non-DNS UDP / ICMP / multicast → blackhole (force apps onto TCP; Tor has no UDP)
+ * - IPv4+IPv6 TCP → hev → Tor SOCKS
  * - IPv4 TCP → firewall check → hev engine (UID stamped into [TcpFlowUidIndex] for SocksUidBridge)
  *
  * DoS / ARM notes:
@@ -107,20 +108,25 @@ class TunDnsMux(
                         divertDnsToDnsCrypt && LeakPacketFilter.isDnsUdpPort53(buf, n) -> {
                             tunEmptyReadStreak = 0
                             // Clearnet UDP/53 → DNSCrypt; .onion/.exit → Tor DNSPort (in handleDnsQuery).
-                            snoopDnsOutbound(buf, n)
-                            val packet = borrowPacket(buf, n)
-                            try {
-                                dnsExecutor.execute {
-                                    try {
-                                        handleDnsQuery(packet, n, localTunOut)
-                                    } finally {
-                                        recyclePacket(packet)
+                            // Same OpenSnitch gate as TCP — drop if interactive firewall DENYs.
+                            if (!FirewallBridge.engine.allowOutbound(buf, n)) {
+                                // Drop
+                            } else {
+                                snoopDnsOutbound(buf, n)
+                                val packet = borrowPacket(buf, n)
+                                try {
+                                    dnsExecutor.execute {
+                                        try {
+                                            handleDnsQuery(packet, n, localTunOut)
+                                        } finally {
+                                            recyclePacket(packet)
+                                        }
                                     }
-                                }
-                            } catch (_: RejectedExecutionException) {
-                                recyclePacket(packet)
-                                if ((dnsRejectSample.incrementAndGet() and 0x3F) == 0L) {
-                                    Timber.w("TunDnsMux DNS pool saturated — dropping query")
+                                } catch (_: RejectedExecutionException) {
+                                    recyclePacket(packet)
+                                    if ((dnsRejectSample.incrementAndGet() and 0x3F) == 0L) {
+                                        Timber.w("TunDnsMux DNS pool saturated — dropping query")
+                                    }
                                 }
                             }
                         }
@@ -253,7 +259,12 @@ class TunDnsMux(
     private fun stampTcpUid(buf: ByteArray, n: Int) {
         val info = IpPacketParser.parse(buf, n) ?: return
         if (!info.isTcp) return
-        if (!info.isTcpSyn && TcpFlowUidIndex.hasRecent(info.dstIpInt, info.dstPort)) return
+        val recent = if (info.isIpv6) {
+            TcpFlowUidIndex.hasRecentHost(info.dstIp, info.dstPort)
+        } else {
+            TcpFlowUidIndex.hasRecent(info.dstIpInt, info.dstPort)
+        }
+        if (!info.isTcpSyn && recent) return
         val uid = ownerResolver.resolveUid(info)
         if (ConnectionOwnerResolver.isValidUid(uid)) {
             TcpFlowUidIndex.note(info, uid)

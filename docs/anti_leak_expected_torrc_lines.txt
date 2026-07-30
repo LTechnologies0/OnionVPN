@@ -11,6 +11,7 @@ AutomapHostsSuffixes .onion,.exit
 SafeSocks 0
 TestSocks 0
 VirtualAddrNetwork 10.192.0.0/10
+VirtualAddrNetworkIPv6 [FC00::]/7
 TransPort 0
 HTTPTunnelPort 0
 ControlPort 0
@@ -20,6 +21,8 @@ AllowNonRFC953Hostnames 0
 RefuseUnknownExits 1
 FetchUselessDescriptors 0
 DownloadExtraInfo 0
+ClientUseIPv4 1
+ClientUseIPv6 1
 ClientPreferIPv6ORPort 0
 HardwareAccel 1
 VanguardsLiteEnabled 1

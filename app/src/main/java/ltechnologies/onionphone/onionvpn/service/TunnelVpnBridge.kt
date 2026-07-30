@@ -23,7 +23,7 @@ internal class TunnelVpnBridge(
             Intent(context, OnionVpnService::class.java).apply {
                 action = OnionVpnService.ACTION_START
                 putExtra(OnionVpnService.EXTRA_ROUTE_ALL, preferences.routeAllTrafficThroughTor)
-                putExtra(OnionVpnService.EXTRA_KILL_SWITCH, preferences.killSwitchEnabled)
+                putExtra(OnionVpnService.EXTRA_KILL_SWITCH, true)
                 putExtra(OnionVpnService.EXTRA_PROFILE_MODE, VpnProfileMode.Connected.name)
                 putExtra(OnionVpnService.EXTRA_TOR_SOCKS_PORT, ports.torSocksPort)
                 putExtra(OnionVpnService.EXTRA_DNSCRYPT_PORT, ports.dnsCryptListenPort)

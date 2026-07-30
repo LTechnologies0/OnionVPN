@@ -149,7 +149,20 @@ class InteractiveFirewallEngine @Inject constructor(
         val prefs = preferences.get()
         if (!prefs.firewallEnabled) return true
 
-        val info = IpPacketParser.parse(packet, length) ?: return true
+        // Unparseable → fail-closed (never treat garbage as ALLOW).
+        val info = IpPacketParser.parse(packet, length) ?: return false
+
+        // UDP/53 → TunDnsMux → DNSCrypt/Tor DNSPort (any resolver IP pinned into TUN).
+        // Honor DENY rules only — never ASK (prompts would blackhole working DNS while Tor is fine).
+        if (info.protocol == IpPacketParser.PROTO_UDP && info.dstPort == 53) {
+            val uid = ownerResolver.resolveUid(info)
+            if (uid == ownUid) return true
+            if (ConnectionOwnerResolver.isValidUid(uid)) {
+                val deny = findRule(uid, info.dstIp, info)
+                if (deny?.verdict == FirewallVerdict.DENY) return false
+            }
+            return true
+        }
 
         val tupleKey = FirewallCacheKeys.tupleFlowKey(info)
         if (info.isTcp && !info.isTcpSyn) {
@@ -164,11 +177,9 @@ class InteractiveFirewallEngine @Inject constructor(
         if (info.isTcpSyn && !ConnectionOwnerResolver.isValidUid(uid)) {
             return false
         }
-        // Mid-flow often loses owner UID on Android — do NOT fail-closed here (that blackholed
-        // every ACK/TLS after STREAM SUCCEEDED). Fall through with best-effort UID for caches.
+        // Mid-flow often loses owner UID on Android. Fail-open without poisoning caches —
+        // SYN already required a valid owner + ALLOW/ASK; tuple cache was checked above.
         if (!ConnectionOwnerResolver.isValidUid(uid) && info.isTcp && !info.isTcpSyn) {
-            // Try flow cache with the unresolved uid first; if empty, fail-open mid-flow.
-            // SYN already required a valid owner + ALLOW/ASK verdict.
             return true
         }
         if (!ConnectionOwnerResolver.isValidUid(uid)) {
@@ -181,13 +192,13 @@ class InteractiveFirewallEngine @Inject constructor(
         val matchDest = matchDestination(info)
         if (matchDest == null) {
             // Automap IP without hostname yet (DNS still in flight / dropped).
-            // SYN: fail-closed and wait. Mid-flow: fail-open — SYN already gated.
+            // SYN: fail-closed. Mid-flow: allow without poisoning (SYN already gated).
             return info.isTcp && !info.isTcpSyn
         }
 
         // Mid-flow: never open ASK/DENY prompts. Prefer sticky decision / rules when the
         // flow-cache entry was trimmed. Miss after an allowed SYN must NOT blackhole the
-        // live TCP (Cromite/Telegram/SimpleX) — fail-open; DENY entries are trim-sticky.
+        // live TCP — fail-open without writing ALLOW (avoids DENY→ALLOW poison after trim).
         if (info.isTcp && !info.isTcpSyn) {
             val matching = findRule(uid, matchDest, info)
             if (matching != null) {
@@ -199,7 +210,6 @@ class InteractiveFirewallEngine @Inject constructor(
                 rememberPacketFlow(flowKey, v, matchDest, info)
                 return v == FirewallVerdict.ALLOW
             }
-            rememberPacketFlow(flowKey, FirewallVerdict.ALLOW, matchDest, info)
             return true
         }
 
@@ -269,7 +279,11 @@ class InteractiveFirewallEngine @Inject constructor(
         val prefs = preferences.get()
         if (!prefs.firewallEnabled) return true
         if (uid == ownUid) return true
-        if (!ConnectionOwnerResolver.isValidUid(uid)) return false
+        // Unknown PAC client: only fail-open when default is ALLOW (still Tor-routed).
+        // ASK/DENY keep fail-closed so prompts/rules cannot be skipped via UID race.
+        if (!ConnectionOwnerResolver.isValidUid(uid)) {
+            return prefs.firewallDefaultAction == FirewallDefaultAction.ALLOW
+        }
 
         val host = destHost.trim()
         val ip = destIp.trim()
@@ -578,7 +592,7 @@ class InteractiveFirewallEngine @Inject constructor(
      */
     private fun matchDestination(info: IpPacketInfo): String? {
         val ip = info.dstIp
-        if (!TunnelEndpoints.isAutomapVirtualIpv4(ip)) return ip
+        if (!TunnelEndpoints.isAutomapVirtual(ip)) return ip
         val host = DnsHostnameCache.lookup(ip) ?: return null
         return if (TunnelEndpoints.isOnionLikeHostname(host)) host else null
     }

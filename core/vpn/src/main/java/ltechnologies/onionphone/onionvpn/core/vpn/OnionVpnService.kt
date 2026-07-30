@@ -153,6 +153,13 @@ class OnionVpnService : VpnService() {
                     tunInterface = previousTun
                     isEstablished.value = true
                     Timber.w("Restored previous TUN after failed rebind")
+                    // Forwarder was stopped before establish — restart so apps are not stuck
+                    // on a live TUN with no Tor drain path.
+                    if (startForwarder && mode == VpnProfileMode.Connected) {
+                        startForwarder(torSocksPort, dnsCryptPort, torDnsPort, dnsMode)
+                        startUnderlyingTracking()
+                        Timber.w("Restarted TUN forwarder on restored TUN after failed rebind")
+                    }
                 } else {
                     previousTun?.close()
                     isEstablished.value = false

@@ -30,6 +30,18 @@ object TorPathValidator {
         }
     }
 
+    /** Local SOCKS TCP only — used by hard-gate after full validation timeout. */
+    fun validateSocksOnly(
+        socksHost: String = TunnelEndpoints.LOOPBACK,
+        socksPort: Int = TunnelEndpoints.TOR_SOCKS_PORT,
+    ): ValidationCheck = checkTcp("tor.socks", "Tor SOCKS reachable", socksHost, socksPort)
+
+    /** SOCKS5A CONNECT proof (hostname via Tor) — Soft Fail must not Block working Tor. */
+    fun validateSocks5a(
+        socksHost: String = TunnelEndpoints.LOOPBACK,
+        socksPort: Int = TunnelEndpoints.TOR_SOCKS_PORT,
+    ): ValidationCheck = checkRemoteDns(socksHost, socksPort)
+
     fun validateTorrcContent(
         config: String,
         source: String,

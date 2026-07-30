@@ -108,10 +108,12 @@ object TorConfigWriter {
         appendLine("AutomapHostsOnResolve 1")
         appendLine("AutomapHostsSuffixes .onion,.exit")
 
-        // hev CONNECTs by IPv4 (DNSCrypt supplies real A records). SafeSocks would reject.
+        // hev CONNECTs by IPv4/IPv6 literal (DNSCrypt A/AAAA) or hostname (.onion).
         appendLine("SafeSocks 0")
         appendLine("TestSocks 0")
         appendLine("VirtualAddrNetwork 10.192.0.0/10")
+        // Automap .onion AAAA into ULA for IPv6-preferring apps (Tor man VirtualAddrNetworkIPv6).
+        appendLine("VirtualAddrNetworkIPv6 [FC00::]/7")
         appendLine("TransPort 0")
         // HTTPTunnelPort uses Tor name resolution (exit DNS) — conflicts with DNSCrypt policy.
         // Apps that need HTTP CONNECT must use the PAC DNSCrypt→Tor bridge instead.
@@ -135,6 +137,9 @@ object TorConfigWriter {
         appendLine("RefuseUnknownExits 1")
         appendLine("FetchUselessDescriptors 0")
         appendLine("DownloadExtraInfo 0")
+        // Prefer IPv4 for OR (guards), but allow IPv6 OR when needed; exit dest may be IPv6.
+        appendLine("ClientUseIPv4 1")
+        appendLine("ClientUseIPv6 1")
         appendLine("ClientPreferIPv6ORPort 0")
 
         appendLine("HardwareAccel 1")

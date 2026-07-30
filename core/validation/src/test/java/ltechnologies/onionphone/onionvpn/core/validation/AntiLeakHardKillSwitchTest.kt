@@ -40,6 +40,13 @@ class AntiLeakHardKillSwitchIdsTest(private val id: String) {
             "uid.forwarder.wiring",
             "tor.socks",
             "vpn.not.established",
+            "android.dns.private",
+            "android.vpn.route.default",
+            "android.vpn.route.ipv6",
+            // Hard only when inspector sets tripsKillSwitch (other app owns Always-on /
+            // Private DNS hostname|active). Missing Lockdown / opportunistic are Soft.
+            "android.vpn.always_on",
+            "vpn.address.not.public",
         ).map { arrayOf(it) }
     }
 }
@@ -84,5 +91,91 @@ class AntiLeakDnsCryptConfigValidatorTest {
             tripsKillSwitch = false,
         )
         assertFalse(TunnelValidator.isHardKillSwitchFailure(check))
+    }
+
+    @Test
+    fun validationTimeoutIsSoftEvenIfFlagged() {
+        // Exit-IP / remote probes can exceed budget while Tor SOCKS still works —
+        // must not blackhole working torrified traffic.
+        val check = ValidationCheck(
+            id = "validation.timeout",
+            label = "Tunnel validation",
+            status = ValidationStatus.Fail,
+            detail = "timed out",
+            tripsKillSwitch = true,
+        )
+        assertFalse(TunnelValidator.isHardKillSwitchFailure(check))
+    }
+
+    @Test
+    fun privateDnsActiveIsHard() {
+        val check = ValidationCheck(
+            id = "android.dns.private",
+            label = "Private DNS",
+            status = ValidationStatus.Fail,
+            detail = "DoT active",
+            tripsKillSwitch = true,
+        )
+        assertTrue(TunnelValidator.isHardKillSwitchFailure(check))
+    }
+
+    @Test
+    fun opportunisticPrivateDnsNotHardWhenSoft() {
+        val check = ValidationCheck(
+            id = "android.dns.private",
+            label = "Private DNS",
+            status = ValidationStatus.Fail,
+            detail = "Private DNS mode=opportunistic (stock default)",
+            tripsKillSwitch = false,
+        )
+        assertFalse(TunnelValidator.isHardKillSwitchFailure(check))
+    }
+
+    @Test
+    fun missingAlwaysOnLockdownIsSoft() {
+        val check = ValidationCheck(
+            id = "android.vpn.always_on",
+            label = "Android Always-on VPN lockdown",
+            status = ValidationStatus.Fail,
+            detail = "Always-on ON but Lockdown OFF",
+            tripsKillSwitch = false,
+        )
+        assertFalse(TunnelValidator.isHardKillSwitchFailure(check))
+    }
+
+    @Test
+    fun isTorFalseIsSoft() {
+        val check = ValidationCheck(
+            id = "tor.exit.istor",
+            label = "IsTor",
+            status = ValidationStatus.Fail,
+            detail = "IsTor=false IP=1.2.3.4 — Soft warn",
+            tripsKillSwitch = false,
+        )
+        assertFalse(TunnelValidator.isHardKillSwitchFailure(check))
+    }
+
+    @Test
+    fun emptyVpnAddrsSoftNotHard() {
+        val check = ValidationCheck(
+            id = "vpn.address.not.public",
+            label = "VPN addresses",
+            status = ValidationStatus.Fail,
+            detail = "No VPN link addresses found (CM race)",
+            tripsKillSwitch = false,
+        )
+        assertFalse(TunnelValidator.isHardKillSwitchFailure(check))
+    }
+
+    @Test
+    fun ispIpOnExitPathIsHard() {
+        val check = ValidationCheck(
+            id = "tor.exit.ip",
+            label = "Egress",
+            status = ValidationStatus.Fail,
+            detail = "Egress 1.2.3.4 equals device non-VPN address — ISP IP leak",
+            tripsKillSwitch = true,
+        )
+        assertTrue(TunnelValidator.isHardKillSwitchFailure(check))
     }
 }

@@ -151,7 +151,7 @@ class UidIsolatingTunForwarder(
             LeakPacketFilter.noteBlackhole(LeakPacketFilter.classifyBlackholeReason(buf, length))
             return
         }
-        if (!LeakPacketFilter.isTorrifiableIpv4Tcp(buf, length)) {
+        if (!LeakPacketFilter.isTorrifiableTcp(buf, length)) {
             LeakPacketFilter.noteBlackhole(LeakPacketFilter.classifyBlackholeReason(buf, length))
             return
         }
@@ -213,7 +213,7 @@ class UidIsolatingTunForwarder(
      * Never CONNECT the fake IP (would try an exit / fail SafeSocks).
      */
     private fun resolveSocksDestHost(destIp: String): String? {
-        if (!TunnelEndpoints.isAutomapVirtualIpv4(destIp)) return destIp
+        if (!TunnelEndpoints.isAutomapVirtual(destIp)) return destIp
         val host = DnsHostnameCache.lookup(destIp) ?: return null
         return if (TunnelEndpoints.isOnionLikeHostname(host)) host else null
     }

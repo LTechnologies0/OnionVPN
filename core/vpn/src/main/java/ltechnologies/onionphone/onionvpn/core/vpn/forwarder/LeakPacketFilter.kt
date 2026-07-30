@@ -4,13 +4,14 @@ import java.util.concurrent.atomic.AtomicLong
 import timber.log.Timber
 
 /**
- * Fail-closed packet filters for torrified VPN (Privacy Guides / Tor: TCP-only).
+ * Fail-closed packet filters for torrified VPN (Privacy Guides / Tor: TCP + DNS only).
  *
- * Strategy (no remote UDP gateway, no real UDP over Tor until prop. 339 ships):
- * 1. Divert UDP/53 → DNSCrypt-over-Tor (handled by [TunDnsMux]).
- * 2. Blackhole every other UDP/ICMP/IPv6/multicast so apps fall back to TCP
+ * Strategy (no remote UDP gateway until prop. 339 ships):
+ * 1. Divert UDP/53 (IPv4+IPv6) → DNSCrypt-over-Tor (handled by [TunDnsMux]).
+ * 2. Forward IPv4+IPv6 TCP via hev → SocksUidBridge → Tor SOCKS (ATYP 0x01/0x04/0x03).
+ * 3. Blackhole other UDP/ICMP/multicast so apps fall back to TCP
  *    (HTTP/2 instead of QUIC/HTTP3, no WebRTC media, etc.).
- * 3. Never forward to the clearnet underlying network.
+ * 4. Never forward to the clearnet underlying network.
  */
 object LeakPacketFilter {
     private const val PROTO_ICMP = 1
@@ -34,7 +35,6 @@ object LeakPacketFilter {
 
     enum class BlackholeReason {
         NotUdp,
-        Ipv6,
         Multicast,
         LinkLocal,
         Icmp,
@@ -49,6 +49,8 @@ object LeakPacketFilter {
         Dtls,
         TcpDns,
         GenericUdp,
+        /** @deprecated IPv6 TCP is torrified; kept for log compatibility. */
+        Ipv6,
     }
 
     private val dropQuic = AtomicLong(0)
@@ -70,8 +72,19 @@ object LeakPacketFilter {
 
     /**
      * @return true if the packet may be considered for Tor SOCKS / DNS divert.
-     * Non-TCP IPv4 (except caller-handled DNS UDP) and all IPv6/ICMP/multicast → false.
+     * IPv4 or IPv6 TCP (except TCP DNS/DoT) → true.
      */
+    fun isTorrifiableTcp(packet: ByteArray, length: Int): Boolean {
+        if (length < 20) return false
+        val version = (packet[0].toInt() ushr 4) and 0x0f
+        return when (version) {
+            4 -> isTorrifiableIpv4Tcp(packet, length)
+            6 -> isTorrifiableIpv6Tcp(packet, length)
+            else -> false
+        }
+    }
+
+    /** @deprecated Prefer [isTorrifiableTcp]. */
     fun isTorrifiableIpv4Tcp(packet: ByteArray, length: Int): Boolean {
         if (length < 20) return false
         val version = (packet[0].toInt() ushr 4) and 0x0f
@@ -79,35 +92,72 @@ object LeakPacketFilter {
         if (isMulticastOrBroadcastV4(packet)) return false
         val proto = packet[9].toInt() and 0xff
         if (proto != PROTO_TCP) return false
-        // TCP/53 and DoT/853 must not bypass DNSCrypt via Tor exit DNS.
         if (isDnsTcpPort(packet, length)) return false
         return true
     }
 
-    /** True when IPv4 UDP dest port is 53 (any resolver IP — force torrified DNS). */
+    fun isTorrifiableIpv6Tcp(packet: ByteArray, length: Int): Boolean {
+        if (length < 40) return false
+        val version = (packet[0].toInt() ushr 4) and 0x0f
+        if (version != 6) return false
+        if (isMulticastOrLinkLocalV6(packet)) return false
+        // Assume no extension headers (common TUN path); next-header at offset 6.
+        val next = packet[6].toInt() and 0xff
+        if (next != PROTO_TCP) return false
+        if (length < 40 + 20) return false
+        val destPort = ((packet[40 + 2].toInt() and 0xff) shl 8) or
+            (packet[40 + 3].toInt() and 0xff)
+        // TCP/53 and DoT/853 → blackhole; apps must use UDP/53 → DNSCrypt.
+        if (destPort == 53 || destPort == 853) return false
+        return true
+    }
+
+    /** True when UDP dest port is 53 (IPv4 or IPv6 — force torrified DNS). */
     fun isDnsUdpPort53(packet: ByteArray, length: Int): Boolean {
         if (length < 28) return false
         val version = (packet[0].toInt() ushr 4) and 0x0f
-        if (version != 4) return false
-        val ihl = (packet[0].toInt() and 0x0f) * 4
-        if (length < ihl + 8) return false
-        if (packet[9].toInt() and 0xff != PROTO_UDP) return false
-        val destPort = ((packet[ihl + 2].toInt() and 0xff) shl 8) or
-            (packet[ihl + 3].toInt() and 0xff)
-        return destPort == 53
+        return when (version) {
+            4 -> {
+                val ihl = (packet[0].toInt() and 0x0f) * 4
+                if (length < ihl + 8) return false
+                if (packet[9].toInt() and 0xff != PROTO_UDP) return false
+                val destPort = ((packet[ihl + 2].toInt() and 0xff) shl 8) or
+                    (packet[ihl + 3].toInt() and 0xff)
+                destPort == 53
+            }
+            6 -> {
+                if (length < 40 + 8) return false
+                if (packet[6].toInt() and 0xff != PROTO_UDP) return false
+                val destPort = ((packet[40 + 2].toInt() and 0xff) shl 8) or
+                    (packet[40 + 3].toInt() and 0xff)
+                destPort == 53
+            }
+            else -> false
+        }
     }
 
     /** TCP DNS (53) or DoT (853) — blackhole so apps use UDP/53 → DNSCrypt. */
     fun isDnsTcpPort(packet: ByteArray, length: Int): Boolean {
         if (length < 40) return false
         val version = (packet[0].toInt() ushr 4) and 0x0f
-        if (version != 4) return false
-        val ihl = (packet[0].toInt() and 0x0f) * 4
-        if (length < ihl + 20) return false
-        if (packet[9].toInt() and 0xff != PROTO_TCP) return false
-        val destPort = ((packet[ihl + 2].toInt() and 0xff) shl 8) or
-            (packet[ihl + 3].toInt() and 0xff)
-        return destPort == 53 || destPort == 853
+        return when (version) {
+            4 -> {
+                val ihl = (packet[0].toInt() and 0x0f) * 4
+                if (length < ihl + 20) return false
+                if (packet[9].toInt() and 0xff != PROTO_TCP) return false
+                val destPort = ((packet[ihl + 2].toInt() and 0xff) shl 8) or
+                    (packet[ihl + 3].toInt() and 0xff)
+                destPort == 53 || destPort == 853
+            }
+            6 -> {
+                if (length < 40 + 20) return false
+                if (packet[6].toInt() and 0xff != PROTO_TCP) return false
+                val destPort = ((packet[40 + 2].toInt() and 0xff) shl 8) or
+                    (packet[40 + 3].toInt() and 0xff)
+                destPort == 53 || destPort == 853
+            }
+            else -> false
+        }
     }
 
     fun classifyUdp(packet: ByteArray, length: Int): UdpDisposition {
@@ -118,14 +168,19 @@ object LeakPacketFilter {
         }
     }
 
-    /**
-     * Classify why a packet is blackholed (for stats / rate-limited logs).
-     * Call only on the drop path — not for torrifiable TCP.
-     */
     fun classifyBlackholeReason(packet: ByteArray, length: Int): BlackholeReason {
         if (length < 20) return BlackholeReason.GenericUdp
         val version = (packet[0].toInt() ushr 4) and 0x0f
-        if (version == 6) return BlackholeReason.Ipv6
+        if (version == 6) {
+            if (isMulticastOrLinkLocalV6(packet)) return BlackholeReason.Multicast
+            val next = packet[6].toInt() and 0xff
+            return when (next) {
+                PROTO_ICMPV6 -> BlackholeReason.Icmp
+                PROTO_TCP -> if (isDnsTcpPort(packet, length)) BlackholeReason.TcpDns else BlackholeReason.NotUdp
+                PROTO_UDP -> classifyUdpPortReasonV6(packet, length)
+                else -> BlackholeReason.GenericUdp
+            }
+        }
         if (version != 4) return BlackholeReason.GenericUdp
         if (isMulticastOrBroadcastV4(packet)) return BlackholeReason.Multicast
         if (isLinkLocalV4(packet)) return BlackholeReason.LinkLocal
@@ -148,41 +203,9 @@ object LeakPacketFilter {
             (packet[ihl + 3].toInt() and 0xff)
         val payloadOff = ihl + 8
         val payloadLen = length - payloadOff
-
-        when (dstPort) {
-            443, 80, 8443, 853 -> {
-                if (payloadLen > 0 && looksLikeQuic(packet, payloadOff, payloadLen)) {
-                    return BlackholeReason.QuicHttp3
-                }
-                // Empty/first datagram on HTTP3 ports still force TCP fallback.
-                if (dstPort == 443 || dstPort == 80) return BlackholeReason.QuicHttp3
-            }
-            3478, 3479, 5349, 19302, 19305, 19306, 19307, 19308, 19309 ->
-                return BlackholeReason.StunWebrtc
-            5353, 5355 -> return BlackholeReason.MdnsLlmnr
-            1900 -> return BlackholeReason.Ssdp
-            123 -> return BlackholeReason.Ntp
-            67, 68 -> return BlackholeReason.Dhcp
-            51820 -> return BlackholeReason.WireGuard
-            1194 -> return BlackholeReason.OpenVpn
-        }
-
-        if (payloadLen >= 20 && looksLikeStun(packet, payloadOff, payloadLen)) {
-            return BlackholeReason.StunWebrtc
-        }
-        if (payloadLen >= 5 && looksLikeQuic(packet, payloadOff, payloadLen)) {
-            return BlackholeReason.QuicHttp3
-        }
-        if (payloadLen >= 13 && looksLikeDtls(packet, payloadOff, payloadLen)) {
-            return BlackholeReason.Dtls
-        }
-        if (payloadLen >= 4 && looksLikeWireGuard(packet, payloadOff, payloadLen)) {
-            return BlackholeReason.WireGuard
-        }
-        return BlackholeReason.GenericUdp
+        return classifyUdpPortReason(dstPort, packet, payloadOff, payloadLen)
     }
 
-    /** Record a blackhole drop; rate-limits Timber to avoid log spam. */
     fun noteBlackhole(reason: BlackholeReason) {
         when (reason) {
             BlackholeReason.QuicHttp3 -> dropQuic.incrementAndGet()
@@ -209,7 +232,7 @@ object LeakPacketFilter {
         if (shouldBlackholeUdp(packet, length)) {
             return classifyBlackholeReason(packet, length)
         }
-        if (!isTorrifiableIpv4Tcp(packet, length)) {
+        if (!isTorrifiableTcp(packet, length)) {
             return classifyBlackholeReason(packet, length)
         }
         return null
@@ -217,29 +240,93 @@ object LeakPacketFilter {
 
     /**
      * Early drop before DNS divert / firewall.
-     * UDP/53 is NOT dropped here (caller diverts). Other UDP → drop after classify.
+     * UDP/53 (v4/v6) is NOT dropped here (caller diverts). IPv6 TCP continues to hev.
      */
     fun shouldDropEarly(packet: ByteArray, length: Int): Boolean {
         if (length < 20) return true
         val version = (packet[0].toInt() ushr 4) and 0x0f
-        if (version == 6) return true
-        if (version != 4) return true
-        if (isMulticastOrBroadcastV4(packet)) return true
-        if (isLinkLocalV4(packet)) return true
-        val proto = packet[9].toInt() and 0xff
-        return when (proto) {
-            PROTO_TCP -> false
-            PROTO_UDP -> false // mux: DivertDns or Blackhole next
-            PROTO_ICMP, PROTO_IGMP, PROTO_ICMPV6 -> true
+        return when (version) {
+            4 -> {
+                if (isMulticastOrBroadcastV4(packet)) return true
+                if (isLinkLocalV4(packet)) return true
+                val proto = packet[9].toInt() and 0xff
+                when (proto) {
+                    PROTO_TCP, PROTO_UDP -> false
+                    PROTO_ICMP, PROTO_IGMP, PROTO_ICMPV6 -> true
+                    else -> true
+                }
+            }
+            6 -> {
+                if (length < 40) return true
+                if (isMulticastOrLinkLocalV6(packet)) return true
+                val next = packet[6].toInt() and 0xff
+                when (next) {
+                    PROTO_TCP, PROTO_UDP -> false
+                    PROTO_ICMPV6 -> true
+                    else -> true
+                }
+            }
             else -> true
         }
     }
 
     /** Non-DNS UDP must never reach the SOCKS engine. */
-    fun shouldBlackholeUdp(packet: ByteArray, length: Int): Boolean =
-        classifyUdp(packet, length) == UdpDisposition.Blackhole &&
-            length >= 20 &&
-            (packet[9].toInt() and 0xff) == PROTO_UDP
+    fun shouldBlackholeUdp(packet: ByteArray, length: Int): Boolean {
+        if (length < 20) return false
+        val version = (packet[0].toInt() ushr 4) and 0x0f
+        val isUdp = when (version) {
+            4 -> (packet[9].toInt() and 0xff) == PROTO_UDP
+            6 -> length >= 40 && (packet[6].toInt() and 0xff) == PROTO_UDP
+            else -> false
+        }
+        return isUdp && classifyUdp(packet, length) == UdpDisposition.Blackhole
+    }
+
+    private fun classifyUdpPortReasonV6(packet: ByteArray, length: Int): BlackholeReason {
+        if (length < 40 + 8) return BlackholeReason.GenericUdp
+        val dstPort = ((packet[40 + 2].toInt() and 0xff) shl 8) or
+            (packet[40 + 3].toInt() and 0xff)
+        val payloadOff = 40 + 8
+        val payloadLen = length - payloadOff
+        return classifyUdpPortReason(dstPort, packet, payloadOff, payloadLen)
+    }
+
+    private fun classifyUdpPortReason(
+        dstPort: Int,
+        packet: ByteArray,
+        payloadOff: Int,
+        payloadLen: Int,
+    ): BlackholeReason {
+        when (dstPort) {
+            443, 80, 8443, 853 -> {
+                if (payloadLen > 0 && looksLikeQuic(packet, payloadOff, payloadLen)) {
+                    return BlackholeReason.QuicHttp3
+                }
+                if (dstPort == 443 || dstPort == 80) return BlackholeReason.QuicHttp3
+            }
+            3478, 3479, 5349, 19302, 19305, 19306, 19307, 19308, 19309 ->
+                return BlackholeReason.StunWebrtc
+            5353, 5355 -> return BlackholeReason.MdnsLlmnr
+            1900 -> return BlackholeReason.Ssdp
+            123 -> return BlackholeReason.Ntp
+            67, 68 -> return BlackholeReason.Dhcp
+            51820 -> return BlackholeReason.WireGuard
+            1194 -> return BlackholeReason.OpenVpn
+        }
+        if (payloadLen >= 20 && looksLikeStun(packet, payloadOff, payloadLen)) {
+            return BlackholeReason.StunWebrtc
+        }
+        if (payloadLen >= 5 && looksLikeQuic(packet, payloadOff, payloadLen)) {
+            return BlackholeReason.QuicHttp3
+        }
+        if (payloadLen >= 13 && looksLikeDtls(packet, payloadOff, payloadLen)) {
+            return BlackholeReason.Dtls
+        }
+        if (payloadLen >= 4 && looksLikeWireGuard(packet, payloadOff, payloadLen)) {
+            return BlackholeReason.WireGuard
+        }
+        return BlackholeReason.GenericUdp
+    }
 
     private fun looksLikeQuic(packet: ByteArray, offset: Int, len: Int): Boolean {
         if (len < 5) return false
@@ -259,7 +346,6 @@ object LeakPacketFilter {
     private fun looksLikeDtls(packet: ByteArray, offset: Int, len: Int): Boolean {
         if (len < 13) return false
         val contentType = packet[offset].toInt() and 0xff
-        // DTLS 1.x ContentType + version 0xfe
         if (contentType !in 20..24) return false
         return (packet[offset + 1].toInt() and 0xff) == 0xfe
     }
@@ -294,5 +380,14 @@ object LeakPacketFilter {
 
     private fun isLinkLocalV4(packet: ByteArray): Boolean {
         return (packet[16].toInt() and 0xff) == 169 && (packet[17].toInt() and 0xff) == 254
+    }
+
+    /** ff00::/8 multicast or fe80::/10 link-local destination. */
+    private fun isMulticastOrLinkLocalV6(packet: ByteArray): Boolean {
+        if (packet.size < 40) return true
+        val b0 = packet[24].toInt() and 0xff
+        if (b0 == 0xff) return true // multicast
+        if (b0 == 0xfe && (packet[25].toInt() and 0xc0) == 0x80) return true // link-local
+        return false
     }
 }

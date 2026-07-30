@@ -38,6 +38,7 @@ import ltechnologies.onionphone.onionvpn.core.model.ValidationStatus
 import ltechnologies.onionphone.onionvpn.core.tor.control.TorControlHealth
 import ltechnologies.onionphone.onionvpn.core.tor.TorProcessManager
 import ltechnologies.onionphone.onionvpn.core.validation.TunnelValidator
+import ltechnologies.onionphone.onionvpn.core.validation.path.TorPathValidator
 import ltechnologies.onionphone.onionvpn.core.vpn.OnionVpnService
 import ltechnologies.onionphone.onionvpn.core.vpn.net.TorBandwidthSampler
 import ltechnologies.onionphone.onionvpn.core.vpn.pac.PacProxyServer
@@ -223,9 +224,8 @@ class TunnelForegroundService : Service() {
     private suspend fun startTunnel() {
         acquireBootstrapWakeLock()
 
-        // Mullvad/Orbot: if kill-switch is on, own the default route BEFORE Tor bootstrap
-        // so no app can clearnet while we wait for circuits.
-        if (preferences.killSwitchEnabled && VpnService.prepare(this) == null) {
+        // Always own the default route BEFORE Tor bootstrap (constant kill-switch).
+        if (VpnService.prepare(this) == null) {
             updateSnapshot(TunnelPhase.StartingVpn)
             val blockingGen = OnionVpnService.nextGeneration()
             vpnBridge.startBlocking(preferences, blockingGen)
@@ -334,6 +334,8 @@ class TunnelForegroundService : Service() {
         }
 
         updateSnapshot(TunnelPhase.Validating, vpnEstablished = true)
+        // Seed firewall prefs before Connected packets (ASK/DENY must not flip mid-flow).
+        firewallEngine.start()
         // Wake Tor if dormant so DNSPort / SOCKS5A probes don't Poll/connect timeout.
         maybeSignalActive()
         val validations = runValidation(ports)
@@ -370,7 +372,6 @@ class TunnelForegroundService : Service() {
             dnsCryptRunning = useDnsCrypt && dnsCrypt.isRunning(),
             vpnEstablished = true,
         )
-        firewallEngine.start()
         // Wake Tor if we previously SIGNAL DORMANT from kill-switch Blocking.
         maybeSignalActive()
         tor.applyCircuitTimingLive(
@@ -398,14 +399,34 @@ class TunnelForegroundService : Service() {
         }
     } catch (error: Exception) {
         Timber.e(error, "Validation timed out or failed")
+        // Soft timeout must not alone Block — but never promote on SOCKS TCP alone.
+        // Re-run a fast hard-gate (wiring + routes + Private DNS / Always-on owner).
+        val hardGate = runCatching {
+            withTimeout(HARD_GATE_TIMEOUT_MS) {
+                TunnelValidator.validateHardGate(
+                    context = applicationContext,
+                    dnsCryptConfigFile = dnsCrypt.configFile,
+                    vpnEstablished = OnionVpnService.vpnEstablished.value,
+                    killSwitchEnabled = preferences.killSwitchEnabled,
+                    runtimePorts = ports,
+                    dnsResolverMode = preferences.dnsResolverMode,
+                )
+            }
+        }.getOrElse { gateError ->
+            Timber.e(gateError, "Hard-gate after timeout failed")
+            listOf(
+                TorPathValidator.validateSocksOnly(socksPort = ports.torProbeSocksPort),
+            )
+        }
         listOf(
             ValidationCheck(
                 id = "validation.timeout",
                 label = "Tunnel validation",
                 status = ValidationStatus.Fail,
                 detail = error.message ?: "Validation failed",
+                tripsKillSwitch = false,
             ),
-        )
+        ) + hardGate
     }
 
     private suspend fun handleFailure(
@@ -419,7 +440,7 @@ class TunnelForegroundService : Service() {
         releaseBootstrapWakeLock()
         stopThroughputUpdates()
 
-        val canBlock = preferences.killSwitchEnabled && VpnService.prepare(this) == null
+        val canBlock = VpnService.prepare(this) == null
         if (canBlock) {
             enterBlockingMode(message, validations, stopTorProcesses = stopTorProcesses)
             return
@@ -744,10 +765,12 @@ class TunnelForegroundService : Service() {
         const val EXTRA_DNS_DNSSEC = "dns_dnssec"
 
         private const val BOOTSTRAP_WAKELOCK_TIMEOUT_MS = 90_000L
-        /** Leak checks — less aggressive once Connected to save battery/thermal. */
-        private const val VALIDATION_INTERVAL_MS = 90_000L
-        private const val VALIDATION_TIMEOUT_MS = 60_000L
-        /** Every N lite validations → one full (includes exit-IP). ~15 min at 90s. */
+        /** Leak checks — catch Private DNS activation sooner without thrashing Tor. */
+        private const val VALIDATION_INTERVAL_MS = 45_000L
+        private const val VALIDATION_TIMEOUT_MS = 90_000L
+        /** After full validateAll timeout: local wiring + OS leak checks only. */
+        private const val HARD_GATE_TIMEOUT_MS = 25_000L
+        /** Every N lite validations → one full (includes exit-IP). ~7.5 min at 45s. */
         private const val FULL_VALIDATION_TICKS = 10
         /** UI throughput tick; BW events fill rates without GETINFO each tick. */
         private const val THROUGHPUT_INTERVAL_MS = 2_000L
@@ -762,7 +785,7 @@ class TunnelForegroundService : Service() {
 
         fun preferencesFromIntent(intent: Intent): TunnelPreferences = TunnelPreferences(
             routeAllTrafficThroughTor = intent.getBooleanExtra(EXTRA_ROUTE_ALL, true),
-            killSwitchEnabled = intent.getBooleanExtra(EXTRA_KILL_SWITCH, true),
+            killSwitchEnabled = true, // constant — ignore intent off
             dnsCryptServerName = intent.getStringExtra(EXTRA_DNSCRYPT_SERVER) ?: "cloudflare",
             dnsResolverMode = intent.getStringExtra(EXTRA_DNS_MODE)
                 ?.let { runCatching { DnsResolverMode.valueOf(it) }.getOrNull() }

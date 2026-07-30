@@ -3,7 +3,7 @@ package ltechnologies.onionphone.onionvpn.core.vpn.dns
 /**
  * Minimal DNS message parser for firewall hostname attribution.
  *
- * Extracts the first question QNAME and A (type 1) answer RDATA IPv4 addresses.
+     * Extracts the first question QNAME and A/AAAA answer RDATA addresses.
  * Does not allocate during failure paths beyond the returned lists.
  */
 object DnsPacketParser {
@@ -59,6 +59,12 @@ object DnsPacketParser {
                             "${dns[pos + 2].toInt() and 0xff}." +
                             "${dns[pos + 3].toInt() and 0xff}",
                     )
+                } else if (type == TYPE_AAAA && rdLength == 16) {
+                    runCatching {
+                        java.net.InetAddress.getByAddress(
+                            dns.copyOfRange(pos, pos + 16),
+                        ).hostAddress?.substringBefore('%')
+                    }.getOrNull()?.let { answers.add(it) }
                 }
                 pos += rdLength
             }
@@ -110,4 +116,5 @@ object DnsPacketParser {
     }
 
     private const val TYPE_A = 1
+    private const val TYPE_AAAA = 28
 }

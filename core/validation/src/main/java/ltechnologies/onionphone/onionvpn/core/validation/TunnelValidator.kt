@@ -110,6 +110,62 @@ object TunnelValidator {
     )
 
     /**
+     * Fast hard-gate after a full [validateAll] timeout: local wiring + OS leak posture only.
+     * Never promotes Connected on SOCKS TCP accept alone (Exit-IP / DNSPort flakes excluded).
+     */
+    suspend fun validateHardGate(
+        context: Context,
+        dnsCryptConfigFile: File? = null,
+        vpnEstablished: Boolean,
+        killSwitchEnabled: Boolean = true,
+        runtimePorts: TunnelRuntimePorts,
+        dnsResolverMode: DnsResolverMode = DnsResolverMode.DNSCRYPT_MUX,
+    ): List<ValidationCheck> = withContext(Dispatchers.Default) {
+        val hevConfigFile = File(context.applicationContext.filesDir, "hev-socks5-tunnel.yaml")
+        buildList {
+            add(
+                TorPathValidator.validateSocksOnly(
+                    socksPort = runtimePorts.torProbeSocksPort,
+                ),
+            )
+            // Local path proofs (Soft Fail) — prove Tor/DNSCrypt answer, not bare TCP accept.
+            add(
+                TorPathValidator.validateSocks5a(
+                    socksPort = runtimePorts.torProbeSocksPort,
+                ),
+            )
+            addAll(DnsCryptPathValidator.validate(listenPort = runtimePorts.dnsCryptListenPort))
+            add(validateUidForwarderWiring(runtimePorts))
+            add(validateDnsCryptTorWiring(dnsCryptConfigFile, runtimePorts))
+            add(validateDnsModeLeakProperties(dnsResolverMode, hevConfigFile))
+            if (vpnEstablished) {
+                addAll(
+                    AndroidVpnInspector.inspect(
+                        context = context.applicationContext,
+                        killSwitchExpected = killSwitchEnabled,
+                    ),
+                )
+            } else {
+                add(
+                    ValidationCheck(
+                        id = "vpn.not.established",
+                        label = "VPN interface established",
+                        status = ValidationStatus.Fail,
+                        detail = "Skipped Android routing probes",
+                    ),
+                )
+            }
+            addAll(
+                SystemLeakInspector.inspect(
+                    context = context.applicationContext,
+                    killSwitchExpected = killSwitchEnabled,
+                ),
+            )
+            add(blockedDnsRoutesConfigured())
+        }
+    }
+
+    /**
      * Failures that must trip the kill-switch. Checks with [ValidationCheck.tripsKillSwitch]
      * set to false are advisory only (e.g. Always-on lockdown lives in system Settings).
      */
@@ -130,7 +186,7 @@ object TunnelValidator {
             // Tor SOCKS gone → nothing can be circuit-routed.
             "tor.socks" -> true
             // Confirmed non-Tor egress / ISP IP on SOCKS path.
-            "tor.exit.istor" -> true
+            // IsTor=false alone is Soft (ExitIpValidator) — unlisted exits must not Block.
             "tor.exit.ip" -> {
                 val d = check.detail.lowercase()
                 d.contains("equals device") ||
@@ -154,9 +210,20 @@ object TunnelValidator {
             "android.vpn.competing",
             "android.vpn.permission",
             -> true
-            // Only when another app owns Always-on (tripsKillSwitch set by inspector).
+            // Missing default routes → clearnet IPv4/IPv6 bypass.
+            "android.vpn.route.default",
+            "android.vpn.route.ipv6",
+            -> true
+            // OS Private DNS DoT actually active / forced hostname (Tor VPN §5.2.4).
+            // tripsKillSwitch set by SystemLeakInspector — opportunistic-only is Soft.
+            "android.dns.private" -> true
+            // Another app owns Always-on (tripsKillSwitch set by inspector). Missing
+            // Lockdown is Soft — must not blackhole working Tor.
             "android.vpn.always_on" -> true
-            // Soft: DNSCrypt listener flake / DNSPort / SOCKS5A / underlying / timeout.
+            // VPN iface shows a public/ISP address (not OnionVPN virtual gateway).
+            "vpn.address.not.public" -> true
+            // Soft: validation.timeout / DNSCrypt listener / DNSPort / SOCKS5A / Wi‑Fi blip.
+            // Timeout alone must not Block when Tor SOCKS still answers (ExitIp can exceed budget).
             else -> false
         }
     }
@@ -167,16 +234,30 @@ object TunnelValidator {
      * [OnionVpnService.hevSocksPort] stores the Tor apps SocksPort (not the bridge listen port).
      */
     private fun validateUidForwarderWiring(ports: TunnelRuntimePorts): ValidationCheck {
-        val alive = OnionVpnService.tunForwarderAlive.value
-        val socks = OnionVpnService.hevSocksPort.value
-        val dns = OnionVpnService.hevDnsCryptPort.value
-        val socksOk = alive && socks == ports.torSocksPort
-        val dnsOk = dns == ports.dnsCryptListenPort
-        val ok = socksOk && dnsOk
+        // Brief retry: hevSocksPort / dnsCrypt port publish can race TUN rebind.
+        var alive = false
+        var socks = 0
+        var dns = 0
+        repeat(4) { attempt ->
+            alive = OnionVpnService.tunForwarderAlive.value
+            socks = OnionVpnService.hevSocksPort.value
+            dns = OnionVpnService.hevDnsCryptPort.value
+            if (alive && socks == ports.torSocksPort && dns == ports.dnsCryptListenPort) {
+                return ValidationCheck(
+                    id = "uid.forwarder.wiring",
+                    label = "TUN forwarder ↔ Tor (hev + UID SOCKS bridge)",
+                    status = ValidationStatus.Pass,
+                    detail = "alive=$alive torSocks=$socks dnsCrypt=$dns " +
+                        "bridge=:${TunnelEndpoints.SOCKS_UID_BRIDGE_PORT}",
+                    tripsKillSwitch = true,
+                )
+            }
+            if (attempt < 3) Thread.sleep(50)
+        }
         return ValidationCheck(
             id = "uid.forwarder.wiring",
             label = "TUN forwarder ↔ Tor (hev + UID SOCKS bridge)",
-            status = if (ok) ValidationStatus.Pass else ValidationStatus.Fail,
+            status = ValidationStatus.Fail,
             detail = "alive=$alive torSocks=$socks (want ${ports.torSocksPort}) " +
                 "dnsCrypt=$dns (want ${ports.dnsCryptListenPort}) " +
                 "bridge=:${TunnelEndpoints.SOCKS_UID_BRIDGE_PORT}",

@@ -44,16 +44,27 @@ class ConnectionOwnerResolver(context: Context) {
         }
         val peer = client.remoteSocketAddress as? InetSocketAddress ?: return Process.INVALID_UID
         val local = client.localSocketAddress as? InetSocketAddress ?: return Process.INVALID_UID
-        return try {
-            @Suppress("NewApi")
-            connectivity.getConnectionOwnerUid(OsConstants.IPPROTO_TCP, peer, local)
-        } catch (error: SecurityException) {
-            Timber.w(error, "getConnectionOwnerUid denied for PAC client")
-            Process.INVALID_UID
-        } catch (error: Exception) {
-            Timber.w(error, "getConnectionOwnerUid failed for PAC client")
-            Process.INVALID_UID
+        repeat(PAC_UID_RETRY) { attempt ->
+            val uid = try {
+                @Suppress("NewApi")
+                connectivity.getConnectionOwnerUid(OsConstants.IPPROTO_TCP, peer, local)
+            } catch (error: SecurityException) {
+                Timber.w(error, "getConnectionOwnerUid denied for PAC client")
+                return Process.INVALID_UID
+            } catch (error: Exception) {
+                Timber.w(error, "getConnectionOwnerUid failed for PAC client")
+                Process.INVALID_UID
+            }
+            if (isValidUid(uid)) return uid
+            if (attempt < PAC_UID_RETRY - 1) {
+                try {
+                    Thread.sleep(PAC_UID_SLEEP_MS)
+                } catch (_: InterruptedException) {
+                    return Process.INVALID_UID
+                }
+            }
         }
+        return Process.INVALID_UID
     }
 
     private fun resolveApi29Once(info: IpPacketInfo): Int {
@@ -63,9 +74,16 @@ class ConnectionOwnerResolver(context: Context) {
                 IpPacketParser.PROTO_UDP -> OsConstants.IPPROTO_UDP
                 else -> return Process.INVALID_UID
             }
-            val scratch = addressScratch.get()
-            val local = socketAddress(info.srcIpInt, info.srcPort, scratch.localBytes)
-            val remote = socketAddress(info.dstIpInt, info.dstPort, scratch.remoteBytes)
+            val local: InetSocketAddress
+            val remote: InetSocketAddress
+            if (info.isIpv6) {
+                local = InetSocketAddress(InetAddress.getByName(info.srcIp), info.srcPort)
+                remote = InetSocketAddress(InetAddress.getByName(info.dstIp), info.dstPort)
+            } else {
+                val scratch = addressScratch.get()
+                local = socketAddress(info.srcIpInt, info.srcPort, scratch.localBytes)
+                remote = socketAddress(info.dstIpInt, info.dstPort, scratch.remoteBytes)
+            }
             @Suppress("NewApi")
             connectivity.getConnectionOwnerUid(protocol, local, remote)
         } catch (error: SecurityException) {
@@ -131,6 +149,8 @@ class ConnectionOwnerResolver(context: Context) {
 
     companion object {
         private val addressScratch = ThreadLocal.withInitial { AddressScratch() }
+        private const val PAC_UID_RETRY = 5
+        private const val PAC_UID_SLEEP_MS = 4L
 
         fun isValidUid(uid: Int): Boolean =
             uid != Process.INVALID_UID && uid >= 0

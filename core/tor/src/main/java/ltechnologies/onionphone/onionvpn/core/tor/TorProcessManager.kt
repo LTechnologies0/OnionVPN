@@ -3,10 +3,10 @@ package ltechnologies.onionphone.onionvpn.core.tor
 import android.content.Context
 import java.io.File
 import java.io.IOException
-import java.net.HttpURLConnection
+import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.Proxy
-import java.net.URL
+import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.StateFlow
@@ -20,6 +20,9 @@ import ltechnologies.onionphone.onionvpn.core.tor.control.TorControlClient
 import ltechnologies.onionphone.onionvpn.core.tor.control.catalog.TorControlCatalog
 import ltechnologies.onionphone.onionvpn.core.tor.control.model.TorControlStatus
 import ltechnologies.onionphone.onionvpn.core.tor.lifecycle.TorReadiness
+import okhttp3.Dns
+import okhttp3.OkHttpClient
+import okhttp3.Request
 import timber.log.Timber
 
 /**
@@ -489,37 +492,39 @@ class TorProcessManager(
         minBytes: Long,
         socksPort: Int?,
     ): Boolean = runCatching {
-        // Never clearnet — OnionVPN is VPN-excluded; NO_PROXY would leak under kill-switch.
+        // Never clearnet DNS — VPN-excluded UID + Java SOCKS would resolve locally.
+        // OkHttp + SOCKS5h placeholder Dns (same as ExitIpValidator / TorSocksDns).
         val port = socksPort ?: error("GeoIP download refused without Tor SOCKS")
         val proxy = Proxy(Proxy.Type.SOCKS, InetSocketAddress(TunnelEndpoints.LOOPBACK, port))
-        val conn = (URL(url).openConnection(proxy) as HttpURLConnection).apply {
-            connectTimeout = 20_000
-            readTimeout = 180_000
-            instanceFollowRedirects = true
-            setRequestProperty("User-Agent", "OnionVPN/geoip")
-            setRequestProperty("Accept", "text/plain,*/*")
-        }
-        try {
-            val code = conn.responseCode
-            if (code !in 200..299) {
-                error("HTTP $code for $url")
+        val client = OkHttpClient.Builder()
+            .proxy(proxy)
+            .dns(GeoIpTorSocksDns)
+            .connectTimeout(20, TimeUnit.SECONDS)
+            .readTimeout(180, TimeUnit.SECONDS)
+            .followRedirects(true)
+            .build()
+        val request = Request.Builder()
+            .url(url)
+            .header("User-Agent", "OnionVPN/geoip")
+            .header("Accept", "text/plain,*/*")
+            .build()
+        client.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) {
+                error("HTTP ${response.code} for $url")
             }
-            conn.inputStream.use { input ->
-                val tmp = File(configDirectory, "${dest.name}.part")
-                tmp.outputStream().use { output -> input.copyTo(output) }
-                if (tmp.length() < minBytes) {
-                    tmp.delete()
-                    error("GeoIP download too small: ${tmp.length()}")
-                }
-                if (!tmp.renameTo(dest)) {
-                    tmp.copyTo(dest, overwrite = true)
-                    tmp.delete()
-                }
+            val body = response.body ?: error("empty body")
+            val tmp = File(configDirectory, "${dest.name}.part")
+            tmp.outputStream().use { output -> body.byteStream().copyTo(output) }
+            if (tmp.length() < minBytes) {
+                tmp.delete()
+                error("GeoIP download too small: ${tmp.length()}")
             }
-            true
-        } finally {
-            conn.disconnect()
+            if (!tmp.renameTo(dest)) {
+                tmp.copyTo(dest, overwrite = true)
+                tmp.delete()
+            }
         }
+        true
     }.onFailure {
         Timber.d(it, "GeoIP mirror failed %s", url)
     }.getOrDefault(false)
@@ -545,6 +550,15 @@ class TorProcessManager(
 
     companion object {
         const val LOG_TAG = "tor"
+
+        /**
+         * SOCKS5h: unresolved host so Tor resolves the name (no local clearnet DNS).
+         * Same pattern as TorSocksDns / ExitIpValidator.
+         */
+        private object GeoIpTorSocksDns : Dns {
+            override fun lookup(hostname: String): List<InetAddress> =
+                listOf(InetAddress.getByAddress(hostname, byteArrayOf(0, 0, 0, 0)))
+        }
 
         /**
          * Official metrics geoip-data (kept current) + Tor release-branch fallback.

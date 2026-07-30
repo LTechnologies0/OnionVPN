@@ -1,5 +1,7 @@
 package ltechnologies.onionphone.onionvpn.core.validation.path
 
+import java.io.DataInputStream
+import java.io.DataOutputStream
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
@@ -54,47 +56,36 @@ object DnsCryptPathValidator {
         }
         val ephemeralKeys = config.contains("dnscrypt_ephemeral_keys = true")
         val noTlsTickets = config.contains("tls_disable_session_tickets = true")
-        val blockIpv6 = config.contains("block_ipv6 = true")
+        val blockIpv6Off = config.contains("block_ipv6 = false")
         val forceTcp = config.contains("force_tcp = true")
         val ok = usesBootstrap && usesNetprobe && ignoresSystemDns && usesProxy && hasListen &&
-            ephemeralKeys && noTlsTickets && blockIpv6 && forceTcp
+            ephemeralKeys && noTlsTickets && blockIpv6Off && forceTcp
         return ValidationCheck(
             id = "dnscrypt.config.runtime",
             label = "DNSCrypt config (runtime)",
             status = if (ok) ValidationStatus.Pass else ValidationStatus.Fail,
             detail = "$source: listen=$hasListen bootstrap=$usesBootstrap proxy=$usesProxy " +
                 "ignore_system_dns=$ignoresSystemDns ephemeral=$ephemeralKeys " +
-                "noTlsTickets=$noTlsTickets block_ipv6=$blockIpv6 force_tcp=$forceTcp",
+                "noTlsTickets=$noTlsTickets block_ipv6=false=$blockIpv6Off force_tcp=$forceTcp",
             tripsKillSwitch = !ok,
         )
     }
 
     private fun probeListener(port: Int): ValidationCheck {
-        if (probeTcp(port)) {
+        // Prefer a real DNS answer (TCP first — force_tcp=true). Mere TCP accept is not enough.
+        if (probeTcpDns(port)) {
             return ValidationCheck(
                 id = "dnscrypt.listener",
                 label = "DNSCrypt listener responds",
                 status = ValidationStatus.Pass,
-                detail = "${TunnelEndpoints.LOOPBACK}:$port (TCP)",
+                detail = "${TunnelEndpoints.LOOPBACK}:$port (TCP DNS answer)",
+                tripsKillSwitch = false,
             )
         }
         return try {
             DatagramSocket(0, InetAddress.getByName(TunnelEndpoints.LOOPBACK)).use { socket ->
                 socket.soTimeout = 10_000
-                val query = byteArrayOf(
-                    0x12, 0x34,
-                    0x01, 0x00,
-                    0x00, 0x01,
-                    0x00, 0x00,
-                    0x00, 0x00,
-                    0x00, 0x00,
-                    0x07, 'e'.code.toByte(), 'x'.code.toByte(), 'a'.code.toByte(),
-                    'm'.code.toByte(), 'p'.code.toByte(), 'l'.code.toByte(), 'e'.code.toByte(),
-                    0x03, 'c'.code.toByte(), 'o'.code.toByte(), 'm'.code.toByte(),
-                    0x00,
-                    0x00, 0x01,
-                    0x00, 0x01,
-                )
+                val query = dnsQueryExampleA()
                 socket.send(
                     DatagramPacket(
                         query,
@@ -105,31 +96,70 @@ object DnsCryptPathValidator {
                 )
                 val response = DatagramPacket(ByteArray(512), 512)
                 socket.receive(response)
+                if (!dnsIdMatches(response.data, response.length, query)) {
+                    throw IllegalStateException("DNS response ID mismatch")
+                }
             }
             ValidationCheck(
                 id = "dnscrypt.listener",
                 label = "DNSCrypt listener responds",
                 status = ValidationStatus.Pass,
-                detail = "${TunnelEndpoints.LOOPBACK}:$port (UDP)",
+                detail = "${TunnelEndpoints.LOOPBACK}:$port (UDP DNS answer)",
+                tripsKillSwitch = false,
             )
         } catch (error: Exception) {
             ValidationCheck(
                 id = "dnscrypt.listener",
                 label = "DNSCrypt listener responds",
                 status = ValidationStatus.Fail,
-                detail = error.message ?: "no response",
+                detail = error.message ?: "no DNS answer",
+                tripsKillSwitch = false,
             )
         }
     }
 
-    private fun probeTcp(port: Int): Boolean {
+    /** DNS-over-TCP: length-prefixed query; require matching transaction ID in answer. */
+    private fun probeTcpDns(port: Int): Boolean {
         return try {
             Socket().use { socket ->
                 socket.connect(InetSocketAddress(TunnelEndpoints.LOOPBACK, port), 2_000)
+                socket.soTimeout = 5_000
+                val query = dnsQueryExampleA()
+                DataOutputStream(socket.getOutputStream()).use { out ->
+                    out.writeShort(query.size)
+                    out.write(query)
+                    out.flush()
+                }
+                DataInputStream(socket.getInputStream()).use { inp ->
+                    val len = inp.readUnsignedShort()
+                    if (len < 12 || len > 4_096) return false
+                    val resp = ByteArray(len)
+                    inp.readFully(resp)
+                    dnsIdMatches(resp, resp.size, query)
+                }
             }
-            true
         } catch (_: Exception) {
             false
         }
+    }
+
+    private fun dnsQueryExampleA(): ByteArray = byteArrayOf(
+        0x12, 0x34,
+        0x01, 0x00,
+        0x00, 0x01,
+        0x00, 0x00,
+        0x00, 0x00,
+        0x00, 0x00,
+        0x07, 'e'.code.toByte(), 'x'.code.toByte(), 'a'.code.toByte(),
+        'm'.code.toByte(), 'p'.code.toByte(), 'l'.code.toByte(), 'e'.code.toByte(),
+        0x03, 'c'.code.toByte(), 'o'.code.toByte(), 'm'.code.toByte(),
+        0x00,
+        0x00, 0x01,
+        0x00, 0x01,
+    )
+
+    private fun dnsIdMatches(response: ByteArray, length: Int, query: ByteArray): Boolean {
+        if (length < 2 || query.size < 2) return false
+        return response[0] == query[0] && response[1] == query[1]
     }
 }

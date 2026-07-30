@@ -182,7 +182,8 @@ fun SettingsScreen(
         SectionHeader(
             title = "UDP / Tor Datagram",
             subtitle = "Tor has no deployed CONNECT_UDP (prop. 339). OnionVPN policy:\n" +
-                "• UDP/53 → DNSCrypt over Tor (any resolver IP)\n" +
+                "• UDP/53 (IPv4+IPv6) → DNSCrypt over Tor\n" +
+                "• TCP IPv4+IPv6 → hev → Tor SOCKS (ATYP 0x01/0x04)\n" +
                 "• QUIC/HTTP3, STUN/WebRTC, DTLS, WireGuard, mDNS, NTP → blackhole\n" +
                 "• Apps fall back to TCP (HTTP/2, no real UDP)\n" +
                 "• Zero clearnet UDP side-channel, zero remote UDP gateway",
@@ -224,30 +225,46 @@ fun SettingsScreen(
             )
         }
 
-        PrefSwitch(
-            label = "Prefer IPv4+IPv6 VPN families (API 29+)",
-            checked = local.routeAllTrafficThroughTor,
-            onChecked = { commit(local.copy(routeAllTrafficThroughTor = it)) },
-        )
-        Text(
-            text = "Always installs a full default route (0.0.0.0/0 + ::/0). " +
-                "When on (Android 10+), also calls allowFamily for IPv4 and IPv6. " +
-                "Off does not enable split-tunnel.",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        PrefSwitch(
-            label = "Kill switch",
-            checked = local.killSwitchEnabled,
-            onChecked = { commit(local.copy(killSwitchEnabled = it)) },
-        )
-        Text(
-            text = "Kill switch drops only app packets that cannot go through Tor " +
-                "(Blocking TUN / no clearnet). Working Tor circuits stay up — soft probe " +
-                "flakes (DNSCrypt, exit-IP fetch, Wi‑Fi blip) do not tear them down.",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            shape = MaterialTheme.shapes.medium,
+            color = MaterialTheme.colorScheme.surfaceContainerHighest,
+        ) {
+            Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
+                Text(
+                    "Full-tunnel IPv4+IPv6 (mandatory)",
+                    style = MaterialTheme.typography.bodyLarge,
+                )
+                Text(
+                    text = "Always installs default routes (0.0.0.0/0 + ::/0) and claims both " +
+                        "address families on Android 10+. Split-tunnel is not offered — " +
+                        "partial routes would clearnet-leak.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            shape = MaterialTheme.shapes.medium,
+            color = MaterialTheme.colorScheme.surfaceContainerHighest,
+        ) {
+            Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
+                Text(
+                    "Kill switch (always on)",
+                    style = MaterialTheme.typography.bodyLarge,
+                )
+                Text(
+                    text = "Blocking TUN before Tor bootstrap and on hard wiring/leak fails. " +
+                        "Cannot be disabled — working Tor traffic is never blackholed for Soft " +
+                        "warnings. Also enable system Always-on VPN + Lockdown and Private DNS Off. " +
+                        "Hard Block: other VPN owns Always-on, active DoT, missing routes, dead " +
+                        "Tor SOCKS, or DNSCrypt not over Tor.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
         PrefSwitch(
             label = "Start tunnel when app opens",
             checked = local.autoStartOnAppLaunch,

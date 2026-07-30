@@ -54,7 +54,7 @@ class TunnelPreferencesStore @Inject constructor(
         context.tunnelDataStore.edit { prefs ->
             val next = transform(prefs.toModel())
             prefs[Keys.routeAll] = next.routeAllTrafficThroughTor
-            prefs[Keys.killSwitch] = next.killSwitchEnabled
+            prefs[Keys.killSwitch] = true // constant — never persist off
             prefs[Keys.dnsServer] = next.dnsCryptServerName
             prefs[Keys.dnsMode] = next.dnsResolverMode.name
             prefs[Keys.torBridges] = next.torBridges
@@ -78,7 +78,7 @@ class TunnelPreferencesStore @Inject constructor(
 
     private fun Preferences.toModel(): TunnelPreferences = TunnelPreferences(
         routeAllTrafficThroughTor = this[Keys.routeAll] ?: true,
-        killSwitchEnabled = this[Keys.killSwitch] ?: true,
+        killSwitchEnabled = true, // constant app kill-switch
         dnsCryptServerName = this[Keys.dnsServer] ?: "cloudflare",
         dnsResolverMode = this[Keys.dnsMode]
             ?.let { runCatching { DnsResolverMode.valueOf(it) }.getOrNull() }

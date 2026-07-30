@@ -13,7 +13,9 @@ import timber.log.Timber
 /**
  * Builds fail-closed VPN profiles (Mullvad + InviZible + Orbot):
  *
- * - Full-tunnel IPv4 (`0.0.0.0/0`) and IPv6 (`::/0`)
+ * - Full-tunnel IPv4 (`0.0.0.0/0`) and IPv6 (`::/0`) — always; split-tunnel is refused
+ * - [allowFamily] IPv4+IPv6 on API 29+ — always (TunnelPreferences.routeAllTrafficThroughTor
+ *   is forced true; the preference is a legacy no-op for routes)
  * - Self-excluded so Tor/DNSCrypt/hev loopback is not re-captured
  * - Public DNS /32 routes pinned into tunnel
  * - Never [VpnService.Builder.allowBypass]
@@ -91,7 +93,7 @@ object VpnProfileBuilder {
             .addAddress(TunnelEndpoints.VPN_CLIENT_ADDRESS_V6, 128)
             .addRoute("::", 0)
             .addDnsServer(dnsServer)
-            .setBlocking(mode == VpnProfileMode.Blocking && preferences.killSwitchEnabled)
+            .setBlocking(mode == VpnProfileMode.Blocking)
 
         BLOCKED_PUBLIC_DNS.forEach { resolver ->
             // IPv6 literals need prefix length 128; IPv4 /32.

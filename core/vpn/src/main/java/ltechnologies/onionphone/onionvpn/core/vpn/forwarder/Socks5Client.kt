@@ -69,23 +69,36 @@ class Socks5Client(
             throw IOException("SOCKS5 username/password rejected")
         }
 
-        // CONNECT
+        // CONNECT — IPv4 literal, IPv6 literal, or hostname (SOCKS5A via Tor).
         val hostBytes = destHost.toByteArray(StandardCharsets.UTF_8)
         val isIpv4 = destHost.matches(IPV4_REGEX)
+        val isIpv6 = !isIpv4 && destHost.indexOf(':') >= 0
         output.writeByte(0x05)
         output.writeByte(0x01) // CONNECT
         output.writeByte(0x00)
-        if (isIpv4) {
-            output.writeByte(0x01)
-            output.write(InetAddress.getByName(destHost).address)
-        } else {
-            if (hostBytes.size > 255) {
-                socket.close()
-                throw IOException("SOCKS5 hostname too long")
+        when {
+            isIpv4 -> {
+                output.writeByte(0x01)
+                output.write(InetAddress.getByName(destHost).address)
             }
-            output.writeByte(0x03)
-            output.writeByte(hostBytes.size)
-            output.write(hostBytes)
+            isIpv6 -> {
+                val addr = InetAddress.getByName(destHost).address
+                if (addr.size != 16) {
+                    socket.close()
+                    throw IOException("SOCKS5 IPv6 address length ${addr.size}")
+                }
+                output.writeByte(0x04)
+                output.write(addr)
+            }
+            else -> {
+                if (hostBytes.size > 255) {
+                    socket.close()
+                    throw IOException("SOCKS5 hostname too long")
+                }
+                output.writeByte(0x03)
+                output.writeByte(hostBytes.size)
+                output.write(hostBytes)
+            }
         }
         output.writeShort(destPort)
         output.flush()

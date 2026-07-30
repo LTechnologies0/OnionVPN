@@ -9,7 +9,7 @@ import ltechnologies.onionphone.onionvpn.core.vpn.firewall.IpPacketInfo
  * Maps TUN TCP flows (esp. SYN) → app UID so [SocksUidBridge] can IsolateSOCKSAuth
  * after hev opens SOCKS CONNECT by destination only.
  *
- * TunDnsMux notes flows; the bridge consumes the newest entry for dstIp:dstPort.
+ * Supports IPv4 (int key) and IPv6 (host|port key).
  */
 object TcpFlowUidIndex {
     data class Entry(
@@ -22,16 +22,22 @@ object TcpFlowUidIndex {
     )
 
     private val byDest = ConcurrentHashMap<Long, ConcurrentLinkedDeque<Entry>>()
+    private val byDestV6 = ConcurrentHashMap<String, ConcurrentLinkedDeque<Entry>>()
     private val notes = AtomicLong(0)
     private val takes = AtomicLong(0)
     private val misses = AtomicLong(0)
 
     fun clear() {
         byDest.clear()
+        byDestV6.clear()
     }
 
     fun note(info: IpPacketInfo, uid: Int) {
         if (!info.isTcp || uid < 0) return
+        if (info.isIpv6) {
+            noteV6(info.dstIp, info.dstPort, uid, info.srcPort)
+            return
+        }
         val key = destKey(info.dstIpInt, info.dstPort)
         val q = byDest.getOrPut(key) { ConcurrentLinkedDeque() }
         q.addLast(
@@ -45,9 +51,7 @@ object TcpFlowUidIndex {
         )
         notes.incrementAndGet()
         trim(q)
-        if (byDest.size > MAX_DEST_KEYS) {
-            evictOldestKeys()
-        }
+        if (byDest.size > MAX_DEST_KEYS) evictOldestKeys()
     }
 
     fun hasRecent(dstIp: Int, dstPort: Int, maxAgeMs: Long = ENTRY_TTL_MS): Boolean {
@@ -56,12 +60,17 @@ object TcpFlowUidIndex {
         return q.any { now - it.atMs <= maxAgeMs }
     }
 
+    fun hasRecentHost(host: String, dstPort: Int, maxAgeMs: Long = ENTRY_TTL_MS): Boolean {
+        parseIpv4(host)?.let { return hasRecent(it, dstPort, maxAgeMs) }
+        if (host.indexOf(':') < 0) return false
+        val q = byDestV6["$host|$dstPort"] ?: return false
+        val now = System.currentTimeMillis()
+        return q.any { now - it.atMs <= maxAgeMs }
+    }
+
     /**
      * Newest non-expired flow for this destination (hev CONNECT target).
-     *
-     * **Does not consume** — parallel CONNECTs to the same IP:port (Chrome/Telegram)
-     * must share the UID stamp. Consuming entries caused "no UID" denials and
-     * blackholed apps after the first stream.
+     * Does not consume — parallel CONNECTs share the UID stamp.
      */
     fun peek(dstIp: Int, dstPort: Int): Entry? {
         val key = destKey(dstIp, dstPort)
@@ -69,26 +78,10 @@ object TcpFlowUidIndex {
             misses.incrementAndGet()
             return null
         }
-        val now = System.currentTimeMillis()
-        while (true) {
-            val e = q.peekLast() ?: break
-            if (now - e.atMs <= ENTRY_TTL_MS) {
-                takes.incrementAndGet()
-                // Touch TTL so long-lived multi-stream destinations stay stampable.
-                if (now - e.atMs > ENTRY_TTL_MS / 4) {
-                    q.pollLast()
-                    q.addLast(e.copy(atMs = now))
-                }
-                return e
-            }
-            q.pollLast()
-        }
-        if (q.isEmpty()) byDest.remove(key, q)
-        misses.incrementAndGet()
-        return null
+        return peekNewest(q, key, byDest)
     }
 
-    /** @deprecated Prefer [peek] — kept for tests that assert drain semantics. */
+    /** @deprecated Prefer [peek]. */
     fun take(dstIp: Int, dstPort: Int): Entry? {
         val q = byDest[destKey(dstIp, dstPort)] ?: run {
             misses.incrementAndGet()
@@ -118,7 +111,65 @@ object TcpFlowUidIndex {
         return take(ip, dstPort)
     }
 
-    fun stats(): String = "notes=${notes.get()} takes=${takes.get()} misses=${misses.get()} keys=${byDest.size}"
+    /** Peek by dotted IPv4 or literal IPv6 host (hev CONNECT target). */
+    fun peekHost(host: String, dstPort: Int): Entry? {
+        parseIpv4(host)?.let { return peek(it, dstPort) }
+        if (host.indexOf(':') >= 0) return peekV6(host, dstPort)
+        return null
+    }
+
+    fun stats(): String =
+        "notes=${notes.get()} takes=${takes.get()} misses=${misses.get()} " +
+            "keys=${byDest.size} v6keys=${byDestV6.size}"
+
+    private fun noteV6(dstHost: String, dstPort: Int, uid: Int, srcPort: Int) {
+        val key = "$dstHost|$dstPort"
+        val q = byDestV6.getOrPut(key) { ConcurrentLinkedDeque() }
+        q.addLast(
+            Entry(
+                srcIp = 0,
+                srcPort = srcPort,
+                dstIp = 0,
+                dstPort = dstPort,
+                uid = uid,
+            ),
+        )
+        notes.incrementAndGet()
+        trim(q)
+        if (byDestV6.size > MAX_DEST_KEYS) evictOldestV6()
+    }
+
+    private fun peekV6(host: String, dstPort: Int): Entry? {
+        val key = "$host|$dstPort"
+        val q = byDestV6[key] ?: run {
+            misses.incrementAndGet()
+            return null
+        }
+        return peekNewest(q, key, byDestV6)
+    }
+
+    private fun <K> peekNewest(
+        q: ConcurrentLinkedDeque<Entry>,
+        key: K,
+        map: ConcurrentHashMap<K, ConcurrentLinkedDeque<Entry>>,
+    ): Entry? {
+        val now = System.currentTimeMillis()
+        while (true) {
+            val e = q.peekLast() ?: break
+            if (now - e.atMs <= ENTRY_TTL_MS) {
+                takes.incrementAndGet()
+                if (now - e.atMs > ENTRY_TTL_MS / 4) {
+                    q.pollLast()
+                    q.addLast(e.copy(atMs = now))
+                }
+                return e
+            }
+            q.pollLast()
+        }
+        if (q.isEmpty()) map.remove(key, q)
+        misses.incrementAndGet()
+        return null
+    }
 
     private fun trim(q: ConcurrentLinkedDeque<Entry>) {
         while (q.size > MAX_PER_DEST) q.pollFirst()
@@ -133,6 +184,20 @@ object TcpFlowUidIndex {
     private fun evictOldestKeys() {
         val now = System.currentTimeMillis()
         val it = byDest.entries.iterator()
+        var removed = 0
+        while (it.hasNext() && removed < 64) {
+            val e = it.next()
+            e.value.removeIf { entry -> now - entry.atMs > ENTRY_TTL_MS }
+            if (e.value.isEmpty()) {
+                it.remove()
+                removed++
+            }
+        }
+    }
+
+    private fun evictOldestV6() {
+        val now = System.currentTimeMillis()
+        val it = byDestV6.entries.iterator()
         var removed = 0
         while (it.hasNext() && removed < 64) {
             val e = it.next()

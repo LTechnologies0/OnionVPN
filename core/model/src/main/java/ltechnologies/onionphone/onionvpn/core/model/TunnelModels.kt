@@ -23,8 +23,7 @@ object TunnelEndpoints {
 
     /**
      * ULA IPv6 TUN address (Orbot/InviZible pattern).
-     * Captures IPv6 into the TUN so it cannot leak clearnet; hev blackholes or
-     * forwards over Tor SOCKS — never leaves via Wi‑Fi/cellular.
+     * Captures IPv6 into the TUN; TCP forwarded over Tor SOCKS (ATYP 0x04).
      */
     const val VPN_CLIENT_ADDRESS_V6 = "fd00:8:8:8::2"
 
@@ -58,6 +57,18 @@ object TunnelEndpoints {
         val b = (ipInt ushr 16) and 0xff
         return a == 10 && b in 192..255
     }
+
+    /** Tor `VirtualAddrNetworkIPv6 [FC00::]/7` — Automap AAAA for .onion/.exit. */
+    fun isAutomapVirtualIpv6(hostAddress: String): Boolean {
+        if (hostAddress.indexOf(':') < 0) return false
+        return runCatching {
+            val raw = java.net.InetAddress.getByName(hostAddress).address
+            raw.size == 16 && (raw[0].toInt() and 0xfe) == 0xfc
+        }.getOrDefault(false)
+    }
+
+    fun isAutomapVirtual(hostAddress: String): Boolean =
+        isAutomapVirtualIpv4(hostAddress) || isAutomapVirtualIpv6(hostAddress)
 
     fun parseIpv4Literal(hostAddress: String): Int? {
         var a = -1
@@ -149,7 +160,7 @@ object TunnelEndpoints {
     /** Fixed SOCKS5 listen for PAC clients — resolves via DNSCrypt, then Tor by IP. */
     const val PAC_BRIDGE_SOCKS_PORT = 18_202
 
-    /** IsolateSOCKSAuth token for PAC bridge → Tor apps SocksPort. */
+    /** IsolateSOCKSAuth fallback when PAC client UID is unknown. Prefer pac{uid}/p{uid}. */
     const val SOCKS_PAC_USER = "pac"
     const val SOCKS_PAC_PASS = "dnscrypt"
 

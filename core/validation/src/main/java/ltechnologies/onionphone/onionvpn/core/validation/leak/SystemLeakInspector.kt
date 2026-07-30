@@ -64,25 +64,28 @@ object SystemLeakInspector {
                 detail = "VpnService.isLockdownEnabled=true alwaysOn=$liveAlwaysOn",
                 tripsKillSwitch = false,
             )
-            // Advisory: tunnel still routes via Tor; OS lockdown is user Settings work.
+            // Soft: Tor TUN can still route correctly without OS Lockdown. Hard-Blocking would
+            // blackhole working torrified traffic (Whonix/Graphene recommend Lockdown, but it is
+            // an OS setting — not proof that app packets clearnet). Keep Hard only when another
+            // VPN owns Always-on and can steal the TUN.
             vpnUp && liveAlwaysOn && !liveLockdown -> ValidationCheck(
                 id = "android.vpn.always_on",
                 label = "Android Always-on VPN lockdown",
                 status = ValidationStatus.Fail,
                 detail = "Always-on ON but Lockdown OFF — enable “Block connections without VPN” " +
-                    "(Privacy Guides / GrapheneOS)",
+                    "(Privacy Guides / GrapheneOS). Soft: Tor path still carries app traffic.",
                 tripsKillSwitch = false,
             )
-            alwaysOnPkg == ourPkg -> ValidationCheck(
+            alwaysOnPkg == ourPkg && !liveLockdown -> ValidationCheck(
                 id = "android.vpn.always_on",
                 label = "Android Always-on VPN lockdown",
                 status = ValidationStatus.Fail,
                 detail = "Always-on=$ourPkg but Lockdown not confirmed — enable " +
-                    "“Block connections without VPN”",
+                    "“Block connections without VPN”. Soft while TUN+Tor still route.",
                 tripsKillSwitch = false,
             )
             // Hard: another app owns Always-on and can displace our TUN.
-            alwaysOnPkg != null -> ValidationCheck(
+            alwaysOnPkg != null && alwaysOnPkg != ourPkg -> ValidationCheck(
                 id = "android.vpn.always_on",
                 label = "Android Always-on VPN lockdown",
                 status = ValidationStatus.Fail,
@@ -94,7 +97,8 @@ object SystemLeakInspector {
                 label = "Android Always-on VPN lockdown",
                 status = ValidationStatus.Fail,
                 detail = "Settings → Network → VPN → OnionVPN → Always-on ON + " +
-                    "Block connections without VPN ON (recommended when kill-switch is on)",
+                    "Block connections without VPN ON (recommended; Soft until set — " +
+                    "does not blackhole working Tor)",
                 tripsKillSwitch = false,
             )
         }
@@ -106,29 +110,39 @@ object SystemLeakInspector {
         }.getOrNull().orEmpty()
 
         val cm = context.getSystemService<ConnectivityManager>()
+        // Scan all networks — VPN as activeNetwork can hide DoT on the underlying path.
         val privateDnsActive = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-            cm?.activeNetwork?.let { network ->
+            cm?.allNetworks?.any { network ->
                 cm.getLinkProperties(network)?.isPrivateDnsActive == true
             } == true
         } else {
             false
         }
 
-        val risky = mode.equals("hostname", ignoreCase = true) ||
-            mode.equals("opportunistic", ignoreCase = true) ||
-            privateDnsActive
+        // Stock Android often ships mode=opportunistic. That alone must NOT Hard-Block a
+        // healthy Tor TUN (false blackhole). Hard only when DoT is actually active or the
+        // user forced a Private DNS hostname (Tor VPN §5.2.4 / Privacy Guides).
+        val forcedHostname = mode.equals("hostname", ignoreCase = true)
+        val riskyActive = privateDnsActive || forcedHostname
 
-        return if (risky) {
-            ValidationCheck(
+        return when {
+            riskyActive -> ValidationCheck(
                 id = "android.dns.private",
                 label = "Android Private DNS (DoT) off",
                 status = ValidationStatus.Fail,
                 detail = "Private DNS mode='$mode' active=$privateDnsActive — " +
-                    "DoT can resolve outside the TUN (Tor VPN §5.2.4). Set Private DNS → Off",
+                    "DoT can resolve outside the TUN. Set Private DNS → Off",
                 tripsKillSwitch = true,
             )
-        } else {
-            ValidationCheck(
+            mode.equals("opportunistic", ignoreCase = true) -> ValidationCheck(
+                id = "android.dns.private",
+                label = "Android Private DNS (DoT) off",
+                status = ValidationStatus.Fail,
+                detail = "Private DNS mode=opportunistic (stock default) — Soft warn; " +
+                    "set Off for defense-in-depth. Hard only when DoT is active.",
+                tripsKillSwitch = false,
+            )
+            else -> ValidationCheck(
                 id = "android.dns.private",
                 label = "Android Private DNS (DoT) off",
                 status = ValidationStatus.Pass,

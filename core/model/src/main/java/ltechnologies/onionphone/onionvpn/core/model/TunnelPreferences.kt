@@ -7,7 +7,16 @@ package ltechnologies.onionphone.onionvpn.core.model
  * applied at Tor/DNSCrypt start and VPN profile establish.
  */
 data class TunnelPreferences(
+    /**
+     * Legacy flag — full default routes + allowFamily are always applied.
+     * Kept for intent/prefs compatibility; UI no longer offers split-tunnel.
+     */
     val routeAllTrafficThroughTor: Boolean = true,
+    /**
+     * App kill-switch is always on (constant). Blocking TUN before bootstrap and on
+     * hard validation failure — no user off-switch (Whonix/Mullvad fail-closed).
+     * Field kept for prefs/intent compatibility; always treated as true.
+     */
     val killSwitchEnabled: Boolean = true,
     val dnsCryptServerName: String = "cloudflare",
     val dnsResolverMode: DnsResolverMode = DnsResolverMode.DNSCRYPT_MUX,

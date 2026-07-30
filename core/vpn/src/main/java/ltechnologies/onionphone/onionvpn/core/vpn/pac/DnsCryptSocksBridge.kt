@@ -125,11 +125,13 @@ class DnsCryptSocksBridge(
                     return
                 }
 
+                val clientUid = resolveClientUid(c)
+                val (socksUser, socksPass) = pacSocksAuth(clientUid)
                 val resolvedIp: String
                 val remote: Socket = if (TunnelEndpoints.isOnionLikeHostname(host)) {
                     resolvedIp = ""
                     if (!FirewallBridge.engine.allowSocksConnect(
-                            uid = resolveClientUid(c),
+                            uid = clientUid,
                             destHost = host,
                             destIp = "",
                             destPort = port,
@@ -141,8 +143,8 @@ class DnsCryptSocksBridge(
                     Socks5Client(
                         proxyHost = TunnelEndpoints.LOOPBACK,
                         proxyPort = torPort,
-                        username = TunnelEndpoints.SOCKS_PAC_USER,
-                        password = TunnelEndpoints.SOCKS_PAC_PASS,
+                        username = socksUser,
+                        password = socksPass,
                     ).connect(host, port)
                 } else {
                     val ip = DnsCryptResolver.resolveIpv4(
@@ -152,7 +154,7 @@ class DnsCryptSocksBridge(
                     )
                     resolvedIp = ip.hostAddress ?: ip.hostName
                     if (!FirewallBridge.engine.allowSocksConnect(
-                            uid = resolveClientUid(c),
+                            uid = clientUid,
                             destHost = host,
                             destIp = resolvedIp,
                             destPort = port,
@@ -164,8 +166,8 @@ class DnsCryptSocksBridge(
                     Socks5Client(
                         proxyHost = TunnelEndpoints.LOOPBACK,
                         proxyPort = torPort,
-                        username = TunnelEndpoints.SOCKS_PAC_USER,
-                        password = TunnelEndpoints.SOCKS_PAC_PASS,
+                        username = socksUser,
+                        password = socksPass,
                     ).connect(resolvedIp, port)
                 }
 
@@ -198,9 +200,10 @@ class DnsCryptSocksBridge(
                 String(name, StandardCharsets.US_ASCII) to port
             }
             0x04 -> {
-                input.skipBytes(16)
-                input.readUnsignedShort()
-                throw IOException("IPv6 not supported on PAC bridge")
+                val addr = ByteArray(16)
+                input.readFully(addr)
+                val port = input.readUnsignedShort()
+                InetAddress.getByAddress(addr).hostAddress!!.substringBefore('%') to port
             }
             else -> throw IOException("bad atyp=$atyp")
         }
@@ -248,4 +251,16 @@ class DnsCryptSocksBridge(
 
     private fun resolveClientUid(client: Socket): Int =
         FirewallBridge.resolveSocksClientUid?.invoke(client) ?: -1
+
+    /**
+     * Per-client IsolateSOCKSAuth so PAC helpers do not share one circuit pool
+     * (Tor path-spec / X-Tor-Stream-Isolation analogue via SOCKS username).
+     */
+    private fun pacSocksAuth(uid: Int): Pair<String, String> {
+        return if (uid >= 0) {
+            "pac$uid" to "p$uid"
+        } else {
+            TunnelEndpoints.SOCKS_PAC_USER to TunnelEndpoints.SOCKS_PAC_PASS
+        }
+    }
 }

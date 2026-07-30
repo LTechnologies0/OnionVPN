@@ -156,19 +156,28 @@ class SocksUidBridge(
 
     private fun resolveUidForConnect(host: String, port: Int): Int {
         // Peek (non-consuming): parallel streams to the same dest must not steal the stamp.
-        TcpFlowUidIndex.peekIpv4Host(host, port)?.uid?.let { return it }
+        TcpFlowUidIndex.peekHost(host, port)?.uid?.let { return it }
         // Retry: SYN stamp may race hev's SOCKS open under load.
         repeat(UID_RETRY) {
             LockSupport.parkNanos(UID_PARK_NS)
-            TcpFlowUidIndex.peekIpv4Host(host, port)?.uid?.let { return it }
+            TcpFlowUidIndex.peekHost(host, port)?.uid?.let { return it }
         }
         return Process.INVALID_UID
     }
 
     private fun rewriteAutomapHost(host: String): String? {
-        if (!TunnelEndpoints.isAutomapVirtualIpv4(host)) return host
-        val name = DnsHostnameCache.lookup(host) ?: return null
-        return if (TunnelEndpoints.isOnionLikeHostname(name)) name else null
+        if (!TunnelEndpoints.isAutomapVirtual(host)) return host
+        DnsHostnameCache.lookup(host)?.let { name ->
+            if (TunnelEndpoints.isOnionLikeHostname(name)) return name
+        }
+        // DNS reply may still be in flight when hev opens SOCKS — brief retry (same idea as UID).
+        repeat(AUTOMAP_RETRY) {
+            LockSupport.parkNanos(AUTOMAP_PARK_NS)
+            DnsHostnameCache.lookup(host)?.let { name ->
+                if (TunnelEndpoints.isOnionLikeHostname(name)) return name
+            }
+        }
+        return null
     }
 
     private fun negotiateNoAuth(input: DataInputStream, output: DataOutputStream) {
@@ -206,9 +215,10 @@ class SocksUidBridge(
                 String(b, StandardCharsets.US_ASCII)
             }
             0x04 -> {
-                input.skipBytes(16)
-                reply(output, 0x08) // address type not supported (IPv6 blackhole policy)
-                return null
+                val b = ByteArray(16)
+                input.readFully(b)
+                InetAddress.getByAddress(b).hostAddress?.substringBefore('%')
+                    ?: throw IOException("bad IPv6")
             }
             else -> {
                 reply(output, 0x08)
@@ -267,8 +277,10 @@ class SocksUidBridge(
         ).apply { allowCoreThreadTimeOut(true) }
 
     companion object {
-        private const val UID_RETRY = 5
-        private const val UID_PARK_NS = 3_000_000L // 3ms × 5 ≈ 15ms race window
+        private const val UID_RETRY = 10
+        private const val UID_PARK_NS = 5_000_000L // 5ms × 10 ≈ 50ms race window
+        private const val AUTOMAP_RETRY = 20
+        private const val AUTOMAP_PARK_NS = 5_000_000L // 5ms × 20 ≈ 100ms DNS→cache race
         private val ipv4Scratch = ThreadLocal.withInitial { ByteArray(4) }
         private val replyAddrScratch = ThreadLocal.withInitial { ByteArray(4) }
     }
