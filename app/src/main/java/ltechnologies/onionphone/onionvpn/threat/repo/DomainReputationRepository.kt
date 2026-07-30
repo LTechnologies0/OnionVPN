@@ -56,6 +56,7 @@ class DomainReputationRepository @Inject constructor(
     private val started = AtomicBoolean(false)
     private val updateJob = AtomicReference<Job?>(null)
     private val activeCall = AtomicReference<Call?>(null)
+    private val cachedHttpClient = AtomicReference<Pair<Int, OkHttpClient>?>(null)
 
     private val _status = MutableStateFlow(DomainReputationStatus())
     val status: StateFlow<DomainReputationStatus> = _status.asStateFlow()
@@ -81,6 +82,11 @@ class DomainReputationRepository @Inject constructor(
                 return@launchUpdate
             }
             val st = _status.value
+            val age = System.currentTimeMillis() - st.lastSuccessEpochMs
+            if (st.lastViaTor && st.lastSuccessEpochMs > 0L && age < REFRESH_INTERVAL_MS) {
+                Timber.d("Domain reputation fresh via Tor — skip auto-update")
+                return@launchUpdate
+            }
             if (!st.lastViaTor) {
                 update()
             } else {
@@ -211,19 +217,15 @@ class DomainReputationRepository @Inject constructor(
                     throw IllegalStateException("Tor probe SOCKS lost mid-update")
                 }
                 try {
-                    val body = downloadBodyFirstAvailable(client, source.urls)
-                    if (body.isBlank()) {
-                        throw IllegalStateException("empty body")
-                    }
                     val dest = sourceCacheFile(source.id)
                     val tmp = File(dest.absolutePath + ".tmp")
-                    tmp.writeText(body, Charsets.UTF_8)
+                    downloadToFile(client, source.urls, tmp)
                     if (!tmp.renameTo(dest)) {
                         tmp.copyTo(dest, overwrite = true)
                         tmp.delete()
                     }
                     fetched++
-                    Timber.d("Domain source ok id=%s bytes=%d", source.id, body.length)
+                    Timber.d("Domain source ok id=%s bytes=%d", source.id, dest.length())
                 } catch (error: Exception) {
                     if (isProbeGone(error) || !tor.isRunning() || tor.currentProbeSocksPort() == null) {
                         Timber.i(
@@ -256,8 +258,8 @@ class DomainReputationRepository @Inject constructor(
                     })
                 }
             }
-            // Malware wins: drop tracking duplicates that are already malware.
-            if (malwareSet.isNotEmpty()) {
+            // Malware wins: drop tracking duplicates that are already malware (skip if sets huge).
+            if (malwareSet.isNotEmpty() && malwareSet.size + trackingSet.size < MERGE_DEDUPE_MAX) {
                 trackingSet.removeAll(malwareSet)
             }
             if (malwareSet.isEmpty() && trackingSet.isEmpty()) {
@@ -272,8 +274,6 @@ class DomainReputationRepository @Inject constructor(
             return transport.viaTor
         } finally {
             activeCall.getAndSet(null)?.cancel()
-            client.dispatcher.executorService.shutdown()
-            client.connectionPool.evictAll()
         }
     }
 
@@ -293,7 +293,7 @@ class DomainReputationRepository @Inject constructor(
             out.appendLine("# OnionVPN unified $kind domain DB")
             out.appendLine("# Merged from DomainBlocklistCatalog sources — do not edit")
             out.appendLine("# entries=${domains.size}")
-            domains.asSequence().sorted().forEach { out.appendLine(it) }
+            domains.forEach { out.appendLine(it) }
         }
         if (!tmp.renameTo(final)) {
             tmp.copyTo(final, overwrite = true)
@@ -301,12 +301,12 @@ class DomainReputationRepository @Inject constructor(
         }
     }
 
-    private fun downloadBodyFirstAvailable(client: OkHttpClient, urls: List<String>): String {
+    private fun downloadToFile(client: OkHttpClient, urls: List<String>, dest: File) {
         var lastError: Exception? = null
         for (url in urls) {
             try {
-                val body = fetchBody(client, url)
-                if (body.isNotBlank()) return body
+                fetchBodyToFile(client, url, dest)
+                if (dest.length() > 0L) return
             } catch (error: Exception) {
                 lastError = error
                 Timber.d(error, "Blocklist mirror failed: %s", url)
@@ -315,7 +315,7 @@ class DomainReputationRepository @Inject constructor(
         throw lastError ?: IllegalStateException("No blocklist mirrors configured")
     }
 
-    private fun fetchBody(client: OkHttpClient, url: String): String {
+    private fun fetchBodyToFile(client: OkHttpClient, url: String, dest: File) {
         val call = client.newCall(
             Request.Builder()
                 .url(url)
@@ -333,11 +333,12 @@ class DomainReputationRepository @Inject constructor(
             if (!it.isSuccessful) {
                 throw IllegalStateException("HTTP ${it.code} for $url")
             }
-            it.body?.string().orEmpty()
+            val body = it.body ?: throw IllegalStateException("empty body for $url")
+            body.byteStream().use { input ->
+                dest.outputStream().use { output -> input.copyTo(output) }
+            }
         }
     }
-
-    private data class HttpTransport(val client: OkHttpClient, val viaTor: Boolean)
 
     private fun buildClient(): HttpTransport {
         val probePort = tor.currentProbeSocksPort()
@@ -349,15 +350,17 @@ class DomainReputationRepository @Inject constructor(
             Proxy.Type.SOCKS,
             InetSocketAddress(TunnelEndpoints.LOOPBACK, probePort),
         )
-        val client = OkHttpClient.Builder()
-            .proxy(proxy)
-            .dns(TorSocksDns)
-            .connectTimeout(60, TimeUnit.SECONDS)
-            .readTimeout(120, TimeUnit.SECONDS)
-            .writeTimeout(60, TimeUnit.SECONDS)
-            .followRedirects(true)
-            .followSslRedirects(true)
-            .build()
+        val client = cachedHttpClient.get()?.takeIf { it.first == probePort }?.second
+            ?: OkHttpClient.Builder()
+                .proxy(proxy)
+                .dns(TorSocksDns)
+                .connectTimeout(30, TimeUnit.SECONDS)
+                .readTimeout(45, TimeUnit.SECONDS)
+                .writeTimeout(30, TimeUnit.SECONDS)
+                .followRedirects(true)
+                .followSslRedirects(true)
+                .build()
+                .also { cachedHttpClient.set(probePort to it) }
         Timber.i("Domain reputation download via Tor probe SOCKS :%d", probePort)
         return HttpTransport(client, viaTor = true)
     }
@@ -396,8 +399,11 @@ class DomainReputationRepository @Inject constructor(
         private const val REFRESH_INTERVAL_MS = 24L * 60L * 60L * 1000L
         private const val PROBE_WAIT_ATTEMPTS = 30
         private const val PROBE_WAIT_DELAY_MS = 500L
+        private const val MERGE_DEDUPE_MAX = 400_000
     }
 }
+
+private data class HttpTransport(val client: OkHttpClient, val viaTor: Boolean)
 
 data class DomainReputationStatus(
     val malwareEntries: Int = 0,

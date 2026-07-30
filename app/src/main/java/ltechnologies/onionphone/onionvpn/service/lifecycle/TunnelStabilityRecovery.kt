@@ -22,7 +22,8 @@ internal class TunnelStabilityRecovery(
         if (action != StabilityAction.SOFT_RECOVER && action != StabilityAction.HARD_RECOVER) return
         val code = st.lastStabilityCode
         val now = System.currentTimeMillis()
-        if (code == lastHandledStabilityCode && now - lastStabilityRecoverMs < cooldownMs) {
+        val codeChanged = code != lastHandledStabilityCode
+        if (!codeChanged && now - lastStabilityRecoverMs < cooldownMs) {
             return
         }
         if (now - lastStabilityRecoverMs < cooldownMs) return
@@ -50,6 +51,6 @@ internal class TunnelStabilityRecovery(
     }
 
     companion object {
-        const val STABILITY_RECOVER_COOLDOWN_MS = 30_000L
+        const val STABILITY_RECOVER_COOLDOWN_MS = 120_000L
     }
 }

@@ -52,6 +52,38 @@ internal class TunnelNotifications(
             .notify(NOTIFICATION_ID, build(phase, throughputText))
     }
 
+    /** Update notification at most every [minIntervalMs] unless [throughputText] changed. */
+    fun updateIfChanged(
+        phase: TunnelPhase,
+        throughputText: String,
+        lastText: String?,
+        lastUpdateMs: Long,
+        minIntervalMs: Long = 15_000L,
+    ): Pair<String, Long> {
+        val content = notificationContent(phase, throughputText)
+        val now = System.currentTimeMillis()
+        if (content != lastText || now - lastUpdateMs >= minIntervalMs) {
+            update(phase, throughputText)
+            return content to now
+        }
+        return (lastText ?: content) to lastUpdateMs
+    }
+
+    private fun notificationContent(phase: TunnelPhase, throughputText: String): String {
+        val phaseText = when (phase) {
+            TunnelPhase.Connected -> service.getString(R.string.notification_connected)
+            TunnelPhase.Error -> service.getString(R.string.notification_error)
+            TunnelPhase.Blocking -> service.getString(R.string.notification_blocking)
+            TunnelPhase.Stopping -> service.getString(R.string.notification_stopping)
+            else -> service.getString(R.string.notification_starting)
+        }
+        return if (phase == TunnelPhase.Connected && throughputText.isNotBlank()) {
+            throughputText
+        } else {
+            phaseText
+        }
+    }
+
     fun build(phase: TunnelPhase, throughputText: String): Notification {
         val openIntent = PendingIntent.getActivity(
             service, 0,
@@ -64,18 +96,7 @@ internal class TunnelNotifications(
                 .setAction(TunnelForegroundService.ACTION_STOP),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-        val phaseText = when (phase) {
-            TunnelPhase.Connected -> service.getString(R.string.notification_connected)
-            TunnelPhase.Error -> service.getString(R.string.notification_error)
-            TunnelPhase.Blocking -> service.getString(R.string.notification_blocking)
-            TunnelPhase.Stopping -> service.getString(R.string.notification_stopping)
-            else -> service.getString(R.string.notification_starting)
-        }
-        val content = if (phase == TunnelPhase.Connected && throughputText.isNotBlank()) {
-            throughputText
-        } else {
-            phaseText
-        }
+        val content = notificationContent(phase, throughputText)
         return NotificationCompat.Builder(service, CHANNEL_ID)
             .setContentTitle(
                 when (phase) {

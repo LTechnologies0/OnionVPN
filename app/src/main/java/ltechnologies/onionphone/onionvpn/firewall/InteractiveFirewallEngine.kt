@@ -96,6 +96,10 @@ class InteractiveFirewallEngine @Inject constructor(
         onBufferOverflow = BufferOverflow.DROP_OLDEST,
     )
 
+    fun stop() {
+        appUidResolver.stop()
+    }
+
     fun start() {
         promptNotifier.ensureChannel()
         appUidResolver.start()
@@ -147,7 +151,12 @@ class InteractiveFirewallEngine @Inject constructor(
 
         val info = IpPacketParser.parse(packet, length) ?: return true
 
-        // Resolve UID before any cache — 5-tuple-only keys poisoned UNKNOWN→real UID races.
+        val tupleKey = FirewallCacheKeys.tupleFlowKey(info)
+        if (info.isTcp && !info.isTcpSyn) {
+            caches.flowCache[tupleKey]?.let { return it == FirewallVerdict.ALLOW }
+        }
+
+        // Resolve UID before uid-scoped caches — 5-tuple-only keys poisoned UNKNOWN→real UID races.
         val uid = ownerResolver.resolveUid(info)
         if (uid == ownUid) return true
 
@@ -166,21 +175,22 @@ class InteractiveFirewallEngine @Inject constructor(
             return false
         }
 
-        val matchDest = matchDestination(info) ?: return false // Automap without hostname
         val flowKey = FirewallCacheKeys.flowKey(uid, info)
         caches.flowCache[flowKey]?.let { return it == FirewallVerdict.ALLOW }
+
+        val matchDest = matchDestination(info) ?: return false // Automap without hostname
 
         // Mid-flow: never open ASK/DENY prompts. Prefer sticky decision / rules when the
         // flow-cache entry was trimmed or wiped by a remap — hard-drop only if never allowed.
         if (info.isTcp && !info.isTcpSyn) {
             val matching = findRule(uid, matchDest, info)
             if (matching != null) {
-                caches.rememberFlow(flowKey, matching.verdict, matchDest)
+                rememberPacketFlow(flowKey, matching.verdict, matchDest, info)
                 return matching.verdict == FirewallVerdict.ALLOW
             }
             val rk = FirewallCacheKeys.decisionKey(uid, matchDest, info)
             caches.decisionCache[rk]?.let { v ->
-                caches.rememberFlow(flowKey, v, matchDest)
+                rememberPacketFlow(flowKey, v, matchDest, info)
                 return v == FirewallVerdict.ALLOW
             }
             return false
@@ -188,13 +198,13 @@ class InteractiveFirewallEngine @Inject constructor(
 
         val matching = findRule(uid, matchDest, info)
         if (matching != null) {
-            caches.rememberFlow(flowKey, matching.verdict, matchDest)
+            rememberPacketFlow(flowKey, matching.verdict, matchDest, info)
             return matching.verdict == FirewallVerdict.ALLOW
         }
 
         val rk = FirewallCacheKeys.decisionKey(uid, matchDest, info)
         caches.decisionCache[rk]?.let { v ->
-            caches.rememberFlow(flowKey, v, matchDest)
+            rememberPacketFlow(flowKey, v, matchDest, info)
             return v == FirewallVerdict.ALLOW
         }
 
@@ -207,11 +217,23 @@ class InteractiveFirewallEngine @Inject constructor(
         val dpi = ApplicationLayerDetector.classify(packet, length, info)
         return when (prefs.firewallDefaultAction) {
             FirewallDefaultAction.ALLOW -> {
-                caches.rememberDecision(rk, flowKey, FirewallVerdict.ALLOW, matchDest)
+                caches.rememberDecision(
+                    rk,
+                    flowKey,
+                    FirewallVerdict.ALLOW,
+                    matchDest,
+                    FirewallCacheKeys.tupleFlowKey(info),
+                )
                 true
             }
             FirewallDefaultAction.DENY -> {
-                caches.rememberDecision(rk, flowKey, FirewallVerdict.DENY, matchDest)
+                caches.rememberDecision(
+                    rk,
+                    flowKey,
+                    FirewallVerdict.DENY,
+                    matchDest,
+                    FirewallCacheKeys.tupleFlowKey(info),
+                )
                 appendJournal(
                     uid = uid,
                     app = app,
@@ -522,6 +544,20 @@ class InteractiveFirewallEngine @Inject constructor(
     }
 
     fun rulesFlow(): StateFlow<List<FirewallRule>> = rulesStore.rules
+
+    private fun rememberPacketFlow(
+        flowKey: Long,
+        verdict: FirewallVerdict,
+        matchDest: String,
+        info: IpPacketInfo,
+    ) {
+        caches.rememberFlow(
+            flowKey,
+            verdict,
+            matchDest,
+            FirewallCacheKeys.tupleFlowKey(info),
+        )
+    }
 
     private fun findRule(uid: Int, matchDest: String, info: IpPacketInfo): FirewallRule? =
         FirewallRuleMatcher.find(rules.get(), uid, matchDest, info)

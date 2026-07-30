@@ -78,7 +78,8 @@ object IpPacketParser {
         "${(ip ushr 24) and 0xff}.${(ip ushr 16) and 0xff}." +
             "${(ip ushr 8) and 0xff}.${ip and 0xff}"
 
-    fun ipv4Bytes(ip: Int, out: ByteArray = ByteArray(4)): ByteArray {
+    fun ipv4Bytes(ip: Int, out: ByteArray): ByteArray {
+        require(out.size >= 4) { "out must be ≥4 bytes" }
         out[0] = (ip ushr 24).toByte()
         out[1] = (ip ushr 16).toByte()
         out[2] = (ip ushr 8).toByte()

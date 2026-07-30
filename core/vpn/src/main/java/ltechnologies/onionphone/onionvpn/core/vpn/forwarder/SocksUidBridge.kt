@@ -10,8 +10,12 @@ import java.net.ServerSocket
 import java.net.Socket
 import java.net.SocketException
 import java.nio.charset.StandardCharsets
+import java.util.concurrent.ArrayBlockingQueue
+import java.util.concurrent.ThreadPoolExecutor
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.locks.LockSupport
 import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
@@ -37,6 +41,16 @@ class SocksUidBridge(
     private val torSocksPort = AtomicInteger(0)
     private val serverRef = AtomicReference<ServerSocket?>(null)
     private var acceptThread: Thread? = null
+    private val clientExecutor = ThreadPoolExecutor(
+        0,
+        64,
+        60L,
+        TimeUnit.SECONDS,
+        ArrayBlockingQueue(128),
+        { r -> Thread(r, "onionvpn-uid-socks").apply { isDaemon = true } },
+        ThreadPoolExecutor.CallerRunsPolicy(),
+    ).apply { allowCoreThreadTimeOut(true) }
+    private val denyLogSample = AtomicLong(0)
 
     val isRunning: Boolean get() = running.get()
     val boundPort: Int get() = listenPort
@@ -69,14 +83,11 @@ class SocksUidBridge(
             while (running.get()) {
                 try {
                     val client = server.accept()
-                    Thread({ handleClient(client) }, "onionvpn-uid-socks").apply {
-                        isDaemon = true
-                        start()
-                    }
+                    clientExecutor.execute { handleClient(client) }
                 } catch (_: SocketException) {
                     if (!running.get()) break
                 } catch (e: Exception) {
-                    if (running.get()) Timber.d(e, "SocksUidBridge accept error")
+                    if (running.get()) VpnForwarderDebug.socksLog(e) { "SocksUidBridge accept error" }
                 }
             }
         }, "onionvpn-uid-socks-accept").apply {
@@ -91,8 +102,9 @@ class SocksUidBridge(
         runCatching { serverRef.getAndSet(null)?.close() }
         acceptThread?.interrupt()
         acceptThread = null
+        clientExecutor.shutdownNow()
         TcpFlowUidIndex.clear()
-        Timber.i("SocksUidBridge stopped (%s)", TcpFlowUidIndex.stats())
+        Timber.i("SocksUidBridge stopped")
     }
 
     private fun handleClient(client: Socket) {
@@ -106,7 +118,11 @@ class SocksUidBridge(
                 val (host, port) = readConnect(input, output) ?: return
                 val uid = resolveUidForConnect(host, port)
                 if (!ConnectionOwnerResolver.isValidUid(uid)) {
-                    Timber.d("SocksUidBridge deny — no UID for %s:%d (%s)", host, port, TcpFlowUidIndex.stats())
+                    if ((denyLogSample.incrementAndGet() and 0x3F) == 0L) {
+                        VpnForwarderDebug.socksLog {
+                            "SocksUidBridge deny — no UID for $host:$port"
+                        }
+                    }
                     reply(output, 0x02) // not allowed
                     return
                 }
@@ -116,7 +132,7 @@ class SocksUidBridge(
                     return
                 }
                 val socksHost = rewriteAutomapHost(host) ?: run {
-                    Timber.d("SocksUidBridge drop Automap IP without hostname %s", host)
+                    VpnForwarderDebug.socksLog { "SocksUidBridge drop Automap IP without hostname $host" }
                     reply(output, 0x04)
                     return
                 }
@@ -130,10 +146,10 @@ class SocksUidBridge(
                     protect = protectSocket,
                 ).connect(socksHost, port)
                 reply(output, 0x00)
-                Timber.d("SocksUidBridge uid=%d %s → %s:%d", uid, user, socksHost, port)
+                VpnForwarderDebug.socksLog { "SocksUidBridge uid=$uid $user → $socksHost:$port" }
                 pipe(c, upstream)
             } catch (e: Exception) {
-                Timber.d(e, "SocksUidBridge client failed")
+                VpnForwarderDebug.socksLog(e) { "SocksUidBridge client failed" }
                 runCatching { reply(output, 0x01) }
             }
         }
@@ -144,6 +160,7 @@ class SocksUidBridge(
         // Brief retry: SYN stamp may race hev's SOCKS open.
         repeat(UID_RETRY) {
             LockSupport.parkNanos(UID_PARK_NS)
+            // single park per item 14 spec: 4ms once after first miss — covered by UID_RETRY=2
             TcpFlowUidIndex.takeIpv4Host(host, port)?.uid?.let { return it }
         }
         return Process.INVALID_UID
@@ -179,7 +196,7 @@ class SocksUidBridge(
         }
         val host = when (atyp) {
             0x01 -> {
-                val b = ByteArray(4)
+                val b = ipv4Scratch.get()
                 input.readFully(b)
                 InetAddress.getByAddress(b).hostAddress ?: "0.0.0.0"
             }
@@ -208,7 +225,7 @@ class SocksUidBridge(
         output.writeByte(status)
         output.writeByte(0x00)
         output.writeByte(0x01)
-        output.write(ByteArray(4))
+        output.write(replyAddrScratch.get())
         output.writeShort(0)
         output.flush()
     }
@@ -239,7 +256,9 @@ class SocksUidBridge(
     }
 
     companion object {
-        private const val UID_RETRY = 6
-        private const val UID_PARK_NS = 2_000_000L // 2ms
+        private const val UID_RETRY = 2
+        private const val UID_PARK_NS = 4_000_000L // 4ms
+        private val ipv4Scratch = ThreadLocal.withInitial { ByteArray(4) }
+        private val replyAddrScratch = ThreadLocal.withInitial { ByteArray(4) }
     }
 }

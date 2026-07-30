@@ -96,7 +96,9 @@ class UnderlyingNetworkTracker(
                 best?.hashCode()?.toLong()
             }
         try {
-            vpnService.setUnderlyingNetworks(best?.let { arrayOf(it) })
+            if (netId != lastPublishedNetId) {
+                vpnService.setUnderlyingNetworks(best?.let { arrayOf(it) })
+            }
             if (best != null) {
                 val caps = cm.getNetworkCapabilities(best)
                 Timber.d(

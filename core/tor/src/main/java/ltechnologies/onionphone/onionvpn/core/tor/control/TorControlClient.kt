@@ -2,6 +2,7 @@ package ltechnologies.onionphone.onionvpn.core.tor.control
 
 import java.io.File
 import java.io.IOException
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.channels.BufferOverflow
@@ -13,9 +14,7 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
-import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
-import kotlinx.coroutines.yield
 import ltechnologies.onionphone.onionvpn.core.tor.control.catalog.TorControlCatalog
 import ltechnologies.onionphone.onionvpn.core.tor.control.model.TorCircuitInfo
 import ltechnologies.onionphone.onionvpn.core.tor.control.model.TorControlEvent
@@ -163,23 +162,22 @@ class TorControlClient {
     fun setGeoIpFiles(geoIpPath: String, geoIp6Path: String): Result<Unit> =
         ops.setGeoIpFiles(geoIpPath, geoIp6Path)
 
-    fun resolve(hostname: String, timeoutMs: Long = 15_000): Result<String> =
-        resolveViaAddrMap(hostname, timeoutMs)
+    suspend fun resolve(hostname: String, timeoutMs: Long = 15_000): Result<String> =
+        runCatching { resolveViaAddrMap(hostname, timeoutMs) }
 
     /**
      * control-spec RESOLVE: answers arrive as ADDRMAP events (preferred), with
      * address-mappings/cache poll as fallback if the event was missed.
      */
-    private fun resolveViaAddrMap(hostname: String, timeoutMs: Long): Result<String> = runCatching {
+    private suspend fun resolveViaAddrMap(hostname: String, timeoutMs: Long): String {
         val host = TorControlWire.requireHostname(hostname)
-        runBlocking {
-            val waiter = async(Dispatchers.Unconfined) {
+        return coroutineScope {
+            val waiter = async(Dispatchers.Default) {
                 events.first { ev ->
                     ev is TorControlEvent.AddrMap &&
                         ev.address.equals(host, ignoreCase = true)
                 } as TorControlEvent.AddrMap
             }
-            yield()
             ops.sendResolve(host).getOrThrow()
             try {
                 withTimeout(timeoutMs) {

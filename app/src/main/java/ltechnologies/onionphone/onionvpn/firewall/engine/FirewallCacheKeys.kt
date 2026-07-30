@@ -11,6 +11,16 @@ internal object FirewallCacheKeys {
     private const val MIX = -7046029254386353131L
     private const val PACL = 0x5041434CL // "PACL"
 
+    fun tupleFlowKey(info: IpPacketInfo): Long {
+        var h = 0L
+        h = h * MIX + (info.srcIpInt.toLong() and 0xffffffffL)
+        h = h * MIX + (info.dstIpInt.toLong() and 0xffffffffL)
+        h = h * MIX + info.srcPort
+        h = h * MIX + info.dstPort
+        h = h * MIX + info.protocol
+        return h
+    }
+
     fun flowKey(uid: Int, info: IpPacketInfo): Long {
         var h = uid.toLong()
         h = h * MIX + (info.srcIpInt.toLong() and 0xffffffffL)

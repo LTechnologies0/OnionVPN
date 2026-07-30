@@ -1,6 +1,5 @@
 package ltechnologies.onionphone.onionvpn.core.vpn.forwarder
 
-import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
 /** Build IPv4 TCP packets for TUN injection (minimal userspace TCP). */
@@ -144,15 +143,31 @@ internal object TcpPacketBuilder {
     }
 
     private fun tcpChecksum(srcIp: Int, dstIp: Int, packet: ByteArray, tcpOff: Int, tcpLen: Int): Int {
-        val pseudo = ByteBuffer.allocate(12 + tcpLen).order(ByteOrder.BIG_ENDIAN)
-        pseudo.putInt(srcIp)
-        pseudo.putInt(dstIp)
-        pseudo.put(0)
-        pseudo.put(6)
-        pseudo.putShort(tcpLen.toShort())
-        pseudo.put(packet, tcpOff, tcpLen)
-        return checksum(pseudo.array(), 0, pseudo.capacity())
+        val pseudo = pseudoScratch.get()
+        val cap = 12 + tcpLen
+        if (pseudo.size < cap) {
+            pseudoScratch.set(ByteArray(cap.coerceAtLeast(1280)))
+            return tcpChecksum(srcIp, dstIp, packet, tcpOff, tcpLen)
+        }
+        val buf = pseudo
+        var p = 0
+        buf[p++] = (srcIp ushr 24).toByte()
+        buf[p++] = (srcIp ushr 16).toByte()
+        buf[p++] = (srcIp ushr 8).toByte()
+        buf[p++] = srcIp.toByte()
+        buf[p++] = (dstIp ushr 24).toByte()
+        buf[p++] = (dstIp ushr 16).toByte()
+        buf[p++] = (dstIp ushr 8).toByte()
+        buf[p++] = dstIp.toByte()
+        buf[p++] = 0
+        buf[p++] = 6
+        buf[p++] = (tcpLen ushr 8).toByte()
+        buf[p++] = tcpLen.toByte()
+        System.arraycopy(packet, tcpOff, buf, p, tcpLen)
+        return checksum(buf, 0, cap)
     }
+
+    private val pseudoScratch = ThreadLocal.withInitial { ByteArray(1280) }
 
     private val Empty = ByteArray(0)
 }

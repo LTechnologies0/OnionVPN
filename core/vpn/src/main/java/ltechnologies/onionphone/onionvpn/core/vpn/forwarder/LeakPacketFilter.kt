@@ -200,6 +200,22 @@ object LeakPacketFilter {
     }
 
     /**
+     * @return null if the packet may continue toward hev; otherwise blackhole reason.
+     */
+    fun blackholeBeforeTorTcp(packet: ByteArray, length: Int): BlackholeReason? {
+        if (shouldDropEarly(packet, length)) {
+            return if (length >= 20) classifyBlackholeReason(packet, length) else BlackholeReason.GenericUdp
+        }
+        if (shouldBlackholeUdp(packet, length)) {
+            return classifyBlackholeReason(packet, length)
+        }
+        if (!isTorrifiableIpv4Tcp(packet, length)) {
+            return classifyBlackholeReason(packet, length)
+        }
+        return null
+    }
+
+    /**
      * Early drop before DNS divert / firewall.
      * UDP/53 is NOT dropped here (caller diverts). Other UDP → drop after classify.
      */

@@ -39,11 +39,17 @@ object DnsHostnameCache {
     fun size(): Int = ipToHost.size
 
     private fun trim() {
+        trimNonAutomap(TRIM_BUDGET)
+        if (sizeApprox.get() > MAX_ENTRIES) {
+            trimNonAutomap(TRIM_BUDGET * 2)
+        }
+    }
+
+    private fun trimNonAutomap(budget: Int) {
         var n = 0
         val it = ipToHost.keys.iterator()
-        while (it.hasNext() && n < TRIM_BUDGET) {
+        while (it.hasNext() && n < budget) {
             val key = it.next()
-            // Never evict Tor Automap bindings — SOCKS5A needs them.
             if (TunnelEndpoints.isAutomapVirtualIpv4(key)) continue
             it.remove()
             sizeApprox.decrementAndGet()

@@ -30,6 +30,7 @@ import timber.log.Timber
 object ExitIpValidator {
     private const val TOR_CHECK_URL = "https://check.torproject.org/api/ip"
     private val IPV4_REGEX = Regex("""^(\d{1,3}\.){3}\d{1,3}$""")
+    private val httpClients = java.util.concurrent.ConcurrentHashMap<Int, OkHttpClient>()
 
     suspend fun validate(
         context: Context,
@@ -57,14 +58,16 @@ object ExitIpValidator {
 
     private fun fetchTorCheck(socksHost: String, socksPort: Int): TorCheckResult {
         val proxy = Proxy(Proxy.Type.SOCKS, InetSocketAddress(socksHost, socksPort))
-        val client = OkHttpClient.Builder()
-            .proxy(proxy)
-            .dns(TorSocksDns)
-            .connectTimeout(25, TimeUnit.SECONDS)
-            .readTimeout(25, TimeUnit.SECONDS)
-            .writeTimeout(25, TimeUnit.SECONDS)
-            .followRedirects(true)
-            .build()
+        val client = httpClients.getOrPut(socksPort) {
+            OkHttpClient.Builder()
+                .proxy(proxy)
+                .dns(TorSocksDns)
+                .connectTimeout(25, TimeUnit.SECONDS)
+                .readTimeout(25, TimeUnit.SECONDS)
+                .writeTimeout(25, TimeUnit.SECONDS)
+                .followRedirects(true)
+                .build()
+        }
         return try {
             val body = client.newCall(
                 Request.Builder().url(TOR_CHECK_URL).header("User-Agent", "OnionVPN").build(),
@@ -86,9 +89,6 @@ object ExitIpValidator {
         } catch (error: Exception) {
             Timber.w(error, "Tor exit IP check failed")
             TorCheckResult(null, null, error.message ?: "fetch failed")
-        } finally {
-            client.dispatcher.executorService.shutdown()
-            client.connectionPool.evictAll()
         }
     }
     private fun checkEgressNotLocal(

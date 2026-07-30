@@ -62,7 +62,8 @@ class CircuitLifecycleManager(
         val socksUsername: String? = null,
     )
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private var supervisor: Job = SupervisorJob()
+    private var scope = CoroutineScope(supervisor + Dispatchers.IO)
     private var eventsJob: Job? = null
     private var pollJob: Job? = null
     private var packageReceiver: BroadcastReceiver? = null
@@ -83,6 +84,10 @@ class CircuitLifecycleManager(
 
     fun start() {
         if (running) return
+        if (!supervisor.isActive) {
+            supervisor = SupervisorJob()
+            scope = CoroutineScope(supervisor + Dispatchers.IO)
+        }
         running = true
         eventsJob = scope.launch {
             control.events.collect { event ->
@@ -115,6 +120,7 @@ class CircuitLifecycleManager(
         eventsJob = null
         pollJob?.cancel()
         pollJob = null
+        supervisor.cancel()
         unregisterPackageReceiver()
         streams.clear()
         circuits.clear()
@@ -453,8 +459,8 @@ class CircuitLifecycleManager(
         const val LONG_LIVED_MS = 60_000L
         /** Wait before CLOSECIRCUIT on non-sticky idle circuits (lets Tor reuse briefly). */
         const val IDLE_GRACE_MS = 45_000L
-        private const val APP_POLL_MS = 12_000L
-        private const val DORMANT_POLL_MS = 45_000L
+        private const val APP_POLL_MS = 60_000L
+        private const val DORMANT_POLL_MS = 120_000L
 
         fun isStickySocksAuth(username: String?): Boolean {
             if (username.isNullOrBlank()) return false

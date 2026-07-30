@@ -51,7 +51,7 @@ internal object DpiSignatures {
     fun httpPreview(text: String): String? {
         val firstLine = text.lineSequence().firstOrNull()?.trim().orEmpty()
         if (firstLine.isEmpty()) return null
-        val host = Regex("""(?im)^Host:\s*(\S+)""")
+        val host = HTTP_HOST_PATTERN
             .find(text)?.groupValues?.getOrNull(1)
         val line = firstLine.take(80)
         return if (host != null) "$line · Host $host" else line
@@ -679,6 +679,7 @@ internal object DpiSignatures {
     val BEANSTALK_PREFIXES = arrayOf(
         "use ", "put ", "reserve", "delete ", "stats", "list-tubes", "peek-",
     )
+    val HTTP_HOST_PATTERN = Regex("""(?im)^Host:\s*(\S+)""")
     val HTTP_PORTS = setOf(80, 8080, 8000, 8008, 8888, 5000)
     val HTTPS_PORTS = setOf(443, 8443)
 }

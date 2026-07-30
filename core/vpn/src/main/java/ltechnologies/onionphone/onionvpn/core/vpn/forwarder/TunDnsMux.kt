@@ -9,6 +9,7 @@ import java.net.DatagramSocket
 import java.net.InetAddress
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.ThreadPoolExecutor
+import java.util.concurrent.ThreadPoolExecutor.DiscardOldestPolicy
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.locks.LockSupport
@@ -29,7 +30,7 @@ import timber.log.Timber
  *
  * DoS / ARM notes:
  * - DNS work uses a **bounded** pool + queue (never unbounded LinkedBlockingQueue).
- * - Saturated pool: CallerRunsPolicy (backpressure) instead of DiscardOldest (silent loss).
+ * - Saturated pool: DiscardOldestPolicy (never block TUN reader on DNS I/O).
  * - Per-worker reused DatagramSocket + reply buffers (ThreadLocal) — no open/close per query.
  * - Packet handoff uses a small free-list of MTU buffers.
  * - No per-packet [FileOutputStream.flush].
@@ -70,10 +71,12 @@ class TunDnsMux(
         TimeUnit.SECONDS,
         ArrayBlockingQueue(DNS_QUEUE_CAP),
         { r -> Thread(r, "onionvpn-dns").apply { isDaemon = true } },
-        ThreadPoolExecutor.CallerRunsPolicy(),
+        DiscardOldestPolicy(),
     ).apply {
         allowCoreThreadTimeOut(true)
     }
+    private var tunEmptyReadStreak = 0
+    private var hevEmptyReadStreak = 0
 
     fun start() {
         if (!running.compareAndSet(false, true)) return
@@ -94,10 +97,12 @@ class TunDnsMux(
                     when {
                         n < 0 -> break
                         n == 0 -> {
-                            LockSupport.parkNanos(EMPTY_READ_PARK_NS)
+                            tunEmptyReadStreak = (tunEmptyReadStreak + 1).coerceAtMost(8)
+                            LockSupport.parkNanos(EMPTY_READ_BASE_NS shl tunEmptyReadStreak)
                             continue
                         }
                         divertDnsToDnsCrypt && LeakPacketFilter.isDnsUdpPort53(buf, n) -> {
+                            tunEmptyReadStreak = 0
                             // Clearnet UDP/53 → DNSCrypt; .onion/.exit → Tor DNSPort (in handleDnsQuery).
                             snoopDnsOutbound(buf, n)
                             val packet = borrowPacket(buf, n)
@@ -110,28 +115,22 @@ class TunDnsMux(
                             }
                         }
                         !divertDnsToDnsCrypt && isDnsQueryToVpnDns(buf, n, vpnDns) -> {
+                            tunEmptyReadStreak = 0
                             // Legacy FakeDNS path — still learn QNAME before engine.
                             snoopDnsOutbound(buf, n)
                             writeHev(localHevOut, buf, n)
                         }
-                        LeakPacketFilter.shouldDropEarly(buf, n) -> {
-                            val reason = LeakPacketFilter.classifyBlackholeReason(buf, n)
-                            LeakPacketFilter.noteBlackhole(reason)
-                        }
-                        LeakPacketFilter.shouldBlackholeUdp(buf, n) -> {
-                            val reason = LeakPacketFilter.classifyBlackholeReason(buf, n)
-                            LeakPacketFilter.noteBlackhole(reason)
-                        }
-                        !LeakPacketFilter.isTorrifiableIpv4Tcp(buf, n) -> {
-                            val reason = LeakPacketFilter.classifyBlackholeReason(buf, n)
-                            LeakPacketFilter.noteBlackhole(reason)
-                        }
-                        !FirewallBridge.engine.allowOutbound(buf, n) -> {
-                            // Drop
-                        }
                         else -> {
-                            stampTcpUid(buf, n)
-                            writeHev(localHevOut, buf, n)
+                            tunEmptyReadStreak = 0
+                            val blackhole = LeakPacketFilter.blackholeBeforeTorTcp(buf, n)
+                            if (blackhole != null) {
+                                LeakPacketFilter.noteBlackhole(blackhole)
+                            } else if (!FirewallBridge.engine.allowOutbound(buf, n)) {
+                                // Drop
+                            } else {
+                                stampTcpUid(buf, n)
+                                writeHev(localHevOut, buf, n)
+                            }
                         }
                     }
                 }
@@ -143,7 +142,7 @@ class TunDnsMux(
             }
         }, "onionvpn-tun-hev").apply {
             isDaemon = true
-            priority = Thread.NORM_PRIORITY + 1
+            priority = Thread.NORM_PRIORITY
             start()
         }
 
@@ -157,10 +156,12 @@ class TunDnsMux(
                     when {
                         n < 0 -> break
                         n == 0 -> {
-                            LockSupport.parkNanos(EMPTY_READ_PARK_NS)
+                            hevEmptyReadStreak = (hevEmptyReadStreak + 1).coerceAtMost(8)
+                            LockSupport.parkNanos(EMPTY_READ_BASE_NS shl hevEmptyReadStreak)
                             continue
                         }
                         else -> {
+                            hevEmptyReadStreak = 0
                             // FakeDNS / hev replies: attribute Fake-IP → hostname.
                             snoopDnsInbound(buf, n)
                             synchronized(tunWriteLock) {
@@ -178,7 +179,7 @@ class TunDnsMux(
             }
         }, "onionvpn-hev-tun").apply {
             isDaemon = true
-            priority = Thread.NORM_PRIORITY + 1
+            priority = Thread.NORM_PRIORITY
             start()
         }
 
@@ -463,7 +464,7 @@ class TunDnsMux(
         private const val PROTO_UDP = 17
         private const val DNS_TIMEOUT_MS = 8_000
         private const val DNS_RESPONSE_CAP = 2048
-        private const val EMPTY_READ_PARK_NS = 200_000L // 0.2ms
+        private const val EMPTY_READ_BASE_NS = 200_000L // 0.2ms base, exponential cap ~51ms
         private val DNS_CORE_THREADS =
             Runtime.getRuntime().availableProcessors().coerceIn(2, 4)
         private val DNS_MAX_THREADS = (DNS_CORE_THREADS + 2).coerceAtMost(6)

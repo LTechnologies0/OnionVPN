@@ -40,6 +40,7 @@ class UidIsolatingTunForwarder(
     private val ownerResolver = ConnectionOwnerResolver(context)
     private val sessions = ConcurrentHashMap<Long, TcpTunSession>()
     private val running = AtomicBoolean(false)
+    private var emptyReadStreak = 0
 
     private var tunDup: ParcelFileDescriptor? = null
     private var dnsMux: TunDnsMux? = null
@@ -84,17 +85,21 @@ class UidIsolatingTunForwarder(
         engineOut = localOut
 
         engineThread = Thread({
-            val buf = ByteArray(TunnelEndpoints.VPN_MTU)
+            val buf = readBuf.get()
             try {
                 while (running.get()) {
                     val n = localIn.read(buf)
                     when {
                         n < 0 -> break
                         n == 0 -> {
-                            LockSupport.parkNanos(50_000L)
+                            emptyReadStreak = (emptyReadStreak + 1).coerceAtMost(8)
+                            LockSupport.parkNanos(EMPTY_READ_BASE_NS shl emptyReadStreak)
                             continue
                         }
-                        else -> handleIpPacket(buf, n, socksHost, socksPort)
+                        else -> {
+                            emptyReadStreak = 0
+                            handleIpPacket(buf, n, socksHost, socksPort)
+                        }
                     }
                 }
             } catch (error: Exception) {
@@ -110,7 +115,7 @@ class UidIsolatingTunForwarder(
             }
         }, "onionvpn-uid-socks").apply {
             isDaemon = true
-            priority = Thread.NORM_PRIORITY + 1
+            priority = Thread.NORM_PRIORITY
             start()
         }
 
@@ -155,16 +160,17 @@ class UidIsolatingTunForwarder(
         var session = sessions[key]
         if (session == null) {
             if (!meta.synOnly) return
+            if (sessions.size >= MAX_SESSIONS) return
             val destIp = TcpTunSession.formatIpv4(meta.dstIp)
             val remoteHost = resolveSocksDestHost(destIp) ?: run {
-                Timber.d("Drop SYN to Automap IP without hostname $destIp:${meta.dstPort}")
+                VpnForwarderDebug.uidLog { "Drop SYN to Automap IP without hostname $destIp:${meta.dstPort}" }
                 return
             }
             val info = IpPacketParser.parse(buf, length)
             val uid = resolveUidWithRetry(info)
             // Never IsolateSOCKSAuth as uunknown — wait for owner (matches firewall fail-closed).
             if (!ConnectionOwnerResolver.isValidUid(uid)) {
-                Timber.d("Drop SYN — UID not resolved yet ${destIp}:${meta.dstPort}")
+                VpnForwarderDebug.uidLog { "Drop SYN — UID not resolved yet $destIp:${meta.dstPort}" }
                 return
             }
             val user = TunnelEndpoints.socksUserForUid(uid)
@@ -186,7 +192,7 @@ class UidIsolatingTunForwarder(
                 onClosed = { s -> sessions.remove(s.key, s) },
             )
             sessions[key] = session
-            Timber.d("TCP session uid=$uid $user → $remoteHost:${meta.dstPort} ($destIp)")
+            VpnForwarderDebug.uidLog { "TCP session uid=$uid $user → $remoteHost:${meta.dstPort} ($destIp)" }
         }
         session.handlePacket(buf, meta)
     }
@@ -197,7 +203,7 @@ class UidIsolatingTunForwarder(
             try {
                 out.write(packet)
             } catch (e: Exception) {
-                Timber.d(e, "writeEngine failed")
+                VpnForwarderDebug.uidLog(e) { "writeEngine failed" }
             }
         }
     }
@@ -231,5 +237,8 @@ class UidIsolatingTunForwarder(
     companion object {
         private const val UID_RESOLVE_ATTEMPTS = 8
         private const val UID_RESOLVE_PARK_NS = 2_000_000L // 2ms
+        private const val MAX_SESSIONS = 256
+        private const val EMPTY_READ_BASE_NS = 50_000L
+        private val readBuf = ThreadLocal.withInitial { ByteArray(TunnelEndpoints.VPN_MTU) }
     }
 }

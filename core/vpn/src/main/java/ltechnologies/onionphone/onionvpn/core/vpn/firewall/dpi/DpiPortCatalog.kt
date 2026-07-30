@@ -20,6 +20,14 @@ internal object DpiPortCatalog {
         val detail: String? = null,
     )
 
+    /** When dst port maps to exactly one protocol for this L4, DPI can try that family first. */
+    fun uniqueKindForPort(info: IpPacketInfo): Kind? {
+        val hits = BY_PORT[info.dstPort] ?: return null
+        val matched = hits.filter { e -> (info.isTcp && e.tcp) || (info.isUdp && e.udp) }
+        if (matched.size != 1) return null
+        return matched.first().kind
+    }
+
     fun lookup(info: IpPacketInfo): Result? {
         val p = info.dstPort
         val hits = BY_PORT[p] ?: return null

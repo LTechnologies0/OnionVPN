@@ -82,6 +82,8 @@ class TunnelForegroundService : Service() {
     private val stabilityRecovery by lazy { TunnelStabilityRecovery(tor) }
     private val throughputText: String get() = throughputTracker.displayText
     private val notifications by lazy { TunnelNotifications(this) }
+    private var lastNotificationText: String? = null
+    private var lastNotificationUpdateMs: Long = 0L
     private val vpnBridge by lazy { TunnelVpnBridge(this) }
     private val pacServer by lazy { PacProxyServer() }
 
@@ -333,7 +335,7 @@ class TunnelForegroundService : Service() {
 
         updateSnapshot(TunnelPhase.Validating, vpnEstablished = true)
         // Wake Tor if dormant so DNSPort / SOCKS5A probes don't Poll/connect timeout.
-        tor.signalActive()
+        maybeSignalActive()
         val validations = runValidation(ports)
         val hardFails = validations.filter { TunnelValidator.isHardKillSwitchFailure(it) }
         val softFails = validations.filter {
@@ -368,8 +370,9 @@ class TunnelForegroundService : Service() {
             dnsCryptRunning = useDnsCrypt && dnsCrypt.isRunning(),
             vpnEstablished = true,
         )
+        firewallEngine.start()
         // Wake Tor if we previously SIGNAL DORMANT from kill-switch Blocking.
-        tor.signalActive()
+        maybeSignalActive()
         tor.applyCircuitTimingLive(
             preferences.torMaxCircuitDirtinessSec,
             preferences.torNewCircuitPeriodSec,
@@ -505,6 +508,7 @@ class TunnelForegroundService : Service() {
         validationJob?.cancel()
         validationJob = null
         circuitLifecycle.stop()
+        firewallEngine.stop()
         runCatching { pacServer.stop() }
         vpnBridge.destroy()
         vpnBridge.waitUntilDown()
@@ -566,9 +570,8 @@ class TunnelForegroundService : Service() {
                 if (_snapshot.value.phase != TunnelPhase.Connected) continue
                 val ports = runtimePorts ?: continue
                 ticks++
-                tor.signalActive()
-                // Most ticks: local lite probes. Exit-IP OkHttp only every ~15 min.
                 val checks = if (ticks % FULL_VALIDATION_TICKS == 0) {
+                    maybeSignalActive()
                     TunnelValidator.validateAll(
                         context = applicationContext,
                         torConfigFile = tor.torrcFile,
@@ -629,14 +632,11 @@ class TunnelForegroundService : Service() {
                 // BW events are also global; CIRC_BW/STREAM_BW are never used (per-circuit).
                 // Circuit dumps only every ~2 min; lite health every ~10s.
                 ticks++
-                if (ticks % FULL_CONTROL_REFRESH_TICKS == 0) {
-                    tor.refreshControlCircuits()
-                } else if (ticks % LITE_CONTROL_REFRESH_TICKS == 0 || phase == TunnelPhase.StartingTor) {
-                    tor.refreshControlHealthLite()
-                }
-                if (phase == TunnelPhase.Connected && tor.controlStatus.value.connected) {
-                    // Dedicated cheap GETINFO so rates track all circuits every tick.
+                if (ticks % TRAFFIC_REFRESH_TICKS == 0) {
                     tor.refreshControlTraffic()
+                }
+                if (ticks % LITE_CONTROL_REFRESH_TICKS == 0 || phase == TunnelPhase.StartingTor) {
+                    tor.refreshControlHealthLite()
                 }
                 val st = tor.controlStatus.value
                 if (phase == TunnelPhase.Connected && st.connected) {
@@ -665,6 +665,7 @@ class TunnelForegroundService : Service() {
     }
 
     private fun acquireBootstrapWakeLock() {
+        releaseBootstrapWakeLock()
         val pm = getSystemService(POWER_SERVICE) as PowerManager
         bootstrapWakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "OnionVPN:Bootstrap").apply {
             setReferenceCounted(false)
@@ -705,7 +706,19 @@ class TunnelForegroundService : Service() {
             liveBuiltCircuits = if (controlUp) builtLive else -1,
             liveStreamCount = if (controlUp) liveStreams.size else -1,
         )
-        notifications.update(phase, throughputText)
+        notifications.updateIfChanged(phase, throughputText, lastNotificationText, lastNotificationUpdateMs)
+            .also { (text, at) ->
+                lastNotificationText = text
+                lastNotificationUpdateMs = at
+            }
+    }
+
+    private fun maybeSignalActive() {
+        val st = tor.controlStatus.value
+        if (!st.connected) return
+        if (st.dormant || st.lastStabilityAction.isNotBlank()) {
+            tor.signalActive()
+        }
     }
 
     companion object {
@@ -730,7 +743,7 @@ class TunnelForegroundService : Service() {
         const val EXTRA_DNS_FORCE_TCP = "dns_force_tcp"
         const val EXTRA_DNS_DNSSEC = "dns_dnssec"
 
-        private const val BOOTSTRAP_WAKELOCK_TIMEOUT_MS = 3 * 60 * 1000L
+        private const val BOOTSTRAP_WAKELOCK_TIMEOUT_MS = 90_000L
         /** Leak checks — less aggressive once Connected to save battery/thermal. */
         private const val VALIDATION_INTERVAL_MS = 90_000L
         private const val VALIDATION_TIMEOUT_MS = 60_000L
@@ -739,10 +752,10 @@ class TunnelForegroundService : Service() {
         /** UI throughput tick; BW events fill rates without GETINFO each tick. */
         private const val THROUGHPUT_INTERVAL_MS = 2_000L
         /** Min gap between catalog-driven soft/hard Tor recoveries. */
+        /** Every 5th throughput tick (~10s) refresh traffic GETINFO. */
+        private const val TRAFFIC_REFRESH_TICKS = 5
         /** Every N ticks → lite GETINFO (dormant / liveness). ~10s */
         private const val LITE_CONTROL_REFRESH_TICKS = 5
-        /** Every N ticks → circuit/stream dump. ~20s at 2s ticks (Status must track Circuits). */
-        private const val FULL_CONTROL_REFRESH_TICKS = 10
 
         private val _snapshot = MutableStateFlow(TunnelSnapshot())
         val snapshot: StateFlow<TunnelSnapshot> = _snapshot.asStateFlow()
@@ -758,7 +771,7 @@ class TunnelForegroundService : Service() {
             torEntryNodes = intent.getStringExtra(EXTRA_TOR_ENTRY).orEmpty(),
             torExitNodes = intent.getStringExtra(EXTRA_TOR_EXIT).orEmpty(),
             torExcludeNodes = intent.getStringExtra(EXTRA_TOR_EXCLUDE).orEmpty(),
-            torNewCircuitPeriodSec = intent.getIntExtra(EXTRA_TOR_NEW_CIRCUIT, 30),
+            torNewCircuitPeriodSec = intent.getIntExtra(EXTRA_TOR_NEW_CIRCUIT, 180),
             torMaxCircuitDirtinessSec = intent.getIntExtra(EXTRA_TOR_MAX_DIRTINESS, 600),
             dnsCryptRequireNoLog = intent.getBooleanExtra(EXTRA_DNS_NOLOG, true),
             dnsCryptRequireNoFilter = intent.getBooleanExtra(EXTRA_DNS_NOFILTER, false),

@@ -1,5 +1,7 @@
 package ltechnologies.onionphone.onionvpn.logging
 
+import android.os.Handler
+import android.os.Looper
 import java.util.ArrayDeque
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -23,11 +25,14 @@ data class LogLine(
 object TunnelLogBuffer {
     private const val CAPACITY = 2_000
     private const val MAX_LINE_CHARS = 2_000
+    private const val PUBLISH_DEBOUNCE_MS = 200L
 
     private val appDeque = ArrayDeque<LogLine>(CAPACITY)
     private val dnsDeque = ArrayDeque<LogLine>(CAPACITY)
     private val torDeque = ArrayDeque<LogLine>(CAPACITY)
     private val lock = Any()
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private var publishPending = false
 
     private val _app = MutableStateFlow<List<LogLine>>(emptyList())
     private val _dnscrypt = MutableStateFlow<List<LogLine>>(emptyList())
@@ -92,19 +97,11 @@ object TunnelLogBuffer {
         val line = LogLine(System.currentTimeMillis(), clipped, isError = isError)
         synchronized(lock) {
             when (source) {
-                LogSource.APP -> {
-                    push(appDeque, line)
-                    _app.value = appDeque.toList()
-                }
-                LogSource.DNSCRYPT -> {
-                    push(dnsDeque, line)
-                    _dnscrypt.value = dnsDeque.toList()
-                }
-                LogSource.TOR -> {
-                    push(torDeque, line)
-                    _tor.value = torDeque.toList()
-                }
+                LogSource.APP -> push(appDeque, line)
+                LogSource.DNSCRYPT -> push(dnsDeque, line)
+                LogSource.TOR -> push(torDeque, line)
             }
+            schedulePublish()
         }
     }
 
@@ -129,6 +126,19 @@ object TunnelLogBuffer {
 
     fun clearAll() {
         LogSource.entries.forEach { clear(it) }
+    }
+
+    private fun schedulePublish() {
+        if (publishPending) return
+        publishPending = true
+        mainHandler.postDelayed({
+            synchronized(lock) {
+                publishPending = false
+                _app.value = appDeque.toList()
+                _dnscrypt.value = dnsDeque.toList()
+                _tor.value = torDeque.toList()
+            }
+        }, PUBLISH_DEBOUNCE_MS)
     }
 
     private fun push(deque: ArrayDeque<LogLine>, line: LogLine) {

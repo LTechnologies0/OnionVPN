@@ -29,6 +29,7 @@ class RelayCountryLookup(
      */
     private val countryByFp = ConcurrentHashMap<String, String>()
     private val ipByFp = ConcurrentHashMap<String, String>()
+    private val fpAccessOrder = java.util.ArrayDeque<String>()
     private val geoIpAvailable = AtomicBoolean(true)
     private val geoIpProbed = AtomicBoolean(false)
 
@@ -54,7 +55,10 @@ class RelayCountryLookup(
         val fp = runCatching { TorControlWire.requireFingerprintHex(fingerprint) }.getOrNull()
             ?: return null
         // Hit (including UNKNOWN_CC sentinel) vs miss (null get).
-        countryByFp[fp]?.let { cached -> return cached.ifEmpty { null } }
+        countryByFp[fp]?.let { cached ->
+            touchFp(fp)
+            return cached.ifEmpty { null }
+        }
         if (!control.isConnected || !ensureGeoIpAvailable()) {
             countryByFp[fp] = UNKNOWN_CC
             return null
@@ -68,7 +72,20 @@ class RelayCountryLookup(
             Timber.d(it, "Relay country lookup failed for %s", fp.take(8))
         }.getOrNull()
         countryByFp[fp] = cc ?: UNKNOWN_CC
+        touchFp(fp)
         return cc
+    }
+
+    private fun touchFp(fp: String) {
+        synchronized(fpAccessOrder) {
+            fpAccessOrder.remove(fp)
+            fpAccessOrder.addLast(fp)
+            while (fpAccessOrder.size > MAX_FP_CACHE) {
+                val evict = fpAccessOrder.removeFirst()
+                countryByFp.remove(evict)
+                ipByFp.remove(evict)
+            }
+        }
     }
 
     private fun ensureGeoIpAvailable(): Boolean {
@@ -123,6 +140,7 @@ class RelayCountryLookup(
     companion object {
         /** Sentinel for “probed, country unknown” — ConcurrentHashMap rejects null values. */
         private const val UNKNOWN_CC = ""
+        private const val MAX_FP_CACHE = 4096
 
         /** ISO alpha-2 → regional-indicator flag emoji. */
         fun flagEmoji(countryCode: String?): String {

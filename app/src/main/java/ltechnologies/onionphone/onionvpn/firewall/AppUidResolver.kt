@@ -63,6 +63,9 @@ class AppUidResolver(
             addAction(Intent.ACTION_PACKAGE_REMOVED)
             addAction(Intent.ACTION_PACKAGE_CHANGED)
             addAction(Intent.ACTION_PACKAGE_REPLACED)
+            addAction(Intent.ACTION_PACKAGE_DATA_CLEARED)
+            addAction(Intent.ACTION_PACKAGE_FULLY_REMOVED)
+            addAction(Intent.ACTION_PACKAGE_RESTARTED)
             addDataScheme("package")
         }
         ContextCompat.registerReceiver(

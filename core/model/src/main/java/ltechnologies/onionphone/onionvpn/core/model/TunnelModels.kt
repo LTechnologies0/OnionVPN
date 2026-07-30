@@ -48,14 +48,47 @@ object TunnelEndpoints {
      * These must never be SOCKS CONNECT'd as literal IPs (no exit path).
      */
     fun isAutomapVirtualIpv4(hostAddress: String): Boolean {
-        val parts = hostAddress.split('.')
-        if (parts.size != 4) return false
-        val a = parts[0].toIntOrNull() ?: return false
-        val b = parts[1].toIntOrNull() ?: return false
-        val c = parts[2].toIntOrNull() ?: return false
-        val d = parts[3].toIntOrNull() ?: return false
-        if (a !in 0..255 || b !in 0..255 || c !in 0..255 || d !in 0..255) return false
+        val ip = parseIpv4Literal(hostAddress) ?: return false
+        return isAutomapVirtualIpv4(ip)
+    }
+
+    /** Bitmask check for Tor Automap `10.192.0.0/10` (no String alloc). */
+    fun isAutomapVirtualIpv4(ipInt: Int): Boolean {
+        val a = (ipInt ushr 24) and 0xff
+        val b = (ipInt ushr 16) and 0xff
         return a == 10 && b in 192..255
+    }
+
+    fun parseIpv4Literal(hostAddress: String): Int? {
+        var a = -1
+        var b = -1
+        var c = -1
+        var d = -1
+        var cur = 0
+        var dots = 0
+        for (ch in hostAddress) {
+            when (ch) {
+                '.' -> {
+                    when (dots) {
+                        0 -> a = cur
+                        1 -> b = cur
+                        2 -> c = cur
+                        else -> return null
+                    }
+                    cur = 0
+                    dots++
+                }
+                in '0'..'9' -> {
+                    cur = cur * 10 + (ch - '0')
+                    if (cur > 255) return null
+                }
+                else -> return null
+            }
+        }
+        if (dots != 3) return null
+        d = cur
+        if (a < 0 || b < 0 || c < 0 || d < 0) return null
+        return (a shl 24) or (b shl 16) or (c shl 8) or d
     }
 
     /** Tor special hostnames that must use DNSPort Automap + SOCKS5A, never DNSCrypt. */

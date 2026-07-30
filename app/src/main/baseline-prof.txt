@@ -1,0 +1,4 @@
+# Minimal startup hints for OnionVPN (full Baseline Profile module deferred).
+Ltechnologies/onionphone/onionvpn/OnionVpnApplication;
+Ltechnologies/onionphone/onionvpn/MainActivity;
+Ltechnologies/onionphone/onionvpn/service/TunnelForegroundService;

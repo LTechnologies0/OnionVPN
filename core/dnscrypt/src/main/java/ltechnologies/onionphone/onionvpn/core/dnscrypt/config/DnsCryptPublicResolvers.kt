@@ -16,7 +16,7 @@ object DnsCryptPublicResolvers {
         val ipv6: Boolean,
     )
 
-    val all: List<Entry> = listOf(
+    val all: List<Entry> by lazy { listOf(
         Entry("a-and-a", "Andrews & Arnold non-filtering resolver. No logging, DNSSEC validation. Homepage: https://www.aa.net.uk/dns/ Operated by Andrews & Arnold. Service page: https://www.aa.net.uk/dns/", listOf("sdns://AgcAAAAAAAAADTIxNy4xNjkuMjAuMjIADWRucy5hYS5uZXQudWsKL2Rucy1xdWVyeQ", "sdns://AgcAAAAAAAAADTIxNy4xNjkuMjAuMjMADWRucy5hYS5uZXQudWsKL2Rucy1xdWVyeQ"), false),
         Entry("a-and-a-ipv6", "Andrews & Arnold non-filtering resolver. IPv6 endpoint. No logging, DNSSEC validation. Homepage: https://www.aa.net.uk/dns/ Operated by Andrews & Arnold. Service page: https://www.aa.net.uk/dns/", listOf("sdns://AgcAAAAAAAAAEFsyMDAxOjhiMDo6MjAyMl0ADWRucy5hYS5uZXQudWsKL2Rucy1xdWVyeQ", "sdns://AgcAAAAAAAAAEFsyMDAxOjhiMDo6MjAyM10ADWRucy5hYS5uZXQudWsKL2Rucy1xdWVyeQ"), true),
         Entry("adfilter-adl", "Hosted in Adelaide, Australia. Blocks ads, malware, trackers and more. No persistent logs. DNSSEC. No EDNS Client-Subnet. Operated by ADFilter. Service page: https://adfilter.com/", listOf("sdns://AgMAAAAAAAAADzEwMy4yNDkuMjM4LjEyNCCMUDOXP_5P8e8KqSmE_JMoG6epJ474v2QSJriY0Q1OdBBhZGwuYWRmaWx0ZXIubmV0Ci9kbnMtcXVlcnk"), false),
@@ -833,14 +833,16 @@ object DnsCryptPublicResolvers {
         Entry("yandex-ipv6", "Yandex Public DNS Basic resolver. IPv6 anycast service operated by Yandex. Operated by Yandex. Service page: https://dns.yandex.com/", listOf("sdns://AgUAAAAAAAAAE1syYTAyOjZiODo6ZmVlZDpmZl0gqBenFA9ncKraKzYveiNnt55Bz0iR9ZGt8W3ToJZjlZEJNzcuODguOC4xCi9kbnMtcXVlcnk", "sdns://AgUAAAAAAAAAF1syYTAyOjZiODowOjE6OmZlZWQ6ZmZdIKgXpxQPZ3Cq2is2L3ojZ7eeQc9IkfWRrfFt06CWY5WRCTc3Ljg4LjguMQovZG5zLXF1ZXJ5"), true),
         Entry("yandex-safe", "Yandex Public DNS Safe resolver. Anycast service operated by Yandex with malware filtering. Operated by Yandex. Service page: https://dns.yandex.com/", listOf("sdns://AgEAAAAAAAAACTc3Ljg4LjguMiCoF6cUD2dwqtorNi96I2e3nkHPSJH1ka3xbdOglmOVkQk3Ny44OC44LjIKL2Rucy1xdWVyeQ", "sdns://AgEAAAAAAAAACjc3Ljg4LjguODggqBenFA9ncKraKzYveiNnt55Bz0iR9ZGt8W3ToJZjlZEKNzcuODguOC44OAovZG5zLXF1ZXJ5"), false),
         Entry("yandex-safe-ipv6", "Yandex Public DNS Safe resolver. IPv6 anycast service operated by Yandex with malware filtering. Operated by Yandex. Service page: https://dns.yandex.com/", listOf("sdns://AgEAAAAAAAAAFFsyYTAyOjZiODo6ZmVlZDpiYWRdIKgXpxQPZ3Cq2is2L3ojZ7eeQc9IkfWRrfFt06CWY5WRCTc3Ljg4LjguMgovZG5zLXF1ZXJ5", "sdns://AgEAAAAAAAAAGFsyYTAyOjZiODowOjE6OmZlZWQ6YmFkXSCoF6cUD2dwqtorNi96I2e3nkHPSJH1ka3xbdOglmOVkQk3Ny44OC44LjIKL2Rucy1xdWVyeQ"), true),
-    )
+    ) }
 
-    val byName: Map<String, Entry> = all.associateBy { it.name }
+    val byName: Map<String, Entry> by lazy { all.associateBy { it.name } }
 
     /** First stamp per resolver (IPv4-preferred catalog for UI). */
-    val knownServers: Map<String, String> = all
+    val knownServers: Map<String, String> by lazy {
+        all
         .filterNot { it.ipv6 }
         .associate { it.name to it.stamps.first() }
+    }
 
     fun resolveName(requested: String): String {
         val key = requested.trim().ifBlank { "cloudflare" }

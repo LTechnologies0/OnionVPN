@@ -1,11 +1,13 @@
 package ltechnologies.onionphone.onionvpn
 
 import android.app.Application
+import android.os.StrictMode
 import dagger.hilt.android.HiltAndroidApp
 import javax.inject.Inject
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import ltechnologies.onionphone.onionvpn.core.dnscrypt.DnsCryptProcessManager
 import ltechnologies.onionphone.onionvpn.core.tor.control.TorControlEventFormatter
@@ -31,13 +33,30 @@ class OnionVpnApplication : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        if (BuildConfig.DEBUG) {
+            StrictMode.setThreadPolicy(
+                StrictMode.ThreadPolicy.Builder()
+                    .detectAll()
+                    .penaltyLog()
+                    .build(),
+            )
+            StrictMode.setVmPolicy(
+                StrictMode.VmPolicy.Builder()
+                    .detectLeakedSqlLiteObjects()
+                    .detectLeakedClosableObjects()
+                    .penaltyLog()
+                    .build(),
+            )
+        }
         Timber.plant(TunnelLogTree())
         if (BuildConfig.DEBUG) {
             Timber.plant(Timber.DebugTree())
         }
-        firewallEngine.start()
-        domainReputation.start()
         FirewallBridge.engine = firewallEngine
+        appScope.launch {
+            delay(3_000)
+            domainReputation.start()
+        }
         tor.onLogLine = { line ->
             val err = ProcessLogSeverity.isError(LogSource.TOR, line)
             if (err) Timber.tag("tor").e("%s", line)
@@ -48,10 +67,18 @@ class OnionVpnApplication : Application() {
             if (err) Timber.tag("dnscrypt").e("%s", line)
             TunnelLogBuffer.append(LogSource.DNSCRYPT, line, isError = err)
         }
+        var controlEventCount = 0L
         appScope.launch {
             tor.controlEvents.collect { event ->
-                // BW floods the log buffer — skip.
                 if (event is TorControlEvent.Bandwidth) return@collect
+                if (event is TorControlEvent.Stream) return@collect
+                controlEventCount++
+                if ((controlEventCount and 0x1F) != 0L &&
+                    event !is TorControlEvent.Notice &&
+                    event !is TorControlEvent.Circuit
+                ) {
+                    return@collect
+                }
                 val line = TorControlEventFormatter.format(event)
                 val err = event is TorControlEvent.Notice &&
                     (event.severity == "WARN" || event.severity == "ERR")

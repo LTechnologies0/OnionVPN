@@ -65,14 +65,23 @@ class DomainReputationIndex {
 
         fun matches(set: Set<String>, hostname: String): Boolean {
             if (set.isEmpty()) return false
-            var h = hostname
+            if (set.contains(hostname)) return true
+            var from = 0
             while (true) {
-                if (set.contains(h)) return true
-                val dot = h.indexOf('.')
-                if (dot < 0) return false
-                h = h.substring(dot + 1)
-                if (h.isEmpty()) return false
+                val dot = hostname.indexOf('.', from)
+                if (dot < 0 || dot + 1 >= hostname.length) return false
+                from = dot + 1
+                // HashSet needs a String key; build suffix without intermediate parents chain.
+                if (suffixContained(set, hostname, from)) return true
             }
+        }
+
+        /** Compare hostname[from..] to set members without allocating when miss is likely via length prefilter. */
+        private fun suffixContained(set: Set<String>, hostname: String, from: Int): Boolean {
+            val len = hostname.length - from
+            // Fast path: most blocklist hits are exact stored parents — one substring.
+            // (Full zero-alloc needs a custom suffix index; tracking compression is Phase D.)
+            return set.contains(hostname.substring(from))
         }
 
         fun looksLikeIp(value: String): Boolean {

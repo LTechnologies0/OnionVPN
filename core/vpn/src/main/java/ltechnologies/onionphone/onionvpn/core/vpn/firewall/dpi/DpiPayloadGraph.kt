@@ -77,6 +77,11 @@ internal object DpiPayloadGraph {
         len: Int,
         info: IpPacketInfo,
     ): Result? {
+        DpiPortCatalog.uniqueKindForPort(info)?.let { preferred ->
+            for (probe in PROBES) {
+                probe(packet, offset, len, info)?.takeIf { it.kind == preferred }?.let { return it }
+            }
+        }
         for (probe in PROBES) {
             probe(packet, offset, len, info)?.let { return it }
         }
@@ -690,7 +695,7 @@ internal object DpiPayloadGraph {
         offset: Int,
         len: Int,
     ): Result {
-        val text = String(packet, offset, minOf(len, 512), StandardCharsets.US_ASCII)
+        val text = String(packet, offset, minOf(len, HTTP_PREVIEW_CAP), StandardCharsets.US_ASCII)
         val preview = httpPreview(text)
         val lower = text.lowercase(Locale.US)
         val websocket = lower.contains("upgrade: websocket") ||
@@ -730,9 +735,11 @@ internal object DpiPayloadGraph {
     private fun httpPreview(text: String): String? {
         val firstLine = text.lineSequence().firstOrNull()?.trim().orEmpty()
         if (firstLine.isEmpty()) return null
-        val host = Regex("""(?im)^Host:\s*(\S+)""")
+        val host = DpiSignatures.HTTP_HOST_PATTERN
             .find(text)?.groupValues?.getOrNull(1)
         val line = firstLine.take(80)
         return if (host != null) "$line · Host $host" else line
     }
+
+    private const val HTTP_PREVIEW_CAP = 512
 }
