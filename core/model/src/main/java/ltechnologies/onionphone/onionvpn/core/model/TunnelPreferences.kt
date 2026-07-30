@@ -35,4 +35,9 @@ data class TunnelPreferences(
     val appLockEnabled: Boolean = true,
     /** When false, [android.view.WindowManager.LayoutParams.FLAG_SECURE] blocks screenshots. */
     val allowScreenshots: Boolean = false,
+    /**
+     * When true, opening the app prepares VPN permission (if needed) and starts
+     * Tor + DNSCrypt + Connected TUN automatically.
+     */
+    val autoStartOnAppLaunch: Boolean = true,
 )

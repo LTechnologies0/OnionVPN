@@ -64,13 +64,14 @@ object SystemLeakInspector {
                 detail = "VpnService.isLockdownEnabled=true alwaysOn=$liveAlwaysOn",
                 tripsKillSwitch = false,
             )
+            // Advisory: tunnel still routes via Tor; OS lockdown is user Settings work.
             vpnUp && liveAlwaysOn && !liveLockdown -> ValidationCheck(
                 id = "android.vpn.always_on",
                 label = "Android Always-on VPN lockdown",
                 status = ValidationStatus.Fail,
                 detail = "Always-on ON but Lockdown OFF — enable “Block connections without VPN” " +
                     "(Privacy Guides / GrapheneOS)",
-                tripsKillSwitch = true,
+                tripsKillSwitch = false,
             )
             alwaysOnPkg == ourPkg -> ValidationCheck(
                 id = "android.vpn.always_on",
@@ -78,8 +79,9 @@ object SystemLeakInspector {
                 status = ValidationStatus.Fail,
                 detail = "Always-on=$ourPkg but Lockdown not confirmed — enable " +
                     "“Block connections without VPN”",
-                tripsKillSwitch = true,
+                tripsKillSwitch = false,
             )
+            // Hard: another app owns Always-on and can displace our TUN.
             alwaysOnPkg != null -> ValidationCheck(
                 id = "android.vpn.always_on",
                 label = "Android Always-on VPN lockdown",
@@ -92,8 +94,8 @@ object SystemLeakInspector {
                 label = "Android Always-on VPN lockdown",
                 status = ValidationStatus.Fail,
                 detail = "Settings → Network → VPN → OnionVPN → Always-on ON + " +
-                    "Block connections without VPN ON (required when kill-switch is on)",
-                tripsKillSwitch = true,
+                    "Block connections without VPN ON (recommended when kill-switch is on)",
+                tripsKillSwitch = false,
             )
         }
     }

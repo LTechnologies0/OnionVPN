@@ -1,5 +1,6 @@
 package ltechnologies.onionphone.onionvpn.core.vpn.forwarder
 
+import android.content.Context
 import android.os.ParcelFileDescriptor
 import java.io.FileInputStream
 import java.io.FileOutputStream
@@ -14,7 +15,9 @@ import java.util.concurrent.locks.LockSupport
 import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
 import ltechnologies.onionphone.onionvpn.core.vpn.dns.DnsHostnameCache
 import ltechnologies.onionphone.onionvpn.core.vpn.dns.DnsPacketParser
+import ltechnologies.onionphone.onionvpn.core.vpn.firewall.ConnectionOwnerResolver
 import ltechnologies.onionphone.onionvpn.core.vpn.firewall.FirewallBridge
+import ltechnologies.onionphone.onionvpn.core.vpn.firewall.IpPacketParser
 import timber.log.Timber
 
 /**
@@ -22,15 +25,17 @@ import timber.log.Timber
  * - When [divertDnsToDnsCrypt]: UDP/53 clearnet → DNSCrypt; `.onion`/`.exit` → Tor DNSPort
  *   (AutomapHostsOnResolve → virtual IPs in [TunnelEndpoints.VIRTUAL_ADDR_NETWORK]/10)
  * - Non-DNS UDP / ICMP / IPv6 → blackhole (force apps onto TCP; Tor has no UDP)
- * - IPv4 TCP → firewall check → UID SOCKS / hev engine
+ * - IPv4 TCP → firewall check → hev engine (UID stamped into [TcpFlowUidIndex] for SocksUidBridge)
  *
  * DoS / ARM notes:
  * - DNS work uses a **bounded** pool + queue (never unbounded LinkedBlockingQueue).
+ * - Saturated pool: CallerRunsPolicy (backpressure) instead of DiscardOldest (silent loss).
  * - Per-worker reused DatagramSocket + reply buffers (ThreadLocal) — no open/close per query.
  * - Packet handoff uses a small free-list of MTU buffers.
  * - No per-packet [FileOutputStream.flush].
  */
 class TunDnsMux(
+    context: Context,
     private val tunFd: ParcelFileDescriptor,
     private val hevFd: ParcelFileDescriptor,
     private val dnsCryptHost: String,
@@ -42,6 +47,7 @@ class TunDnsMux(
     private val torDnsPort: Int = 0,
     private val onFatal: ((Throwable) -> Unit)? = null,
 ) {
+    private val ownerResolver = ConnectionOwnerResolver(context)
     private val running = AtomicBoolean(false)
     private var tunToHev: Thread? = null
     private var hevToTun: Thread? = null
@@ -64,7 +70,7 @@ class TunDnsMux(
         TimeUnit.SECONDS,
         ArrayBlockingQueue(DNS_QUEUE_CAP),
         { r -> Thread(r, "onionvpn-dns").apply { isDaemon = true } },
-        ThreadPoolExecutor.DiscardOldestPolicy(),
+        ThreadPoolExecutor.CallerRunsPolicy(),
     ).apply {
         allowCoreThreadTimeOut(true)
     }
@@ -123,7 +129,10 @@ class TunDnsMux(
                         !FirewallBridge.engine.allowOutbound(buf, n) -> {
                             // Drop
                         }
-                        else -> writeHev(localHevOut, buf, n)
+                        else -> {
+                            stampTcpUid(buf, n)
+                            writeHev(localHevOut, buf, n)
+                        }
                     }
                 }
             } catch (error: Exception) {
@@ -202,6 +211,7 @@ class TunDnsMux(
         // FakeDNS IPs are reused across sessions — drop stale IP→host bindings.
         pendingQnames.clear()
         DnsHostnameCache.clear()
+        TcpFlowUidIndex.clear()
         runCatching {
             if (!dnsExecutor.awaitTermination(2, TimeUnit.SECONDS)) {
                 Timber.w("DNS executor did not terminate cleanly")
@@ -225,6 +235,17 @@ class TunDnsMux(
         synchronized(hevWriteLock) {
             if (!running.get()) return
             hevOut.write(buf, 0, n)
+        }
+    }
+
+    /** Stamp SYN (and first-seen dest) so SocksUidBridge can IsolateSOCKSAuth after hev CONNECT. */
+    private fun stampTcpUid(buf: ByteArray, n: Int) {
+        val info = IpPacketParser.parse(buf, n) ?: return
+        if (!info.isTcp) return
+        if (!info.isTcpSyn && TcpFlowUidIndex.hasRecent(info.dstIpInt, info.dstPort)) return
+        val uid = ownerResolver.resolveUid(info)
+        if (ConnectionOwnerResolver.isValidUid(uid)) {
+            TcpFlowUidIndex.note(info, uid)
         }
     }
 

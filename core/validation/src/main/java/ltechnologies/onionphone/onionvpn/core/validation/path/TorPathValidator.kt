@@ -70,7 +70,9 @@ object TorPathValidator {
             .filter { it.startsWith("SOCKSPort ") && it.contains("SessionGroup=${TunnelEndpoints.SESSION_GROUP_APPS}") }
             .any { it.contains("KeepAliveIsolateSOCKSAuth") }
         val guardsOk = config.contains("NumEntryGuards 2") && config.contains("NumPrimaryGuards 2")
-        val pendingOk = config.contains("MaxClientCircuitsPending 32")
+        // TorConfigWriter uses 48; keep 32 accepted for older runtime torrc.
+        val pendingOk = config.contains("MaxClientCircuitsPending 48") ||
+            config.contains("MaxClientCircuitsPending 32")
         val ok = hasSocks && hasDns && safeSocksOff && clientOnly &&
             entryGuards && socksIsolation && socksPolicy && multiSocks &&
             hasProbeGroup && keepAliveOnApps && appsNoDestPortStorm &&
@@ -83,7 +85,7 @@ object TorPathValidator {
             status = if (ok) ValidationStatus.Pass else ValidationStatus.Fail,
             detail = "$source: socks=$hasSocks dns=$hasDns multiSocks=$multiSocks " +
                 "probeGroup=$hasProbeGroup keepAliveApps=$keepAliveOnApps " +
-                "appsNoDestPort=$appsNoDestPortStorm guards2=$guardsOk pending32=$pendingOk " +
+                "appsNoDestPort=$appsNoDestPortStorm guards2=$guardsOk pendingOk=$pendingOk " +
                 "SafeSocks0=$safeSocksOff ControlSocket=$controlSocket RejectInternal=$rejectInternal " +
                 "SafeLogging=$safeLogging RefuseUnknownExits=$refuseUnknownExits " +
                 "SocksPolicy=$socksPolicy EntryGuards=$entryGuards Isolation=$socksIsolation" +

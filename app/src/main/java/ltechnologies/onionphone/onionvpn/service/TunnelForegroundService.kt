@@ -437,6 +437,7 @@ class TunnelForegroundService : Service() {
         validations: List<ValidationCheck>,
         stopTorProcesses: Boolean,
     ) {
+        domainReputation.onTorUnavailable()
         updateSnapshot(TunnelPhase.Blocking, lastError = message, validations = validations)
         val gen = OnionVpnService.nextGeneration()
         vpnBridge.startBlocking(preferences, gen)

@@ -10,15 +10,18 @@ import java.net.InetSocketAddress
 import java.net.Proxy
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -27,9 +30,11 @@ import ltechnologies.onionphone.onionvpn.core.model.DomainThreatCategory
 import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
 import ltechnologies.onionphone.onionvpn.core.tor.TorProcessManager
 import ltechnologies.onionphone.onionvpn.core.validation.path.TorSocksDns
+import okhttp3.Call
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import timber.log.Timber
+import kotlin.coroutines.coroutineContext
 
 /**
  * Maintains a **local unified domain reputation DB** under `files/domain-reputation/`:
@@ -49,6 +54,8 @@ class DomainReputationRepository @Inject constructor(
     private val index = DomainReputationIndex()
     private val updateMutex = Mutex()
     private val started = AtomicBoolean(false)
+    private val updateJob = AtomicReference<Job?>(null)
+    private val activeCall = AtomicReference<Call?>(null)
 
     private val _status = MutableStateFlow(DomainReputationStatus())
     val status: StateFlow<DomainReputationStatus> = _status.asStateFlow()
@@ -64,14 +71,14 @@ class DomainReputationRepository @Inject constructor(
     }
 
     fun requestUpdate() {
-        scope.launch { update() }
+        launchUpdate { update() }
     }
 
     fun onTorReady() {
-        scope.launch {
+        launchUpdate {
             if (!awaitProbeSocks()) {
                 Timber.w("Domain reputation: Tor probe SOCKS never became ready — keeping cache")
-                return@launch
+                return@launchUpdate
             }
             val st = _status.value
             if (!st.lastViaTor) {
@@ -80,6 +87,26 @@ class DomainReputationRepository @Inject constructor(
                 maybeAutoUpdate()
             }
         }
+    }
+
+    /** Cancel in-flight Tor downloads when the tunnel leaves Connected / probe SOCKS dies. */
+    fun onTorUnavailable() {
+        updateJob.getAndSet(null)?.cancel()
+        activeCall.getAndSet(null)?.cancel()
+        if (_status.value.updating) {
+            _status.value = _status.value.copy(
+                updating = false,
+                lastError = "Tor probe SOCKS unavailable — update aborted",
+            )
+            Timber.i("Domain reputation: aborted download (Tor SOCKS gone)")
+        }
+    }
+
+    private fun launchUpdate(block: suspend () -> Unit) {
+        updateJob.getAndSet(null)?.cancel()
+        val job = scope.launch { block() }
+        updateJob.set(job)
+        job.invokeOnCompletion { updateJob.compareAndSet(job, null) }
     }
 
     private suspend fun awaitProbeSocks(
@@ -152,7 +179,13 @@ class DomainReputationRepository @Inject constructor(
                     viaTor,
                 )
             }.onFailure { error ->
-                Timber.w(error, "Domain reputation update failed")
+                val aborted = error.message?.contains("SOCKS", ignoreCase = true) == true ||
+                    error.message?.contains("cancelled", ignoreCase = true) == true
+                if (aborted) {
+                    Timber.i("Domain reputation update aborted: %s", error.message)
+                } else {
+                    Timber.w(error, "Domain reputation update failed")
+                }
                 _status.value = _status.value.copy(
                     updating = false,
                     lastError = error.message ?: "update failed",
@@ -162,13 +195,21 @@ class DomainReputationRepository @Inject constructor(
     }
 
     /** @return true when the download used Tor probe SOCKS. */
-    private fun downloadMergeAndSwap(): Boolean {
+    private suspend fun downloadMergeAndSwap(): Boolean {
         val transport = buildClient()
         val client = transport.client
+        val expectedProbe = tor.currentProbeSocksPort()
         try {
             var requiredFailures = 0
             var fetched = 0
             for (source in DomainBlocklistCatalog.ALL) {
+                if (!coroutineContext.isActive) {
+                    throw IllegalStateException("Domain reputation update cancelled")
+                }
+                val liveProbe = tor.currentProbeSocksPort()
+                if (liveProbe == null || !tor.isRunning() || liveProbe != expectedProbe) {
+                    throw IllegalStateException("Tor probe SOCKS lost mid-update")
+                }
                 try {
                     val body = downloadBodyFirstAvailable(client, source.urls)
                     if (body.isBlank()) {
@@ -184,6 +225,14 @@ class DomainReputationRepository @Inject constructor(
                     fetched++
                     Timber.d("Domain source ok id=%s bytes=%d", source.id, body.length)
                 } catch (error: Exception) {
+                    if (isProbeGone(error) || !tor.isRunning() || tor.currentProbeSocksPort() == null) {
+                        Timber.i(
+                            "Domain source aborted id=%s (Tor SOCKS gone): %s",
+                            source.id,
+                            error.message,
+                        )
+                        throw IllegalStateException("Tor probe SOCKS lost mid-update", error)
+                    }
                     Timber.w(error, "Domain source failed id=%s required=%s", source.id, source.required)
                     if (source.required && !sourceCacheFile(source.id).isFile) {
                         requiredFailures++
@@ -222,9 +271,18 @@ class DomainReputationRepository @Inject constructor(
             if (trackingSet.isNotEmpty()) index.replaceTracking(trackingSet)
             return transport.viaTor
         } finally {
+            activeCall.getAndSet(null)?.cancel()
             client.dispatcher.executorService.shutdown()
             client.connectionPool.evictAll()
         }
+    }
+
+    private fun isProbeGone(error: Throwable): Boolean {
+        val msg = error.message.orEmpty()
+        return msg.contains("ECONNREFUSED", ignoreCase = true) ||
+            msg.contains("Malformed reply from SOCKS", ignoreCase = true) ||
+            msg.contains("Connection refused", ignoreCase = true) ||
+            msg.contains("SOCKS lost", ignoreCase = true)
     }
 
     private fun writeUnifiedDb(name: String, domains: Set<String>, kind: String) {
@@ -258,13 +316,19 @@ class DomainReputationRepository @Inject constructor(
     }
 
     private fun fetchBody(client: OkHttpClient, url: String): String {
-        val response = client.newCall(
+        val call = client.newCall(
             Request.Builder()
                 .url(url)
                 .header("User-Agent", "OnionVPN-DomainReputation/1.0")
                 .header("Accept", "text/plain,*/*")
                 .build(),
-        ).execute()
+        )
+        activeCall.set(call)
+        val response = try {
+            call.execute()
+        } finally {
+            activeCall.compareAndSet(call, null)
+        }
         return response.use {
             if (!it.isSuccessful) {
                 throw IllegalStateException("HTTP ${it.code} for $url")

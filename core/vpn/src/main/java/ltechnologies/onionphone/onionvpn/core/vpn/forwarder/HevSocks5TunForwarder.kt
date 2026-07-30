@@ -7,6 +7,7 @@ import android.system.Os
 import android.system.OsConstants
 import java.io.File
 import java.io.FileDescriptor
+import java.net.Socket
 import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -21,14 +22,15 @@ import ltechnologies.onionphone.onionvpn.core.vpn.profile.TunForwarder
 import timber.log.Timber
 
 /**
- * Routes TUN traffic through Tor SOCKS using hev-socks5-tunnel.
+ * Routes TUN TCP through hev-socks5-tunnel → [SocksUidBridge] → Tor apps SocksPort.
  *
- * - [DnsResolverMode.FAKE_IP_SOCKS5A]: hev mapdns FakeDNS on [TunnelEndpoints.VPN_DNS_ADDRESS]:53
- * - [DnsResolverMode.DNSCRYPT_MUX]: no mapdns — DNS handled by [TunDnsMux] toward DNSCrypt
+ * hev provides the native TCP stack; the bridge adds per-UID IsolateSOCKSAuth (`u{uid}`).
+ * DNS: [TunDnsMux] divert to DNSCrypt / Tor Automap (UDP blackhole otherwise).
  */
 class HevSocks5TunForwarder(
     private val context: Context,
     private val dnsMode: DnsResolverMode = DnsResolverMode.DNSCRYPT_MUX,
+    private val protectSocket: ((Socket) -> Boolean)? = null,
     private val onFatal: ((Throwable) -> Unit)? = null,
 ) : TunForwarder {
     private val supervisor = SupervisorJob()
@@ -36,6 +38,7 @@ class HevSocks5TunForwarder(
     private val worker = AtomicReference<Job?>(null)
     private var tunDup: ParcelFileDescriptor? = null
     private var dnsMux: TunDnsMux? = null
+    private var uidBridge: SocksUidBridge? = null
 
     override fun start(
         tunFd: ParcelFileDescriptor,
@@ -45,34 +48,42 @@ class HevSocks5TunForwarder(
         torDnsPort: Int,
     ) {
         stop()
-        // Always mux TUN↔hev so PacketFirewall can inspect both DNSCRYPT_MUX and FakeDNS paths.
         val useMapDns = dnsMode == DnsResolverMode.FAKE_IP_SOCKS5A
         val divertDns = dnsMode == DnsResolverMode.DNSCRYPT_MUX
-        startWithMux(tunFd, socksHost, socksPort, dnsCryptPort, torDnsPort, useMapDns, divertDns)
+        startWithMux(tunFd, socksPort, dnsCryptPort, torDnsPort, useMapDns, divertDns)
     }
 
     private fun startWithMux(
         tunFd: ParcelFileDescriptor,
-        socksHost: String,
-        socksPort: Int,
+        torSocksPort: Int,
         dnsCryptPort: Int,
         torDnsPort: Int,
         useMapDns: Boolean,
         divertDns: Boolean,
     ) {
-        // SOCK_DGRAM (not STREAM): preserve IP packet boundaries for hev.
+        // Bridge before hev so the first SOCKS CONNECT never hits a closed port.
+        val bridge = SocksUidBridge(
+            context = context,
+            protectSocket = protectSocket,
+            onFatal = onFatal,
+        )
+        bridge.start(torSocks = torSocksPort)
+        uidBridge = bridge
+
         val pair = createPacketSocketPair()
         val hevEnd = pair[0]
         val muxEnd = pair[1]
         tunDup = hevEnd
 
+        val bridgeHost = TunnelEndpoints.LOOPBACK
+        val bridgePort = TunnelEndpoints.SOCKS_UID_BRIDGE_PORT
         val job = scope.launch {
             val configFile = File(context.filesDir, "hev-socks5-tunnel.yaml")
-            configFile.writeText(buildConfig(socksHost, socksPort, useMapDns = useMapDns))
+            configFile.writeText(buildConfig(bridgeHost, bridgePort, useMapDns = useMapDns))
             Timber.i(
                 "Starting hev-socks5-tunnel (mux/dgram) on fd=${hevEnd.fd} " +
-                    "socks=$socksPort dnscrypt=$dnsCryptPort torDns=$torDnsPort " +
-                    "mapdns=$useMapDns divertDns=$divertDns",
+                    "bridge=$bridgeHost:$bridgePort torSocks=$torSocksPort " +
+                    "dnscrypt=$dnsCryptPort torDns=$torDnsPort mapdns=$useMapDns divertDns=$divertDns",
             )
             try {
                 hev.sockstun.TProxyService.TProxyStartService(configFile.absolutePath, hevEnd.fd)
@@ -89,6 +100,7 @@ class HevSocks5TunForwarder(
         worker.set(job)
 
         val mux = TunDnsMux(
+            context = context,
             tunFd = tunFd.dup(),
             hevFd = muxEnd,
             dnsCryptHost = TunnelEndpoints.LOOPBACK,
@@ -115,8 +127,9 @@ class HevSocks5TunForwarder(
             Timber.w(error, "Failed to stop hev-socks5-tunnel")
         }
         worker.getAndSet(null)?.cancel()
-        // Cancel children; keep supervisor alive for subsequent start().
         supervisor.cancelChildren()
+        uidBridge?.stop()
+        uidBridge = null
         tunDup?.close()
         tunDup = null
     }
@@ -125,21 +138,13 @@ class HevSocks5TunForwarder(
         appendLine("tunnel:")
         appendLine("  mtu: ${TunnelEndpoints.VPN_MTU}")
         appendLine("  ipv4: ${TunnelEndpoints.VPN_CLIENT_ADDRESS}")
-        // Orbot: declare IPv6 on hev so ::/0 packets entering the TUN are handled
-        // (SOCKS or drop) instead of ignored / leaked.
         appendLine("  ipv6: '${TunnelEndpoints.VPN_CLIENT_ADDRESS_V6}'")
-        // Tor VPN threat model: ICMP/ping is not useful over Tor and can fingerprint.
         appendLine("  icmp: 'off'")
         appendLine("socks5:")
         appendLine("  port: $socksPort")
         appendLine("  address: '$socksHost'")
-        // Force UDP associate over TCP — no clearnet UDP side-channel.
         appendLine("  udp: 'tcp'")
-        // IsolateSOCKSAuth: hev only supports one static username/password for all flows.
-        // OnionVPN data plane uses UidIsolatingTunForwarder (per-UID u{uid}/p{uid}) instead.
-        // Kept for offline/config experiments — do not use as the Connected VPN forwarder.
-        appendLine("  username: '${TunnelEndpoints.SOCKS_ISOLATION_USER}'")
-        appendLine("  password: '${TunnelEndpoints.SOCKS_ISOLATION_PASS}'")
+        // No username — SocksUidBridge accepts NO AUTH and adds u{uid} toward Tor.
         if (useMapDns) {
             appendLine("mapdns:")
             appendLine("  address: ${TunnelEndpoints.VPN_DNS_ADDRESS}")
@@ -155,10 +160,6 @@ class HevSocks5TunForwarder(
     }
 
     companion object {
-        /**
-         * Datagram socketpair so each TUN IP packet stays a discrete message
-         * (SOCK_STREAM coalesces packets and breaks hev).
-         */
         fun createPacketSocketPair(): Array<ParcelFileDescriptor> {
             val fd0 = FileDescriptor()
             val fd1 = FileDescriptor()

@@ -95,6 +95,13 @@ class MainActivity : FragmentActivity() {
                     LaunchedEffect(preferences.allowScreenshots) {
                         WindowSecureHelper.apply(this@MainActivity, preferences.allowScreenshots)
                     }
+                    // Auto-start tunnel on app open (before / regardless of UI lock).
+                    LaunchedEffect(Unit) {
+                        val prefs = viewModel.awaitStoredPreferences()
+                        if (viewModel.shouldAutoStartTunnel(prefs)) {
+                            requestNotificationsThenStart()
+                        }
+                    }
 
                     AppLockGate(
                         appLockManager = appLockManager,

@@ -43,6 +43,7 @@ class TunnelPreferencesStore @Inject constructor(
         val firewallTempMin = intPreferencesKey("firewall_temp_min")
         val appLock = booleanPreferencesKey("app_lock")
         val allowScreenshots = booleanPreferencesKey("allow_screenshots")
+        val autoStartOnLaunch = booleanPreferencesKey("auto_start_on_launch")
     }
 
     val preferences: Flow<TunnelPreferences> = context.tunnelDataStore.data.map { prefs ->
@@ -71,6 +72,7 @@ class TunnelPreferencesStore @Inject constructor(
             prefs[Keys.firewallTempMin] = next.firewallTempMinutes
             prefs[Keys.appLock] = next.appLockEnabled
             prefs[Keys.allowScreenshots] = next.allowScreenshots
+            prefs[Keys.autoStartOnLaunch] = next.autoStartOnAppLaunch
         }
     }
 
@@ -98,5 +100,6 @@ class TunnelPreferencesStore @Inject constructor(
         firewallTempMinutes = this[Keys.firewallTempMin] ?: 5,
         appLockEnabled = this[Keys.appLock] ?: true,
         allowScreenshots = this[Keys.allowScreenshots] ?: false,
+        autoStartOnAppLaunch = this[Keys.autoStartOnLaunch] ?: true,
     )
 }

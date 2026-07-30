@@ -10,6 +10,7 @@ import java.io.File
 import javax.inject.Inject
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import ltechnologies.onionphone.onionvpn.core.dnscrypt.DnsCryptProcessManager
@@ -39,10 +40,22 @@ class MainViewModel @Inject constructor(
         initialValue = TunnelPreferences(),
     )
 
+    /** First DataStore emission (not the Compose initialValue). */
+    suspend fun awaitStoredPreferences(): TunnelPreferences = preferencesStore.preferences.first()
+
     fun prepareVpnPermission(activity: Activity): Intent? = VpnService.prepare(activity)
 
     fun startTunnel() {
         orchestrator.start(preferences.value)
+    }
+
+    /** Idle / Error only — do not interrupt Connected, Blocking, or in-flight start. */
+    fun shouldAutoStartTunnel(prefs: TunnelPreferences, snap: TunnelSnapshot = snapshot.value): Boolean {
+        if (!prefs.autoStartOnAppLaunch) return false
+        return when (snap.phase) {
+            TunnelPhase.Idle, TunnelPhase.Error -> true
+            else -> false
+        }
     }
 
     fun stopTunnel() {

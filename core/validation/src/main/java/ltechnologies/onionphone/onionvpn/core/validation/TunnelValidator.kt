@@ -147,7 +147,7 @@ object TunnelValidator {
             "android.vpn.competing",
             "android.vpn.permission",
             -> true
-            // Another app owns Always-on — our TUN can be displaced.
+            // Only when another app owns Always-on (tripsKillSwitch set by inspector).
             "android.vpn.always_on" -> true
             // Soft: DNSCrypt / DNSPort / SOCKS5A example.com / underlying / timeout / config cosmetics.
             else -> false
@@ -156,8 +156,8 @@ object TunnelValidator {
 
 
     /**
-     * Connected data plane is [ltechnologies.onionphone.onionvpn.core.vpn.forwarder.UidIsolatingTunForwarder]
-     * (per-UID IsolateSOCKSAuth). hev yaml is no longer required.
+     * Connected data plane: hev → SocksUidBridge → Tor apps SocksPort (per-UID auth).
+     * [OnionVpnService.hevSocksPort] stores the Tor apps SocksPort (not the bridge listen port).
      */
     private fun validateUidForwarderWiring(ports: TunnelRuntimePorts): ValidationCheck {
         val alive = OnionVpnService.tunForwarderAlive.value
@@ -168,10 +168,11 @@ object TunnelValidator {
         val ok = socksOk && dnsOk
         return ValidationCheck(
             id = "uid.forwarder.wiring",
-            label = "UID SOCKS forwarder ↔ Tor (per-app auth)",
+            label = "TUN forwarder ↔ Tor (hev + UID SOCKS bridge)",
             status = if (ok) ValidationStatus.Pass else ValidationStatus.Fail,
-            detail = "alive=$alive socks=$socks (want ${ports.torSocksPort}) " +
-                "dnsCrypt=$dns (want ${ports.dnsCryptListenPort})",
+            detail = "alive=$alive torSocks=$socks (want ${ports.torSocksPort}) " +
+                "dnsCrypt=$dns (want ${ports.dnsCryptListenPort}) " +
+                "bridge=:${TunnelEndpoints.SOCKS_UID_BRIDGE_PORT}",
             tripsKillSwitch = true,
         )
     }
@@ -277,7 +278,7 @@ object TunnelValidator {
             label = "DNSCrypt-over-Tor (no clearnet DNS)",
             status = ValidationStatus.Pass,
             detail = "mode=$dnsMode: any UDP/53 diverted to DNSCrypt via Tor SOCKS; " +
-                "TCP via UID-isolating SOCKS (u{uid})",
+                "TCP via hev → SocksUidBridge (u{uid})",
             tripsKillSwitch = false,
         )
     }

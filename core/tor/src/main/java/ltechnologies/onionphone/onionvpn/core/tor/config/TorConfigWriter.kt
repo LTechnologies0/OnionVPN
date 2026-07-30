@@ -152,7 +152,7 @@ object TorConfigWriter {
         appendLine("StrictNodes 0")
 
         // Cap pending builds — Isolate* + high pending caused circuit storms on app fan-out.
-        appendLine("MaxClientCircuitsPending 32")
+        appendLine("MaxClientCircuitsPending 48")
         appendLine("CircuitBuildTimeout 60")
         appendLine("LearnCircuitBuildTimeout 1")
         appendLine("SocksTimeout 120")

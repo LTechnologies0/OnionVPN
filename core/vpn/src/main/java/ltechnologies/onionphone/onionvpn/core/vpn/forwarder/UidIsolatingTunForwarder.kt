@@ -62,6 +62,7 @@ class UidIsolatingTunForwarder(
         tunDup = engineEnd
 
         dnsMux = TunDnsMux(
+            context = context,
             tunFd = tunFd.dup(),
             hevFd = muxEnd,
             dnsCryptHost = TunnelEndpoints.LOOPBACK,

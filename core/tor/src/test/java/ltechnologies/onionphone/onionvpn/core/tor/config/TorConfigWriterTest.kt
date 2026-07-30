@@ -29,7 +29,7 @@ class TorConfigWriterTest {
         assertTrue(torrc.contains("IsolateClientProtocol"))
         assertTrue(torrc.contains("IsolateDestAddr"))
         assertTrue(torrc.contains("IsolateSOCKSAuth"))
-        assertTrue(torrc.contains("MaxClientCircuitsPending 32"))
+        assertTrue(torrc.contains("MaxClientCircuitsPending 48"))
         assertTrue(torrc.contains("MaxCircuitDirtiness 600"))
         assertTrue(torrc.contains("NumEntryGuards 2"))
         assertTrue(torrc.contains("NumPrimaryGuards 2"))

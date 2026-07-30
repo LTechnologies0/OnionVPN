@@ -248,6 +248,17 @@ fun SettingsScreen(
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+        PrefSwitch(
+            label = "Start tunnel when app opens",
+            checked = local.autoStartOnAppLaunch,
+            onChecked = { commit(local.copy(autoStartOnAppLaunch = it), restart = false) },
+        )
+        Text(
+            text = "Requests VPN permission if needed, then brings up Tor + DNSCrypt + TUN. " +
+                "Runs even while the UI lock screen is showing. Turn off to start manually.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
 
         SectionHeader(
             title = "Interactive firewall",
