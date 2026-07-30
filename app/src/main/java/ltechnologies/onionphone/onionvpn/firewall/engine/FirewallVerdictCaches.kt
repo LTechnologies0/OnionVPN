@@ -88,7 +88,7 @@ internal class FirewallVerdictCaches {
     }
 
     private fun removeDecisionKey(key: Long) {
-        decisionCache.remove(key)
+        // Reverse-index only — caller owns decisionCache iterator remove.
         destDecisionKeys.values.forEach { it.remove(key) }
     }
 

@@ -41,15 +41,7 @@ class SocksUidBridge(
     private val torSocksPort = AtomicInteger(0)
     private val serverRef = AtomicReference<ServerSocket?>(null)
     private var acceptThread: Thread? = null
-    private val clientExecutor = ThreadPoolExecutor(
-        0,
-        64,
-        60L,
-        TimeUnit.SECONDS,
-        ArrayBlockingQueue(128),
-        { r -> Thread(r, "onionvpn-uid-socks").apply { isDaemon = true } },
-        ThreadPoolExecutor.CallerRunsPolicy(),
-    ).apply { allowCoreThreadTimeOut(true) }
+    private var clientExecutor = newClientExecutor()
     private val denyLogSample = AtomicLong(0)
 
     val isRunning: Boolean get() = running.get()
@@ -63,6 +55,9 @@ class SocksUidBridge(
     fun start(torSocks: Int) {
         updateTorSocks(torSocks)
         if (!running.compareAndSet(false, true)) return
+        if (clientExecutor.isShutdown || clientExecutor.isTerminated) {
+            clientExecutor = newClientExecutor()
+        }
         TcpFlowUidIndex.clear()
         val server = try {
             ServerSocket(listenPort, 64, InetAddress.getByName(TunnelEndpoints.LOOPBACK))
@@ -83,7 +78,11 @@ class SocksUidBridge(
             while (running.get()) {
                 try {
                     val client = server.accept()
-                    clientExecutor.execute { handleClient(client) }
+                    try {
+                        clientExecutor.execute { handleClient(client) }
+                    } catch (_: java.util.concurrent.RejectedExecutionException) {
+                        runCatching { client.close() }
+                    }
                 } catch (_: SocketException) {
                     if (!running.get()) break
                 } catch (e: Exception) {
@@ -254,6 +253,18 @@ class SocksUidBridge(
         }
         t.join(5_000)
     }
+
+    private fun newClientExecutor(): ThreadPoolExecutor =
+        ThreadPoolExecutor(
+            0,
+            64,
+            60L,
+            TimeUnit.SECONDS,
+            ArrayBlockingQueue(128),
+            { r -> Thread(r, "onionvpn-uid-socks").apply { isDaemon = true } },
+            // Never run handleClient on accept thread (would stall accept under load).
+            ThreadPoolExecutor.AbortPolicy(),
+        ).apply { allowCoreThreadTimeOut(true) }
 
     companion object {
         private const val UID_RETRY = 2

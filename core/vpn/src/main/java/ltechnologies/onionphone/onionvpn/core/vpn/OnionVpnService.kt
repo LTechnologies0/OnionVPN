@@ -51,7 +51,7 @@ class OnionVpnService : VpnService() {
             }
             return START_STICKY
         }
-        val action = intent!!.action!!
+        val action = intent?.action ?: return START_STICKY
         executor.execute {
             when (action) {
                 ACTION_START -> applyProfile(intent, startForwarder = true)
@@ -65,7 +65,13 @@ class OnionVpnService : VpnService() {
     }
 
     override fun onDestroy() {
-        executor.execute { stopTunnel() }
+        // Run teardown on the VPN thread and wait — shutdown() alone can drop stopTunnel.
+        try {
+            executor.submit { stopTunnel() }.get(8, java.util.concurrent.TimeUnit.SECONDS)
+        } catch (e: Exception) {
+            Timber.w(e, "VPN onDestroy stopTunnel wait failed — forcing local cleanup")
+            runCatching { stopTunnel() }
+        }
         executor.shutdown()
         super.onDestroy()
     }
