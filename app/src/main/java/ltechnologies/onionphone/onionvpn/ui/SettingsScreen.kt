@@ -415,9 +415,10 @@ fun SettingsScreen(
                         "circuits stay sticky; dirtiness mainly affects non-auth streams. " +
                         "Default Stable=600s. Live SETCONF when connected (no Tor restart)."
                 TorEngine.ARTI ->
-                    "Arti (Rust) client: shared SOCKS + DNS, app-side .onion Automap, " +
-                        "new identity restarts the runtime. No classic ControlSocket / circuits UI. " +
-                        "Circuit timing prefs apply after restart only if mapped later."
+                    "Arti (Rust) via arti-mobile: SOCKS+DNS, app-side .onion Automap, " +
+                        "NEWNYM/DROPGUARDS/RELOAD/bridges = runtime restart (doc 1:1). " +
+                        "No ControlSocket — circuits UI / Entry·Exit·Exclude / Conjure / " +
+                        "live circuit timing are C Tor only (arti-mobile JNI limitation)."
             },
         )
         Text(
@@ -691,6 +692,14 @@ fun SettingsScreen(
             text = "Node countries (StrictNodes)",
             style = MaterialTheme.typography.titleMedium,
         )
+        if (!local.torEngine.capabilities.nodePrefs) {
+            Text(
+                text = "Entry/Exit/ExcludeNodes are C Tor only — arti-mobile JNI has no " +
+                    "StreamPrefs.exit_country / node-set API. Switch to C Tor to constrain paths.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        } else {
         Text(
             text = "Pick countries / federations. Tor syntax: {cc},{cc}",
             style = MaterialTheme.typography.bodySmall,
@@ -749,6 +758,7 @@ fun SettingsScreen(
                 },
                 onDismiss = { pickingExclude = false },
             )
+        }
         }
         if (local.torEngine.capabilities.liveSetConf || local.torEngine.capabilities.torrcConfig) {
             OutlinedTextField(

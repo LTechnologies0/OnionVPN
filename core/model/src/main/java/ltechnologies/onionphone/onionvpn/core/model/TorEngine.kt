@@ -59,6 +59,16 @@ data class TorEngineCapabilities(
     val torrcConfig: Boolean,
     /** Conjure pluggable transport. */
     val conjureBridges: Boolean,
+    /**
+     * EntryNodes / ExitNodes / ExcludeNodes honored by the engine.
+     * Arti: false — StreamPrefs.exit_country not exposed by arti-mobile JNI.
+     */
+    val nodePrefs: Boolean,
+    /**
+     * Bridges applied at engine start (C Tor torrc / Arti JNI bridgeLines).
+     * Live SETCONF still requires [liveSetConf]; otherwise restart applies them.
+     */
+    val bridgesAtStart: Boolean,
 ) {
     companion object {
         val LITTLE_T = TorEngineCapabilities(
@@ -72,6 +82,8 @@ data class TorEngineCapabilities(
             dormantSignals = true,
             torrcConfig = true,
             conjureBridges = true,
+            nodePrefs = true,
+            bridgesAtStart = true,
         )
 
         val ARTI = TorEngineCapabilities(
@@ -85,6 +97,8 @@ data class TorEngineCapabilities(
             dormantSignals = false,
             torrcConfig = false,
             conjureBridges = false,
+            nodePrefs = false,
+            bridgesAtStart = true,
         )
     }
 }

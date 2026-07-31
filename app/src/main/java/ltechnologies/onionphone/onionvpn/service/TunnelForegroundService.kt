@@ -42,6 +42,8 @@ import ltechnologies.onionphone.onionvpn.core.tor.TorProcessManager
 import ltechnologies.onionphone.onionvpn.core.validation.TunnelValidator
 import ltechnologies.onionphone.onionvpn.core.validation.path.TorPathValidator
 import ltechnologies.onionphone.onionvpn.core.vpn.OnionVpnService
+import ltechnologies.onionphone.onionvpn.core.vpn.dns.DnsHostnameCache
+import ltechnologies.onionphone.onionvpn.core.vpn.dns.OnionAutomapAllocator
 import ltechnologies.onionphone.onionvpn.core.vpn.net.TorBandwidthSampler
 import ltechnologies.onionphone.onionvpn.core.vpn.pac.PacProxyServer
 import ltechnologies.onionphone.onionvpn.firewall.InteractiveFirewallEngine
@@ -96,6 +98,10 @@ class TunnelForegroundService : Service() {
     override fun onCreate() {
         super.onCreate()
         notifications.createChannel()
+        tor.onClientDnsCacheClear = {
+            DnsHostnameCache.clear()
+            OnionAutomapAllocator.clear()
+        }
         OnionVpnService.onUnderlyingNetworkChanged = {
             // Never block the main looper with ControlPort / Arti I/O.
             scope.launch(Dispatchers.IO) {
@@ -699,12 +705,15 @@ class TunnelForegroundService : Service() {
                 val builtLive = circuitLifecycle.liveCircuits.value.count {
                     it.info.status.equals("BUILT", ignoreCase = true)
                 }
-                if (phase == TunnelPhase.Connected && st.connected) {
+                val useControlTraffic = preferences.torEngine.capabilities.classicControlPlane &&
+                    st.connected
+                if (phase == TunnelPhase.Connected && useControlTraffic) {
                     throughputTracker.formatAggregate(
                         st,
                         builtCircuits = if (st.connected) builtLive else st.builtCircuits,
                     )
                 } else if (phase == TunnelPhase.Connected) {
+                    // Arti / no control traffic: UID TrafficStats is the 1:1 GETINFO traffic stand-in.
                     throughputTracker.sampleUidFallback()
                 }
                 updateSnapshot(phase)

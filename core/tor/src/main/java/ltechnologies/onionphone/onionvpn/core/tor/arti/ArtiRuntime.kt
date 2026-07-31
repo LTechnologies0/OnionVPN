@@ -135,6 +135,20 @@ internal class ArtiRuntime(
         start(ports, prefs)
     }
 
+    /**
+     * Apply new preferences (bridges / timing stored for status) and restart.
+     * Bridges are re-passed to JNI — the arti-mobile equivalent of live SETCONF Bridge.
+     */
+    suspend fun restartWithPreferences(preferences: TunnelPreferences) {
+        val ports = lastPorts ?: throw IOException("Arti has no runtime ports for reconfigure")
+        Timber.i("Arti reconfigure+restart bridges=%d", TorBridgeConfig.parseLines(preferences.torBridges).size)
+        start(ports, preferences)
+    }
+
+    fun currentPreferences(): TunnelPreferences? = lastPreferences
+
+    fun currentPorts(): TunnelRuntimePorts? = lastPorts
+
     fun stop() {
         if (!running) {
             runCatching { ArtiMobileNative.stop() }

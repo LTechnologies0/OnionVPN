@@ -23,6 +23,7 @@ import ltechnologies.onionphone.onionvpn.core.tor.control.TorControlClient
 import ltechnologies.onionphone.onionvpn.core.tor.control.TorControlCompat
 import ltechnologies.onionphone.onionvpn.core.tor.control.catalog.TorControlCatalog
 import ltechnologies.onionphone.onionvpn.core.tor.control.model.TorControlStatus
+import ltechnologies.onionphone.onionvpn.core.tor.lifecycle.TorDnsResolve
 import ltechnologies.onionphone.onionvpn.core.tor.lifecycle.TorReadiness
 import okhttp3.Dns
 import okhttp3.OkHttpClient
@@ -50,9 +51,9 @@ import timber.log.Timber
  *
  * **Arti start pipeline:** stop → JNI start → wait SOCKS/DNS listeners → synthetic status.
  *
- * Control-plane ops go through Arti-aware wrappers ([newNym], [onNetworkChanged],
- * [signalActive]/ [clearDnsCache], …) mapped by [TorControlCompat]. Prefer those
- * over raw [control] from app code; [control.isConnected] stays false on Arti.
+ * Control-plane ops go through Arti-aware wrappers mapped by [TorControlCompat]
+ * (doc-backed little-t ↔ Arti 1:1 matrix). Prefer those over raw [control] from app
+ * code; [control.isConnected] stays false on Arti.
  *
  * Imported by: DI, TunnelForegroundService, MainViewModel, OnionVpnApplication.
  */
@@ -75,6 +76,12 @@ class TorProcessManager(
 
     val controlStatus: StateFlow<TorControlStatus> = control.status
     val controlEvents = control.events
+
+    /**
+     * App-layer CLEARDNSCACHE / NEWNYM hook — clear DnsHostnameCache + OnionAutomap
+     * (vpn module) so Arti Automap store matches control-spec client DNS clear.
+     */
+    var onClientDnsCacheClear: (() -> Unit)? = null
 
     val configDirectory: File
         get() = File(context.filesDir, "tor").also { it.mkdirs() }
@@ -252,6 +259,7 @@ class TorProcessManager(
                 }
                 runCatching {
                     arti.restartForNewIdentity()
+                    clearAppDnsCaches()
                     publishArtiReadyStatus()
                 }.fold(
                     onSuccess = {
@@ -300,9 +308,12 @@ class TorProcessManager(
         return control.setDormant()
     }
 
-    /** SIGNAL CLEARDNSCACHE — Arti: soft listener re-probe. */
+    /** SIGNAL CLEARDNSCACHE — Arti: clear app Automap/DNS caches + soft re-probe. */
     fun clearDnsCache(): Result<Unit> {
-        if (activeEngine == TorEngine.ARTI) return onNetworkChanged()
+        if (activeEngine == TorEngine.ARTI) {
+            clearAppDnsCaches()
+            return onNetworkChanged()
+        }
         if (!control.isConnected) return Result.failure(IOException("control not connected"))
         return control.clearDnsCache()
     }
@@ -343,15 +354,21 @@ class TorProcessManager(
 
     /**
      * Live SETCONF MaxCircuitDirtiness / NewCircuitPeriod.
-     * Arti: no-op success (prefs already persisted; no live knobs in arti-mobile).
+     * Arti: prefs updated for next C Tor switch; arti-mobile JNI cannot set
+     * circuit_timing.max_dirtiness — documented ENGINE_LIMITATION / NOOP_OK.
      */
     fun applyCircuitTimingLive(
         maxCircuitDirtinessSec: Int,
         newCircuitPeriodSec: Int,
     ): Result<Unit> {
+        preferences = preferences.copy(
+            torMaxCircuitDirtinessSec = maxCircuitDirtinessSec,
+            torNewCircuitPeriodSec = newCircuitPeriodSec,
+        )
         if (activeEngine == TorEngine.ARTI) {
             Timber.i(
-                "Arti circuit timing no-op (persisted prefs dirt=%ds period=%ds)",
+                "Arti circuit timing stored only (dirt=%ds period=%ds) — " +
+                    "arti-mobile JNI has no circuit_timing knob",
                 maxCircuitDirtinessSec,
                 newCircuitPeriodSec,
             )
@@ -390,9 +407,21 @@ class TorProcessManager(
         return control.extendNewCircuit()
     }
 
-    fun closeBuiltCircuits(): Result<Int> {
-        requireClassic("CLOSECIRCUIT")?.let { return Result.failure(it.exceptionOrNull()!!) }
-        return control.closeBuiltCircuits()
+    /**
+     * Close all built circuits. Arti: NEWNYM-equivalent restart (semantic 1:1).
+     */
+    suspend fun closeBuiltCircuits(): Result<Int> = withContext(Dispatchers.IO) {
+        when (activeEngine) {
+            TorEngine.ARTI -> {
+                newNym().map { 0 }
+            }
+            TorEngine.LITTLE_T -> {
+                if (!control.isConnected) {
+                    return@withContext Result.failure(IOException("control not connected"))
+                }
+                control.closeBuiltCircuits()
+            }
+        }
     }
 
     /**
@@ -428,6 +457,7 @@ class TorProcessManager(
             TorEngine.ARTI -> {
                 runCatching {
                     arti.restartHard()
+                    clearAppDnsCaches()
                     publishArtiReadyStatus()
                 }.fold(
                     onSuccess = {
@@ -484,31 +514,57 @@ class TorProcessManager(
     }
 
     fun refreshControlTraffic() {
+        // Arti: GETINFO traffic unsupported — TunnelThroughputTracker uses UID TrafficStats.
         if (!isClassicControlConnected()) return
         control.refreshTraffic()
     }
 
     /**
-     * Live SETCONF bridges. Arti: requires tunnel restart (document via failure).
+     * Live SETCONF bridges. Arti: restart with new bridgeLines (semantic 1:1 apply).
      */
-    fun setBridgesLive(bridgeText: String): Result<Unit> {
+    suspend fun setBridgesLive(bridgeText: String): Result<Unit> = withContext(Dispatchers.IO) {
+        preferences = preferences.copy(torBridges = bridgeText)
         if (activeEngine == TorEngine.ARTI) {
-            return Result.failure(
-                IOException("Arti bridges require tunnel restart (no live SETCONF)"),
+            if (!arti.isRunning()) {
+                return@withContext Result.failure(IOException("Arti not running"))
+            }
+            return@withContext runCatching {
+                arti.restartWithPreferences(preferences)
+                clearAppDnsCaches()
+                publishArtiReadyStatus()
+            }.fold(
+                onSuccess = {
+                    Timber.i("Arti bridges applied via restart")
+                    Result.success(Unit)
+                },
+                onFailure = { e ->
+                    Timber.w(e, "Arti bridges restart failed")
+                    Result.failure(e)
+                },
             )
         }
-        if (!control.isConnected) return Result.failure(IOException("control not connected"))
+        if (!control.isConnected) {
+            return@withContext Result.failure(IOException("control not connected"))
+        }
         val lines = TorBridgeConfig.parseLines(bridgeText)
-        return control.setBridges(lines).also {
+        control.setBridges(lines).also {
             it.onSuccess { Timber.i("SETCONF bridges live count=%d", lines.size) }
         }
     }
 
-    /** Live SETCONF Entry/Exit/ExcludeNodes — Arti: requires restart. */
+    /**
+     * Live SETCONF Entry/Exit/ExcludeNodes.
+     * Arti: ENGINE_LIMITATION — not in arti-mobile JNI (fail closed).
+     */
     fun setNodePrefsLive(entry: String, exit: String, exclude: String): Result<Unit> {
+        preferences = preferences.copy(
+            torEntryNodes = entry,
+            torExitNodes = exit,
+            torExcludeNodes = exclude,
+        )
         if (activeEngine == TorEngine.ARTI) {
             return Result.failure(
-                IOException("Arti node prefs require tunnel restart (not in arti-mobile API)"),
+                IOException(TorControlCompat.unsupportedMessage("SETCONF_nodes")),
             )
         }
         if (!control.isConnected) return Result.failure(IOException("control not connected"))
@@ -521,24 +577,50 @@ class TorProcessManager(
         return control.setGeoIpFiles(geoIpPath, geoIp6Path)
     }
 
-    /** control-spec RESOLVE — unsupported on Arti; use SOCKS5A / DNSPort. */
-    suspend fun resolveHostname(hostname: String, timeoutMs: Long = 15_000): Result<String> {
-        requireClassic("RESOLVE")?.let { return Result.failure(it.exceptionOrNull()!!) }
-        return control.resolve(hostname, timeoutMs)
-    }
-
-    fun signalReload(): Result<Unit> {
-        if (activeEngine == TorEngine.ARTI) {
-            return Result.failure(IOException("Arti RELOAD requires tunnel restart"))
+    /**
+     * control-spec RESOLVE — Arti: DNS A query via DNSPort (app-layer 1:1).
+     */
+    suspend fun resolveHostname(hostname: String, timeoutMs: Long = 15_000): Result<String> =
+        withContext(Dispatchers.IO) {
+            when (activeEngine) {
+                TorEngine.ARTI -> {
+                    val port = runtimePorts?.torDnsPort
+                        ?: return@withContext Result.failure(IOException("Arti DNSPort unknown"))
+                    runCatching {
+                        TorDnsResolve.resolveA(
+                            hostname = hostname,
+                            dnsPort = port,
+                            timeoutMs = timeoutMs.toInt().coerceIn(500, 60_000),
+                        )
+                    }
+                }
+                TorEngine.LITTLE_T -> {
+                    if (!control.isConnected) {
+                        return@withContext Result.failure(IOException("control not connected"))
+                    }
+                    control.resolve(hostname, timeoutMs)
+                }
+            }
         }
-        if (!control.isConnected) return Result.failure(IOException("control not connected"))
-        return control.reload()
+
+    /** SIGNAL RELOAD — Arti: hard restart (semantic 1:1 with HUP/reload). */
+    suspend fun signalReload(): Result<Unit> = withContext(Dispatchers.IO) {
+        if (activeEngine == TorEngine.ARTI) return@withContext recoverNetworkHard()
+        if (!control.isConnected) {
+            return@withContext Result.failure(IOException("control not connected"))
+        }
+        control.reload()
     }
 
     fun signalHeartbeat(): Result<Unit> {
         if (activeEngine == TorEngine.ARTI) return Result.success(Unit)
         if (!control.isConnected) return Result.failure(IOException("control not connected"))
         return control.heartbeat()
+    }
+
+    private fun clearAppDnsCaches() {
+        runCatching { onClientDnsCacheClear?.invoke() }
+            .onFailure { Timber.w(it, "onClientDnsCacheClear failed") }
     }
 
     private fun publishArtiReadyStatus() {

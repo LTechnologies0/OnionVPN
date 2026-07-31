@@ -44,5 +44,9 @@ class TorEnginePortAllocatorTest {
         assertTrue(a.newIdentity)
         assertFalse(a.circuitInspection)
         assertFalse(a.conjureBridges)
+        assertFalse(a.nodePrefs)
+        assertTrue(a.bridgesAtStart)
+        assertTrue(c.nodePrefs)
+        assertTrue(c.bridgesAtStart)
     }
 }
