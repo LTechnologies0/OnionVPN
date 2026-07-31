@@ -38,6 +38,7 @@ class TunnelOrchestrator @Inject constructor(
                 putExtra(TunnelForegroundService.EXTRA_DNS_NOFILTER, preferences.dnsCryptRequireNoFilter)
                 putExtra(TunnelForegroundService.EXTRA_DNS_FORCE_TCP, preferences.dnsCryptForceTcp)
                 putExtra(TunnelForegroundService.EXTRA_DNS_DNSSEC, preferences.dnsCryptRequireDnssec)
+                putExtra(TunnelForegroundService.EXTRA_NO_LOGS, preferences.noLogsEnabled)
             },
         )
     }

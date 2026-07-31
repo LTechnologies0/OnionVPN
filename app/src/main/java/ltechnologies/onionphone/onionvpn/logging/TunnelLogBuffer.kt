@@ -6,6 +6,9 @@ import java.util.ArrayDeque
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import ltechnologies.onionphone.onionvpn.core.model.observability.DiagnosticsGate
+import ltechnologies.onionphone.onionvpn.core.model.stability.ProcessLogLevel
+import ltechnologies.onionphone.onionvpn.core.model.stability.StabilitySeverity
 
 enum class LogSource {
     APP,
@@ -16,8 +19,17 @@ enum class LogSource {
 data class LogLine(
     val timestampMs: Long,
     val text: String,
-    val isError: Boolean = false,
-)
+    val severity: StabilitySeverity = StabilitySeverity.INFO,
+) {
+    val isError: Boolean
+        get() = severity.isError
+
+    val isWarnOrWorse: Boolean
+        get() = severity >= StabilitySeverity.WARN
+
+    val level: ProcessLogLevel
+        get() = ProcessLogLevel.fromSeverity(severity)
+}
 
 /**
  * Thread-safe ring buffers for tunnel UI logs (app / DNSCrypt / Tor).
@@ -60,7 +72,7 @@ object TunnelLogBuffer {
                 appendLine(header)
                 for (line in lines) {
                     val ts = fmt.format(java.util.Date(line.timestampMs))
-                    val mark = if (line.isError) " E " else "   "
+                    val mark = " ${line.level.exportMark} "
                     appendLine("$ts$mark${line.text}")
                 }
                 appendLine()
@@ -73,6 +85,7 @@ object TunnelLogBuffer {
                 buildString {
                     appendLine("OnionVPN log export")
                     appendLine("generated=${fmt.format(java.util.Date())}")
+                    appendLine("levels=T:trace D:debug I:info W:warn E:error C:critical")
                     appendLine()
                     append(render(LogSource.APP, snapshotUnlocked(LogSource.APP)))
                     append(render(LogSource.DNSCRYPT, snapshotUnlocked(LogSource.DNSCRYPT)))
@@ -88,13 +101,18 @@ object TunnelLogBuffer {
         LogSource.TOR -> torDeque.toList()
     }
 
-    fun append(source: LogSource, text: String, isError: Boolean = false) {
+    fun append(
+        source: LogSource,
+        text: String,
+        severity: StabilitySeverity = StabilitySeverity.INFO,
+    ) {
+        if (!DiagnosticsGate.enabled()) return
         val clipped = if (text.length > MAX_LINE_CHARS) {
             text.take(MAX_LINE_CHARS) + "…"
         } else {
             text
         }
-        val line = LogLine(System.currentTimeMillis(), clipped, isError = isError)
+        val line = LogLine(System.currentTimeMillis(), clipped, severity = severity)
         synchronized(lock) {
             when (source) {
                 LogSource.APP -> push(appDeque, line)
@@ -103,6 +121,16 @@ object TunnelLogBuffer {
             }
             schedulePublish()
         }
+    }
+
+    /** @deprecated Prefer [append] with [StabilitySeverity]. */
+    @Suppress("unused")
+    fun append(source: LogSource, text: String, isError: Boolean) {
+        append(
+            source,
+            text,
+            severity = if (isError) StabilitySeverity.ERROR else StabilitySeverity.INFO,
+        )
     }
 
     fun clear(source: LogSource) {

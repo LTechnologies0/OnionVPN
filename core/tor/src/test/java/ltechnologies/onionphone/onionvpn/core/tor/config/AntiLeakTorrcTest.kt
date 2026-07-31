@@ -84,6 +84,7 @@ class AntiLeakTorrcIsolationTest {
             it.startsWith("SOCKSPort ") && it.contains("SessionGroup=${TunnelEndpoints.SESSION_GROUP_APPS}")
         }
         assertFalse(apps.contains("IsolateDestPort"))
+        assertFalse(apps.contains("IsolateDestAddr"))
         assertTrue(apps.contains("KeepAliveIsolateSOCKSAuth"))
     }
 

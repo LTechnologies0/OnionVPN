@@ -59,7 +59,12 @@ data class TorEngineCapabilities(
     val newIdentity: Boolean,
     /** Live CIRC/STREAM inspection and CLOSECIRCUIT / EXTENDCIRCUIT. */
     val circuitInspection: Boolean,
-    /** Live SETCONF (circuit timing, bridges, GeoIP, nodes). */
+    /**
+     * Live circuit timing SETCONF (MaxCircuitDirtiness / NewCircuitPeriod analogue).
+     * Arti: Ext JNI reconfigure (max_dirtiness + prediction_lifetime).
+     */
+    val liveCircuitTiming: Boolean,
+    /** Live SETCONF for bridges / GeoIP / full node prefs (C Tor ControlPort). */
     val liveSetConf: Boolean,
     /**
      * DORMANT / ACTIVE semantics.
@@ -72,10 +77,15 @@ data class TorEngineCapabilities(
     /** Conjure pluggable transport. */
     val conjureBridges: Boolean,
     /**
-     * EntryNodes / ExitNodes / ExcludeNodes honored by the engine.
-     * Arti: false — StreamPrefs.exit_country is Rust connect-only, not SOCKS/JNI.
+     * Full EntryNodes / ExitNodes / ExcludeNodes (C Tor StrictNodes).
+     * Arti: false — use [exitCountryPrefs] for single-country ExitNodes only.
      */
     val nodePrefs: Boolean,
+    /**
+     * Single-country ExitNodes via StreamPrefs::exit_country (geoip) on SOCKS.
+     * Multi-country / Entry / Exclude remain unsupported on Arti.
+     */
+    val exitCountryPrefs: Boolean,
     /**
      * Bridges applied at engine start (C Tor torrc / Arti JNI bridgeLines).
      * Live SETCONF still requires [liveSetConf]; otherwise restart applies them.
@@ -91,11 +101,13 @@ data class TorEngineCapabilities(
             synthesizeOnionAutomap = false,
             newIdentity = true,
             circuitInspection = true,
+            liveCircuitTiming = true,
             liveSetConf = true,
             dormantSignals = true,
             torrcConfig = true,
             conjureBridges = true,
             nodePrefs = true,
+            exitCountryPrefs = true,
             bridgesAtStart = true,
         )
 
@@ -107,12 +119,14 @@ data class TorEngineCapabilities(
             synthesizeOnionAutomap = true,
             newIdentity = true,
             circuitInspection = false,
+            liveCircuitTiming = true,
             liveSetConf = false,
             // TorClient::set_dormant via Ext JNI when patched .so is loaded.
             dormantSignals = true,
             torrcConfig = false,
-            conjureBridges = false,
+            conjureBridges = true,
             nodePrefs = false,
+            exitCountryPrefs = true,
             bridgesAtStart = true,
         )
     }

@@ -15,6 +15,8 @@ import ltechnologies.onionphone.onionvpn.core.model.TunnelFailure
 import ltechnologies.onionphone.onionvpn.core.model.TunnelPreferences
 import ltechnologies.onionphone.onionvpn.core.model.VpnEstablishResult
 import ltechnologies.onionphone.onionvpn.core.model.VpnProfileMode
+import ltechnologies.onionphone.onionvpn.core.model.observability.OpTrace
+import ltechnologies.onionphone.onionvpn.core.model.stability.ProcessLogLevel
 import ltechnologies.onionphone.onionvpn.core.vpn.forwarder.HevSocks5TunForwarder
 import ltechnologies.onionphone.onionvpn.core.vpn.net.UnderlyingNetworkTracker
 import ltechnologies.onionphone.onionvpn.core.vpn.profile.TunForwarder
@@ -152,8 +154,14 @@ class OnionVpnService : VpnService() {
                         "socks=$torSocksPort dnscrypt=$dnsCryptPort torDns=$torDnsPort gen=$generation " +
                         "alwaysOn=${alwaysOnActive.value} lockdown=${lockdownActive.value}",
                 )
+                OpTrace.info(
+                    "vpn",
+                    "established mode=$mode socks=$torSocksPort dnscrypt=$dnsCryptPort " +
+                        "torDns=$torDnsPort gen=$generation",
+                )
             }
             is VpnEstablishResult.Failure -> {
+                OpTrace.error("vpn", "establish failed: ${result.reason}")
                 Timber.e("VPN establish failed: ${result.reason}")
                 // Keep previous TUN if still open so we do not open a clearnet window.
                 if (previousTun != null && tunInterface == null) {
@@ -215,33 +223,38 @@ class OnionVpnService : VpnService() {
         preferences: TunnelPreferences,
         mode: VpnProfileMode,
     ): VpnEstablishResult {
-        return try {
-            val builder = VpnProfileBuilder.configure(this, preferences, mode)
-            val tun = builder.establish()
-                ?: return VpnEstablishResult.Failure(
+        return OpTrace.step("vpn", "establish mode=$mode", ProcessLogLevel.INFO) {
+            try {
+                val builder = VpnProfileBuilder.configure(this, preferences, mode)
+                val tun = builder.establish()
+                    ?: return@step VpnEstablishResult.Failure(
+                        TunnelFailure.VpnEstablish(
+                            "VpnService.Builder.establish() returned null " +
+                                "(permission revoked or always-on conflict)",
+                        ).userMessage,
+                    )
+                tunInterface = tun
+                VpnEstablishResult.Success(mode)
+            } catch (error: SecurityException) {
+                OpTrace.error("vpn", "establish SecurityException", error)
+                Timber.e(error, "VPN establish SecurityException")
+                VpnEstablishResult.Failure(
+                    TunnelFailure.VpnEstablish("VPN security permission denied", error).userMessage,
+                )
+            } catch (error: IllegalStateException) {
+                OpTrace.error("vpn", "establish IllegalStateException", error)
+                Timber.e(error, "VPN establish IllegalStateException")
+                VpnEstablishResult.Failure(
                     TunnelFailure.VpnEstablish(
-                        "VpnService.Builder.establish() returned null " +
-                            "(permission revoked or always-on conflict)",
+                        "VPN establish illegal state (self-exclusion / builder): ${error.message}",
+                        error,
                     ).userMessage,
                 )
-            tunInterface = tun
-            VpnEstablishResult.Success(mode)
-        } catch (error: SecurityException) {
-            Timber.e(error, "VPN establish SecurityException")
-            VpnEstablishResult.Failure(
-                TunnelFailure.VpnEstablish("VPN security permission denied", error).userMessage,
-            )
-        } catch (error: IllegalStateException) {
-            Timber.e(error, "VPN establish IllegalStateException")
-            VpnEstablishResult.Failure(
-                TunnelFailure.VpnEstablish(
-                    "VPN establish illegal state (self-exclusion / builder): ${error.message}",
-                    error,
-                ).userMessage,
-            )
-        } catch (error: Exception) {
-            Timber.e(error, "VPN establish threw")
-            VpnEstablishResult.Failure(TunnelFailure.fromThrowable(error, "vpn.establish").userMessage)
+            } catch (error: Exception) {
+                OpTrace.error("vpn", "establish threw", error)
+                Timber.e(error, "VPN establish threw")
+                VpnEstablishResult.Failure(TunnelFailure.fromThrowable(error, "vpn.establish").userMessage)
+            }
         }
     }
 
@@ -252,6 +265,10 @@ class OnionVpnService : VpnService() {
         dnsMode: DnsResolverMode,
         synthesizeOnionAutomap: Boolean = false,
     ) {
+        OpTrace.debug(
+            "vpn",
+            "startForwarder socks=$torSocksPort dnscrypt=$dnsCryptPort torDns=$torDnsPort",
+        )
         val tun = tunInterface ?: return
         // hev → SocksUidBridge → Tor with per-UID IsolateSOCKSAuth (native TCP + circuit UX).
         val forwarder = HevSocks5TunForwarder(

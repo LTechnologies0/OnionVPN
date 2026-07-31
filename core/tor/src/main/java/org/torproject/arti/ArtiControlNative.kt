@@ -6,10 +6,12 @@ package org.torproject.arti
  * Symbols live in the same `libarti_mobile_ex.so` as [ArtiJNI]. Stock Maven AARs
  * lack these symbols — [isAvailable] then returns false and callers fall back.
  *
- * Patched builds (see `native/arti-mobile-ex/`) export:
+ * Patched builds (see `native/arti-mobile-ex/`) export control-api ≥ 2:
  * - [setDormant] → `TorClient::set_dormant(Soft|Normal)`
- * - [applyMaxDirtiness] → `CircuitTimingBuilder::max_dirtiness` + `reconfigure`
- * - [bootstrapFraction] / [readyForTraffic] → `BootstrapStatus`
+ * - [applyMaxDirtiness] / [applyCircuitTiming] → `max_dirtiness` + `prediction_lifetime`
+ * - [applyExitCountry] → SOCKS `StreamPrefs::exit_country` (geoip)
+ * - [resolveHostname] → `TorClient::resolve`
+ * - [bootstrapFraction] / [readyForTraffic] / [bootstrapBlockage] → `BootstrapStatus`
  */
 object ArtiControlNative {
     @Volatile
@@ -64,6 +66,66 @@ object ArtiControlNative {
         }
     }
 
+    /**
+     * Live max_dirtiness + prediction_lifetime (NewCircuitPeriod analogue).
+     * Requires control-api ≥ 2.
+     */
+    @JvmStatic
+    fun applyCircuitTiming(maxDirtinessSec: Int, predictionLifetimeSec: Int): Boolean {
+        if (controlApiVersion() < 2) {
+            return applyMaxDirtiness(maxDirtinessSec)
+        }
+        return try {
+            applyCircuitTimingJNI(maxDirtinessSec, predictionLifetimeSec)
+        } catch (_: UnsatisfiedLinkError) {
+            applyMaxDirtiness(maxDirtinessSec)
+        }
+    }
+
+    /**
+     * Single ISO-3166 alpha-2 exit country for SOCKS streams, or empty to clear.
+     * Requires control-api ≥ 2 + geoip.
+     */
+    @JvmStatic
+    fun applyExitCountry(countryCode: String?): Boolean {
+        if (controlApiVersion() < 2) return false
+        return try {
+            applyExitCountryJNI(countryCode.orEmpty())
+        } catch (_: UnsatisfiedLinkError) {
+            false
+        }
+    }
+
+    /**
+     * `TorClient::resolve` — returns first IP or null on failure.
+     * Result wire format from native: `OK:ip[,ip…]` or `Error:…`.
+     */
+    @JvmStatic
+    fun resolveHostname(hostname: String): String? {
+        if (controlApiVersion() < 2) return null
+        return try {
+            val raw = resolveHostnameJNI(hostname) ?: return null
+            when {
+                raw.startsWith("OK:") -> raw.removePrefix("OK:").substringBefore(',').trim()
+                    .takeIf { it.isNotEmpty() }
+                else -> null
+            }
+        } catch (_: UnsatisfiedLinkError) {
+            null
+        }
+    }
+
+    /** BootstrapStatus::blocked debug string, or empty if unblocked / unavailable. */
+    @JvmStatic
+    fun bootstrapBlockage(): String {
+        if (controlApiVersion() < 2) return ""
+        return try {
+            bootstrapBlockageJNI().orEmpty()
+        } catch (_: UnsatisfiedLinkError) {
+            ""
+        }
+    }
+
     /** BootstrapStatus::as_frac, or null if unavailable / client not running. */
     @JvmStatic
     fun bootstrapFraction(): Float? {
@@ -107,6 +169,18 @@ object ArtiControlNative {
 
     @JvmStatic
     private external fun applyMaxDirtinessJNI(seconds: Int): Boolean
+
+    @JvmStatic
+    private external fun applyCircuitTimingJNI(maxDirtinessSec: Int, predictionLifetimeSec: Int): Boolean
+
+    @JvmStatic
+    private external fun applyExitCountryJNI(countryCode: String): Boolean
+
+    @JvmStatic
+    private external fun resolveHostnameJNI(hostname: String): String?
+
+    @JvmStatic
+    private external fun bootstrapBlockageJNI(): String?
 
     @JvmStatic
     private external fun bootstrapFractionJNI(): Float

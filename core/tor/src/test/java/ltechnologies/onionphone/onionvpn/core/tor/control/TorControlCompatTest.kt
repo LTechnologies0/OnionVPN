@@ -36,9 +36,12 @@ class TorControlCompatTest {
             "DROPGUARDS",
             "DisableNetwork",
             "SETCONF_bridges",
+            "SETCONF_nodes",
+            "SETCONF_geoip",
             "CLOSE_BUILT_CIRCUITS",
             "CLEARDNSCACHE",
             "RESOLVE",
+            "SETEVENTS",
             "GETINFO_bootstrap",
             "GETINFO_traffic",
             "ACTIVE",
@@ -55,7 +58,7 @@ class TorControlCompatTest {
         assertEquals(ArtiBehavior.EQUIVALENT, TorControlCompat.behavior("NEWNYM"))
         assertEquals(ArtiBehavior.HARD_RECOVER, TorControlCompat.behavior("RELOAD"))
         assertEquals(ArtiBehavior.EQUIVALENT, TorControlCompat.behavior("RESOLVE"))
-        assertEquals(Parity.APP_LAYER_1_1, TorControlCompat.parity("RESOLVE"))
+        assertEquals(Parity.SEMANTIC_1_1, TorControlCompat.parity("RESOLVE"))
         assertEquals(Parity.APP_LAYER_1_1, TorControlCompat.parity("CLEARDNSCACHE"))
         assertEquals(Parity.SEMANTIC_1_1, TorControlCompat.parity("ACTIVE"))
         assertEquals(Parity.SEMANTIC_1_1, TorControlCompat.parity("DORMANT"))
@@ -65,6 +68,9 @@ class TorControlCompatTest {
         assertEquals(Parity.SEMANTIC_1_1, TorControlCompat.parity("SETCONF_circuit_timing"))
         assertEquals(ArtiBehavior.EQUIVALENT, TorControlCompat.behavior("SETCONF_circuit_timing"))
         assertEquals(Parity.SEMANTIC_1_1, TorControlCompat.parity("GETINFO_bootstrap"))
+        assertEquals(Parity.SEMANTIC_1_1, TorControlCompat.parity("SETCONF_nodes"))
+        assertEquals(Parity.NOOP_OK, TorControlCompat.parity("SETCONF_geoip"))
+        assertEquals(Parity.APP_LAYER_1_1, TorControlCompat.parity("SETEVENTS"))
     }
 
     @Test
@@ -75,22 +81,21 @@ class TorControlCompatTest {
             "EXTENDCIRCUIT",
             "CLOSECIRCUIT",
             "CLOSESTREAM",
-            "SETEVENTS",
             "AUTHENTICATE",
-            "SETCONF_geoip",
-            "SETCONF_nodes",
         )
         for (name in limited) {
             assertEquals(name, Parity.ENGINE_LIMITATION, TorControlCompat.parity(name))
             assertFalse("isOneToOne $name", TorControlCompat.isOneToOneOnArti(name))
         }
         for (name in listOf(
-            "GETINFO_circuits", "EXTENDCIRCUIT", "CLOSECIRCUIT", "SETCONF_nodes", "SETCONF_geoip",
+            "GETINFO_circuits", "EXTENDCIRCUIT", "CLOSECIRCUIT", "AUTHENTICATE",
         )) {
             assertFalse(name, TorControlCompat.isSupported(TorEngine.ARTI, name))
         }
         assertTrue(TorControlCompat.isSupported(TorEngine.ARTI, "SETCONF_circuit_timing"))
         assertTrue(TorControlCompat.isOneToOneOnArti("SETCONF_circuit_timing"))
+        assertTrue(TorControlCompat.isSupported(TorEngine.ARTI, "SETCONF_nodes"))
+        assertTrue(TorControlCompat.isSupported(TorEngine.ARTI, "SETEVENTS"))
     }
 
     @Test
@@ -118,8 +123,16 @@ class TorControlCompatTest {
                 .contains("max_dirtiness"),
         )
         assertTrue(
+            TorControlCompat.OPS.first { it.name == "SETCONF_circuit_timing" }.docs
+                .contains("prediction_lifetime"),
+        )
+        assertTrue(
             TorControlCompat.OPS.first { it.name == "GETINFO_bootstrap" }.docs
                 .contains("ready_for_traffic"),
+        )
+        assertTrue(
+            TorControlCompat.OPS.first { it.name == "SETCONF_nodes" }.docs
+                .contains("exit_country"),
         )
     }
 

@@ -49,12 +49,17 @@ import ltechnologies.onionphone.onionvpn.core.model.ValidationCheck
 import ltechnologies.onionphone.onionvpn.core.model.ValidationStatus
 import ltechnologies.onionphone.onionvpn.core.tor.control.lifecycle.CircuitLifecycleManager
 import ltechnologies.onionphone.onionvpn.core.vpn.forwarder.LeakPacketFilter
+import ltechnologies.onionphone.onionvpn.diagnostics.ResourceSnapshot
 import ltechnologies.onionphone.onionvpn.firewall.AppUidResolver
 import ltechnologies.onionphone.onionvpn.ui.components.HeroIconBadge
 import ltechnologies.onionphone.onionvpn.ui.components.MetricChip
 import ltechnologies.onionphone.onionvpn.ui.components.SectionHeader
 import ltechnologies.onionphone.onionvpn.ui.components.StatusDot
 import ltechnologies.onionphone.onionvpn.ui.components.TonalSection
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -65,10 +70,13 @@ fun StatusScreen(
     onStop: () -> Unit,
     onNewNym: (() -> Unit)? = null,
     circuitLifecycle: CircuitLifecycleManager? = null,
+    resourceSnapshot: StateFlow<ResourceSnapshot> = MutableStateFlow(ResourceSnapshot()).asStateFlow(),
+    diagnosticsEnabled: Boolean = false,
 ) {
     var showCircuits by remember { mutableStateOf(false) }
     val context = LocalContext.current
     val appUidResolver = remember { AppUidResolver(context) }
+    val resources by resourceSnapshot.collectAsStateWithLifecycle()
 
     if (showCircuits && circuitLifecycle != null) {
         CircuitsScreen(
@@ -199,6 +207,25 @@ fun StatusScreen(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+            }
+        }
+
+        if (diagnosticsEnabled && resources.timestampMs > 0L) {
+            SectionHeader(
+                title = "Resources",
+                subtitle = "JVM + native process footprint (disabled when No logs is on).",
+            )
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                MetricChip("RSS", "${"%.0f".format(resources.vmRssMb)} MB")
+                MetricChip("Heap", "${"%.0f".format(resources.heapUsedMb)} MB")
+                MetricChip("Threads", "${resources.threads}")
+                MetricChip("CPU", "${"%.0f".format(resources.cpuPercent)}%")
+                resources.torChildRssMb?.let {
+                    MetricChip("Tor RSS", "${"%.0f".format(it)} MB")
+                }
             }
         }
 

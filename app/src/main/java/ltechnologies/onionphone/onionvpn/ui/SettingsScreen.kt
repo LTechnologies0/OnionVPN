@@ -160,6 +160,18 @@ fun SettingsScreen(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+            PrefSwitch(
+                label = "No logs (privacy)",
+                checked = local.noLogsEnabled,
+                onChecked = { commit(local.copy(noLogsEnabled = it)) },
+            )
+            Text(
+                text = "On (release default): disables Logs buffer, pipeline TRACE→ERROR, " +
+                    "Tor/Arti/DNSCrypt UI logs, and the resource profiler. " +
+                    "Debug builds default Off so diagnostics stay available.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
 
         SectionHeader(
@@ -692,25 +704,40 @@ fun SettingsScreen(
             text = "Node countries (StrictNodes)",
             style = MaterialTheme.typography.titleMedium,
         )
-        if (!local.torEngine.capabilities.nodePrefs) {
-            Text(
-                text = "Entry/Exit/ExcludeNodes are C Tor only — arti-mobile JNI has no " +
-                    "StreamPrefs.exit_country / node-set API. Switch to C Tor to constrain paths.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        } else {
-        Text(
-            text = "Pick countries / federations. Tor syntax: {cc},{cc}",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
+        val caps = local.torEngine.capabilities
+        when {
+            caps.nodePrefs -> {
+                Text(
+                    text = "Pick countries / federations. Tor syntax: {cc},{cc}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            caps.exitCountryPrefs -> {
+                Text(
+                    text = "Arti ExitNodes: pick a single country ({cc}). " +
+                        "EntryNodes / ExcludeNodes need C Tor.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            else -> {
+                Text(
+                    text = "Entry/Exit/ExcludeNodes are unavailable on this engine.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+        if (caps.nodePrefs || caps.exitCountryPrefs) {
+        if (caps.nodePrefs) {
         OutlinedButton(
             onClick = { pickingEntry = true },
             modifier = Modifier.fillMaxWidth(),
             shape = MaterialTheme.shapes.large,
         ) {
             Text("EntryNodes — ${TorCountryCatalog.summarize(local.torEntryNodes)}")
+        }
         }
         OutlinedButton(
             onClick = { pickingExit = true },
@@ -719,6 +746,7 @@ fun SettingsScreen(
         ) {
             Text("ExitNodes — ${TorCountryCatalog.summarize(local.torExitNodes)}")
         }
+        if (caps.nodePrefs) {
         OutlinedButton(
             onClick = { pickingExclude = true },
             modifier = Modifier.fillMaxWidth(),
@@ -726,7 +754,8 @@ fun SettingsScreen(
         ) {
             Text("ExcludeNodes — ${TorCountryCatalog.summarize(local.torExcludeNodes)}")
         }
-        if (pickingEntry) {
+        }
+        if (pickingEntry && caps.nodePrefs) {
             TorNodePickerDialog(
                 title = "EntryNodes",
                 initialRaw = local.torEntryNodes,
@@ -739,16 +768,28 @@ fun SettingsScreen(
         }
         if (pickingExit) {
             TorNodePickerDialog(
-                title = "ExitNodes",
+                title = if (caps.nodePrefs) "ExitNodes" else "ExitNodes (single country)",
                 initialRaw = local.torExitNodes,
                 onConfirm = {
-                    commit(local.copy(torExitNodes = it), restart = false)
+                    val next = if (!caps.nodePrefs) {
+                        val codes = TorCountryCatalog.parseNodeCodes(it)
+                        when {
+                            codes.isEmpty() -> ""
+                            codes.size == 1 -> TorCountryCatalog.encodeNodeCodes(codes)
+                            else -> TorCountryCatalog.encodeNodeCodes(setOf(codes.first())).also {
+                                // Keep first only for Arti StreamPrefs::exit_country
+                            }
+                        }
+                    } else {
+                        it
+                    }
+                    commit(local.copy(torExitNodes = next), restart = false)
                     pickingExit = false
                 },
                 onDismiss = { pickingExit = false },
             )
         }
-        if (pickingExclude) {
+        if (pickingExclude && caps.nodePrefs) {
             TorNodePickerDialog(
                 title = "ExcludeNodes",
                 initialRaw = local.torExcludeNodes,
@@ -760,7 +801,10 @@ fun SettingsScreen(
             )
         }
         }
-        if (local.torEngine.capabilities.liveSetConf || local.torEngine.capabilities.torrcConfig) {
+        if (local.torEngine.capabilities.liveSetConf ||
+            local.torEngine.capabilities.torrcConfig ||
+            local.torEngine.capabilities.liveCircuitTiming
+        ) {
             OutlinedTextField(
                 value = local.torNewCircuitPeriodSec.toString(),
                 onValueChange = {
@@ -768,7 +812,17 @@ fun SettingsScreen(
                         local = local.copy(torNewCircuitPeriodSec = v.coerceIn(10, 86_400))
                     }
                 },
-                label = { Text("NewCircuitPeriod (sec)") },
+                label = {
+                    Text(
+                        if (local.torEngine.capabilities.liveCircuitTiming &&
+                            !local.torEngine.capabilities.torrcConfig
+                        ) {
+                            "NewCircuitPeriod (C Tor); Arti uses ≥3600s prediction_lifetime"
+                        } else {
+                            "NewCircuitPeriod (sec)"
+                        },
+                    )
+                },
                 modifier = Modifier.fillMaxWidth(),
             )
             Text(

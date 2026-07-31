@@ -1,6 +1,7 @@
 package ltechnologies.onionphone.onionvpn.prefs
 
 import android.content.Context
+import android.content.pm.ApplicationInfo
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
@@ -48,7 +49,12 @@ class TunnelPreferencesStore @Inject constructor(
         val autoStartOnLaunch = booleanPreferencesKey("auto_start_on_launch")
         val autoStartOnBoot = booleanPreferencesKey("auto_start_on_boot")
         val moatRequestViaTor = booleanPreferencesKey("moat_request_via_tor")
+        val noLogs = booleanPreferencesKey("no_logs")
     }
+
+    /** Release (non-debuggable) → no-logs ON; debug builds → OFF. */
+    private val defaultNoLogsEnabled: Boolean
+        get() = (context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) == 0
 
     val preferences: Flow<TunnelPreferences> = context.tunnelDataStore.data.map { prefs ->
         prefs.toModel()
@@ -80,6 +86,7 @@ class TunnelPreferencesStore @Inject constructor(
             prefs[Keys.autoStartOnLaunch] = next.autoStartOnAppLaunch
             prefs[Keys.autoStartOnBoot] = next.autoStartOnBoot
             prefs[Keys.moatRequestViaTor] = next.moatRequestViaTor
+            prefs[Keys.noLogs] = next.noLogsEnabled
         }
     }
 
@@ -95,7 +102,7 @@ class TunnelPreferencesStore @Inject constructor(
         torEntryNodes = this[Keys.torEntry].orEmpty(),
         torExitNodes = this[Keys.torExit].orEmpty(),
         torExcludeNodes = this[Keys.torExclude].orEmpty(),
-        torNewCircuitPeriodSec = this[Keys.newCircuit] ?: 30,
+        torNewCircuitPeriodSec = this[Keys.newCircuit] ?: 180,
         torMaxCircuitDirtinessSec = this[Keys.maxDirtiness] ?: 600,
         dnsCryptRequireNoLog = this[Keys.requireNoLog] ?: true,
         dnsCryptRequireNoFilter = this[Keys.requireNoFilter] ?: false,
@@ -111,5 +118,6 @@ class TunnelPreferencesStore @Inject constructor(
         autoStartOnAppLaunch = this[Keys.autoStartOnLaunch] ?: true,
         autoStartOnBoot = this[Keys.autoStartOnBoot] ?: false,
         moatRequestViaTor = this[Keys.moatRequestViaTor] ?: false,
+        noLogsEnabled = this[Keys.noLogs] ?: defaultNoLogsEnabled,
     )
 }

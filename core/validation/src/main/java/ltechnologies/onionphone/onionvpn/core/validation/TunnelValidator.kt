@@ -10,6 +10,8 @@ import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
 import ltechnologies.onionphone.onionvpn.core.model.TunnelRuntimePorts
 import ltechnologies.onionphone.onionvpn.core.model.ValidationCheck
 import ltechnologies.onionphone.onionvpn.core.model.ValidationStatus
+import ltechnologies.onionphone.onionvpn.core.model.observability.OpTrace
+import ltechnologies.onionphone.onionvpn.core.model.stability.ProcessLogLevel
 import ltechnologies.onionphone.onionvpn.core.validation.android.AndroidVpnInspector
 import ltechnologies.onionphone.onionvpn.core.validation.leak.SystemLeakInspector
 import ltechnologies.onionphone.onionvpn.core.validation.path.DnsCryptPathValidator
@@ -37,64 +39,71 @@ object TunnelValidator {
         includeExitIp: Boolean = true,
         torEngine: TorEngine = TorEngine.LITTLE_T,
     ): List<ValidationCheck> = withContext(Dispatchers.Default) {
-        val hevConfigFile = File(context.applicationContext.filesDir, "hev-socks5-tunnel.yaml")
-        buildList {
-            addAll(
-                validateRuntimeConfigs(
-                    torConfigFile,
-                    dnsCryptConfigFile,
-                    runtimePorts,
-                    torEngine,
-                ),
-            )
-            if (runtimePorts != null) {
+        OpTrace.stepSuspending("validate", "validateAll", ProcessLogLevel.DEBUG) {
+            val hevConfigFile = File(context.applicationContext.filesDir, "hev-socks5-tunnel.yaml")
+            buildList {
+                OpTrace.trace("validate", "runtime_configs")
                 addAll(
-                    TorPathValidator.validate(
-                        socksPort = runtimePorts.torProbeSocksPort,
-                        dnsPort = runtimePorts.torDnsPort,
+                    validateRuntimeConfigs(
+                        torConfigFile,
+                        dnsCryptConfigFile,
+                        runtimePorts,
+                        torEngine,
                     ),
                 )
-                if (includeExitIp) {
+                if (runtimePorts != null) {
+                    OpTrace.trace("validate", "tor_path")
                     addAll(
-                        ExitIpValidator.validate(
-                            context = context.applicationContext,
+                        TorPathValidator.validate(
                             socksPort = runtimePorts.torProbeSocksPort,
+                            dnsPort = runtimePorts.torDnsPort,
+                        ),
+                    )
+                    if (includeExitIp) {
+                        OpTrace.trace("validate", "exit_ip")
+                        addAll(
+                            ExitIpValidator.validate(
+                                context = context.applicationContext,
+                                socksPort = runtimePorts.torProbeSocksPort,
+                            ),
+                        )
+                    }
+                    OpTrace.trace("validate", "dnscrypt_path")
+                    addAll(DnsCryptPathValidator.validate(listenPort = runtimePorts.dnsCryptListenPort))
+                    add(validateUidForwarderWiring(runtimePorts))
+                    add(validateDnsCryptTorWiring(dnsCryptConfigFile, runtimePorts, torEngine))
+                    add(validateDnsModeLeakProperties(dnsResolverMode, hevConfigFile))
+                    add(validateUdpBlackholePolicy())
+                } else {
+                    addAll(TorPathValidator.validate())
+                    addAll(DnsCryptPathValidator.validate())
+                }
+                if (vpnEstablished) {
+                    OpTrace.trace("validate", "android_vpn")
+                    addAll(
+                        AndroidVpnInspector.inspect(
+                            context = context.applicationContext,
+                            killSwitchExpected = killSwitchEnabled,
+                        ),
+                    )
+                } else {
+                    add(
+                        ValidationCheck(
+                            id = "vpn.not.established",
+                            label = "VPN interface established",
+                            status = ValidationStatus.Fail,
+                            detail = "Skipped Android routing probes",
                         ),
                     )
                 }
-                addAll(DnsCryptPathValidator.validate(listenPort = runtimePorts.dnsCryptListenPort))
-                add(validateUidForwarderWiring(runtimePorts))
-                add(validateDnsCryptTorWiring(dnsCryptConfigFile, runtimePorts, torEngine))
-                add(validateDnsModeLeakProperties(dnsResolverMode, hevConfigFile))
-                add(validateUdpBlackholePolicy())
-            } else {
-                addAll(TorPathValidator.validate())
-                addAll(DnsCryptPathValidator.validate())
-            }
-            if (vpnEstablished) {
                 addAll(
-                    AndroidVpnInspector.inspect(
+                    SystemLeakInspector.inspect(
                         context = context.applicationContext,
                         killSwitchExpected = killSwitchEnabled,
                     ),
                 )
-            } else {
-                add(
-                    ValidationCheck(
-                        id = "vpn.not.established",
-                        label = "VPN interface established",
-                        status = ValidationStatus.Fail,
-                        detail = "Skipped Android routing probes",
-                    ),
-                )
+                add(blockedDnsRoutesConfigured())
             }
-            addAll(
-                SystemLeakInspector.inspect(
-                    context = context.applicationContext,
-                    killSwitchExpected = killSwitchEnabled,
-                ),
-            )
-            add(blockedDnsRoutesConfigured())
         }
     }
 

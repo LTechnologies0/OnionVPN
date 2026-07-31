@@ -99,15 +99,21 @@ Pick **C Tor** or **Arti** at runtime. Capabilities are gated via `TorEngineCapa
 | SOCKS proxy | Multi-port SessionGroups | Single shared SOCKS (+ SOCKS user/pass) |
 | `.onion` Automap | Native DNSPort Automap | App-side synthesizer → SOCKS5A |
 | Classic ControlSocket | Yes | No (`arti.status` + Ext JNI / synthetic) |
-| Circuits UI / Entry·Exit / Conjure | Yes | No |
+| Circuits / streams UI | Yes | No (no list-circuits API) |
+| ExitNodes country | StrictNodes | Single `{cc}` via `StreamPrefs::exit_country` (geoip) |
+| Entry / ExcludeNodes | Yes | No |
+| Conjure PT | Yes | Yes (`TransportConfig` + `libConjure.so`) |
 | DORMANT / ACTIVE | SIGNAL | `TorClient::set_dormant` (patched SO) |
 | MaxCircuitDirtiness | Live SETCONF | Ext JNI `reconfigure` (patched SO) |
+| NewCircuitPeriod | Live SETCONF | `prediction_lifetime` analogue (patched SO) |
+| RESOLVE | ControlPort | `TorClient::resolve` Ext JNI (DNSPort fallback) |
 | New identity | SIGNAL NEWNYM | Runtime restart |
 | Bridges + Lyrebird | Yes | Yes (managed path) |
 
 OnionVPN ships a patched `libarti_mobile_ex.so` under `app/src/main/jniLibs/` (see
-`native/arti-mobile-ex/`) that exports `ArtiControlNative` on top of the Maven AAR Java API.
-Rebuild with `./native/arti-mobile-ex/build-onionvpn.sh`.
+`native/arti-mobile-ex/`) that exports `ArtiControlNative` control-api≥2 on top of the
+Maven AAR Java API. Rebuild with `./native/arti-mobile-ex/build-onionvpn.sh`.
+Uses `[patch.crates-io]` → `third_party/arti-1.7.0-onionvpn` for SOCKS exit-country.
 
 ## License
 

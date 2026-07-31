@@ -65,4 +65,11 @@ data class TunnelPreferences(
      * Tor SOCKS. When false (default), clearnet HTTPS is used.
      */
     val moatRequestViaTor: Boolean = false,
+    /**
+     * Privacy kill-switch for diagnostics: when true, TRACE→ERROR pipeline logs,
+     * Tor/Arti/DNSCrypt UI buffers, and the resource profiler are disabled.
+     * Default when unset: ON for release (non-debuggable), OFF for debug builds
+     * (see [ltechnologies.onionphone.onionvpn.prefs.TunnelPreferencesStore]).
+     */
+    val noLogsEnabled: Boolean = true,
 )

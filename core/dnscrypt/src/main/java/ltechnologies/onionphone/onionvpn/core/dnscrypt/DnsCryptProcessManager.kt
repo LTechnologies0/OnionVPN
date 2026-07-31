@@ -14,6 +14,8 @@ import ltechnologies.onionphone.onionvpn.core.dnscrypt.lifecycle.DnsCryptReadine
 import ltechnologies.onionphone.onionvpn.core.model.TunnelFailure
 import ltechnologies.onionphone.onionvpn.core.model.TunnelPreferences
 import ltechnologies.onionphone.onionvpn.core.model.TunnelRuntimePorts
+import ltechnologies.onionphone.onionvpn.core.model.observability.OpTrace
+import ltechnologies.onionphone.onionvpn.core.model.stability.ProcessLogLevel
 import timber.log.Timber
 
 /**
@@ -55,37 +57,41 @@ class DnsCryptProcessManager(
         ports: TunnelRuntimePorts,
         preferences: TunnelPreferences = TunnelPreferences(),
     ): Result<Unit> = withContext(Dispatchers.IO) {
-        this@DnsCryptProcessManager.preferences = preferences
-        listenPort = ports.dnsCryptListenPort
-        // Step 1
-        stopInternal()
-        killOrphanedProcesses()
-        listenerReady.set(false)
-        serverReady.set(false)
-        try {
-            ensureExecutable(binaryFile)
-            // Step 2
-            writeConfig(serverName.ifBlank { preferences.dnsCryptServerName }, ports)
-            // Step 3
-            spawnProcess()
-            // Step 4
-            waitForListener(ports.dnsCryptListenPort)
-            // Step 5
-            waitForLiveServer()
-            Timber.i("DNSCrypt listening on ${ports.dnsCryptListenPort}")
-            Result.success(Unit)
-        } catch (error: CancellationException) {
+        OpTrace.stepSuspending("dnscrypt", "start", ProcessLogLevel.INFO) {
+            this@DnsCryptProcessManager.preferences = preferences
+            listenPort = ports.dnsCryptListenPort
+            OpTrace.debug("dnscrypt", "stop_prior")
             stopInternal()
-            throw error
-        } catch (error: Exception) {
-            Timber.e(error, "DNSCrypt failed to start")
-            stopInternal()
-            Result.failure(TunnelFailure.fromThrowable(error, context = "dnscrypt.start"))
+            killOrphanedProcesses()
+            listenerReady.set(false)
+            serverReady.set(false)
+            try {
+                OpTrace.step("dnscrypt", "ensure_binary") { ensureExecutable(binaryFile) }
+                OpTrace.step("dnscrypt", "write_config") {
+                    writeConfig(serverName.ifBlank { preferences.dnsCryptServerName }, ports)
+                }
+                OpTrace.step("dnscrypt", "spawn") { spawnProcess() }
+                OpTrace.stepSuspending("dnscrypt", "wait_listener") {
+                    waitForListener(ports.dnsCryptListenPort)
+                }
+                OpTrace.stepSuspending("dnscrypt", "wait_server") { waitForLiveServer() }
+                OpTrace.info("dnscrypt", "listening on ${ports.dnsCryptListenPort}")
+                Timber.i("DNSCrypt listening on ${ports.dnsCryptListenPort}")
+                Result.success(Unit)
+            } catch (error: CancellationException) {
+                stopInternal()
+                throw error
+            } catch (error: Exception) {
+                OpTrace.error("dnscrypt", "failed to start", error)
+                Timber.e(error, "DNSCrypt failed to start")
+                stopInternal()
+                Result.failure(TunnelFailure.fromThrowable(error, context = "dnscrypt.start"))
+            }
         }
     }
 
     suspend fun stop() = withContext(Dispatchers.IO) {
-        stopInternal()
+        OpTrace.stepSuspending("dnscrypt", "stop") { stopInternal() }
     }
 
     fun isRunning(): Boolean = process?.isAlive == true

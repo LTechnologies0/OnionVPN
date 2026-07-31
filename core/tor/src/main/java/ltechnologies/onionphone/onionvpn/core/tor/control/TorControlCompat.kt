@@ -26,16 +26,16 @@ import ltechnologies.onionphone.onionvpn.core.model.TorEngine
  * | RESOLVE | `TorClient::resolve` / `resolve_with_prefs` |
  * | bootstrap GETINFO | `bootstrap_status()` → `as_frac` / `ready_for_traffic` / `blocked` |
  * | MaxCircuitDirtiness | `CircuitTimingBuilder::max_dirtiness` (live via `reconfigure`) |
- * | NewCircuitPeriod | **no Arti equivalent** (use preemptive_circuits prediction_lifetime) |
- * | ExitNodes country | `StreamPrefs::exit_country` (geoip feature; connect API only) |
- * | Bridges / PT | `config::BridgesConfig` + `pt::TransportConfig` |
+ * | NewCircuitPeriod | `PreemptiveCircuitConfig::prediction_lifetime` (semantic analogue) |
+ * | ExitNodes country | `StreamPrefs::exit_country` (geoip; SOCKS via OnionVPN patch) |
+ * | Bridges / PT | `config::BridgesConfig` + `pt::TransportConfig` (incl. Conjure) |
  * | IsolateSOCKSAuth | SOCKS username → `StreamIsolation` / IsolationToken |
  *
  * ## JNI gap (stock AAR) vs OnionVPN patch
  * Stock Guardian AAR does not export set_dormant / reconfigure / bootstrap_status.
- * OnionVPN's patched `libarti_mobile_ex.so` closes the dormant + max_dirtiness +
- * bootstrap-frac gaps. Remaining ENGINE_LIMITATION: CIRC/STREAM UI, Entry/Exit over
- * SOCKS, Conjure, NewCircuitPeriod (no arti-client field).
+ * OnionVPN's patched `libarti_mobile_ex.so` (control-api≥2) closes dormant, max_dirtiness,
+ * prediction_lifetime, exit_country, resolve, and bootstrap blockage. Remaining
+ * ENGINE_LIMITATION: CIRC/STREAM UI, Entry/ExcludeNodes, AUTHENTICATE.
  */
 object TorControlCompat {
 
@@ -189,11 +189,13 @@ object TorControlCompat {
             littleT = "Live circuit dirtiness / new-circuit period",
             arti = ArtiBehavior.EQUIVALENT,
             parity = Parity.SEMANTIC_1_1,
-            artiImpl = "ArtiControlNative.applyMaxDirtiness → CircuitTimingBuilder::max_dirtiness " +
-                "+ TorClient::reconfigure; also written to state_dir/onionvpn_circuit_timing " +
-                "for start-time apply. NewCircuitPeriod has no Arti field (recorded only).",
-            docs = "arti-client 0.36.0 CircuitTimingBuilder::max_dirtiness (= MaxCircuitDirtiness); " +
-                "live via reconfigure — OnionVPN Ext JNI control-api≥1",
+            artiImpl = "ArtiControlNative.applyCircuitTiming → CircuitTimingBuilder::max_dirtiness " +
+                "+ PreemptiveCircuitConfig::prediction_lifetime via reconfigure; " +
+                "also written to state_dir/onionvpn_circuit_timing for start-time apply",
+            docs = "arti-client 0.36.0 max_dirtiness (= MaxCircuitDirtiness). " +
+                "prediction_lifetime is NOT NewCircuitPeriod — OnionVPN floors it at 3600s " +
+                "(Arti default) so short NewCircuitPeriod prefs do not thrash preemptive circuits. " +
+                "Ext JNI control-api≥2",
         ),
         Op(
             name = "SETCONF_bridges",
@@ -201,28 +203,30 @@ object TorControlCompat {
             littleT = "Live bridge lines without full process restart",
             arti = ArtiBehavior.REQUIRES_RESTART,
             parity = Parity.SEMANTIC_1_1,
-            artiImpl = "Restart Arti with new bridgeLines (+ managed Lyrebird path) via JNI",
+            artiImpl = "Restart Arti with new bridgeLines (+ Lyrebird/Conjure TransportConfig) via JNI",
             docs = "arti-client 0.36.0 config::BridgesConfig + pt::TransportConfig; " +
-                "arti-mobile passes bridge_lines into TorClientConfigBuilder at start",
+                "arti-mobile passes bridge_lines + managed PT paths into TorClientConfigBuilder at start",
         ),
         Op(
             name = "SETCONF_nodes",
             wire = "SETCONF Entry/Exit/ExcludeNodes",
             littleT = "Live path constraints (StrictNodes)",
-            arti = ArtiBehavior.UNSUPPORTED,
-            parity = Parity.ENGINE_LIMITATION,
-            artiImpl = "Not in arti-mobile JNI / SOCKS path",
-            docs = "arti-client 0.36.0 StreamPrefs::exit_country (geoip) applies to connect_with_prefs " +
-                "only — not to SOCKS proxy streams; Entry/ExcludeNodes have no SOCKS mapping",
+            arti = ArtiBehavior.EQUIVALENT,
+            parity = Parity.SEMANTIC_1_1,
+            artiImpl = "ExitNodes single {cc} → ArtiControlNative.applyExitCountry → " +
+                "SOCKS StreamPrefs::exit_country (geoip). Entry/Exclude ignored with warning.",
+            docs = "arti-client 0.36.0 StreamPrefs::exit_country (geoip); OnionVPN patched SOCKS " +
+                "applies global exit country. EntryNodes/ExcludeNodes have no SOCKS mapping",
         ),
         Op(
             name = "SETCONF_geoip",
             wire = "SETCONF GeoIPFile",
             littleT = "Point Tor at GeoIP DBs for ip-to-country",
-            arti = ArtiBehavior.UNSUPPORTED,
-            parity = Parity.ENGINE_LIMITATION,
-            artiImpl = "No circuit country UI / GETINFO ip-to-country on Arti path",
-            docs = "CountryCode / exit_country need geoip feature + embedding API; not in arti-mobile JNI",
+            arti = ArtiBehavior.NOOP_OK,
+            parity = Parity.NOOP_OK,
+            artiImpl = "Embedded GeoipDb via arti-client geoip feature (no external GeoIPFile)",
+            docs = "arti-client 0.36.0 geoip uses tor_geoip::GeoipDb::new_embedded(); " +
+                "no SETCONF GeoIPFile — exit_country works without C Tor GeoIP files",
         ),
         Op(
             name = "GETINFO_bootstrap",
@@ -230,9 +234,9 @@ object TorControlCompat {
             littleT = "Bootstrap progress / tags",
             arti = ArtiBehavior.EQUIVALENT,
             parity = Parity.SEMANTIC_1_1,
-            artiImpl = "ArtiControlNative.bootstrapFraction / readyForTraffic when Ext JNI present; " +
+            artiImpl = "ArtiControlNative.bootstrapFraction / readyForTraffic / bootstrapBlockage; " +
                 "else synthetic TorControlStatus from SOCKS+DNS readiness",
-            docs = "arti-client 0.36.0 BootstrapStatus::as_frac / ready_for_traffic — " +
+            docs = "arti-client 0.36.0 BootstrapStatus::as_frac / ready_for_traffic / blocked — " +
                 "OnionVPN Ext JNI; listener probe remains the stock-AAR stand-in",
         ),
         Op(
@@ -242,7 +246,7 @@ object TorControlCompat {
             arti = ArtiBehavior.UNSUPPORTED,
             parity = Parity.ENGINE_LIMITATION,
             artiImpl = "Empty list / UI gated (circuitInspection=false)",
-            docs = "circmgr() is experimental-api only; no circuit-status in arti-client RPC surface yet",
+            docs = "circmgr() is experimental-api only; no circuit-status list API in 0.36.0",
         ),
         Op(
             name = "GETINFO_streams",
@@ -278,7 +282,7 @@ object TorControlCompat {
             arti = ArtiBehavior.UNSUPPORTED,
             parity = Parity.ENGINE_LIMITATION,
             artiImpl = "UI gated; use NEWNYM to drop all circuits",
-            docs = "No circuit handles in arti-client public API / arti-mobile JNI",
+            docs = "No enumerable circuit handles in arti-client public API / arti-mobile JNI",
         ),
         Op(
             name = "CLOSESTREAM",
@@ -294,19 +298,22 @@ object TorControlCompat {
             wire = "RESOLVE + ADDRMAP",
             littleT = "Ask Tor to resolve a hostname over the network",
             arti = ArtiBehavior.EQUIVALENT,
-            parity = Parity.APP_LAYER_1_1,
-            artiImpl = "UDP DNS A query to Arti DNSPort (TorDnsResolve)",
-            docs = "arti-client 0.36.0 TorClient::resolve / resolve_with_prefs; " +
-                "DNSPort is the proxy-facing equivalent used by arti SOCKS/DNS listeners",
+            parity = Parity.SEMANTIC_1_1,
+            artiImpl = "ArtiControlNative.resolveHostname → TorClient::resolve; " +
+                "fallback: UDP DNS A query to Arti DNSPort",
+            docs = "arti-client 0.36.0 TorClient::resolve / resolve_with_prefs — " +
+                "OnionVPN Ext JNI control-api≥2; DNSPort remains stock-AAR fallback",
         ),
         Op(
             name = "SETEVENTS",
             wire = "SETEVENTS",
             littleT = "Async CIRC/STREAM/BW/STATUS events",
-            arti = ArtiBehavior.UNSUPPORTED,
-            parity = Parity.ENGINE_LIMITATION,
-            artiImpl = "No event channel",
-            docs = "bootstrap_events exists in 0.36.0 but is not exported by arti-mobile JNI",
+            arti = ArtiBehavior.SOFT_RECOVER,
+            parity = Parity.APP_LAYER_1_1,
+            artiImpl = "STATUS_CLIENT analogue via BootstrapStatus poll " +
+                "(bootstrapFraction / bootstrapBlockage); no CIRC/STREAM events",
+            docs = "bootstrap_events / BootstrapStatus::blocked in 0.36.0; " +
+                "CIRC/STREAM event channel not exposed by arti-mobile JNI",
         ),
         Op(
             name = "AUTHENTICATE",

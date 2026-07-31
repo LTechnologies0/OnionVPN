@@ -7,6 +7,8 @@ import kotlinx.coroutines.delay
 import ltechnologies.onionphone.onionvpn.core.model.TunnelFailure
 import ltechnologies.onionphone.onionvpn.core.model.TunnelPreferences
 import ltechnologies.onionphone.onionvpn.core.model.TunnelRuntimePorts
+import ltechnologies.onionphone.onionvpn.core.model.observability.OpTrace
+import ltechnologies.onionphone.onionvpn.core.model.stability.ProcessLogLevel
 import ltechnologies.onionphone.onionvpn.core.tor.config.TorBridgeConfig
 import ltechnologies.onionphone.onionvpn.core.tor.lifecycle.TorReadiness
 import org.torproject.arti.ArtiControlNative
@@ -45,35 +47,56 @@ internal class ArtiRuntime(
 
     var onLogLine: ((String) -> Unit)? = null
 
+    private val logBuffer = ArtiLogLineBuffer { line ->
+        // TOR tab only — avoid duplicating ANSI/chunks into APP via Timber.tag("arti").
+        onLogLine?.invoke(line)
+    }
+
     fun isRunning(): Boolean = running
 
     /**
      * Starts Arti SOCKS+DNS on [ports], waits until listeners accept, then returns.
      *
-     * Bridge lines (when set) are passed to Arti with a managed Lyrebird path when the
-     * required transports are Lyrebird-backed. Conjure is rejected (C Tor only).
+     * Bridge lines (when set) are passed to Arti with managed Lyrebird and/or Conjure
+     * PT paths written under state_dir for native TransportConfig.
      */
     suspend fun start(
         ports: TunnelRuntimePorts,
         preferences: TunnelPreferences,
     ) {
-        stop()
+        OpTrace.stepSuspending("arti", "stop_and_await") { stopAndAwait() }
         lastPorts = ports
         lastPreferences = preferences
-        writeCircuitTimingPref(preferences.torMaxCircuitDirtinessSec)
-        writeStatus(ports, preferences, ready = false, dirtinessApplied = false)
+        writeCircuitTimingPref(
+            preferences.torMaxCircuitDirtinessSec,
+            preferences.torNewCircuitPeriodSec,
+        )
+        writePathPrefs(preferences.torExitNodes)
+        writePtPlugins(preferences.torBridges)
+        writeStatus(
+            ports,
+            preferences,
+            ready = false,
+            dirtinessApplied = false,
+            predictionLifetimeApplied = artiPredictionLifetimeSec(preferences.torNewCircuitPeriodSec),
+        )
 
         val bridges = TorBridgeConfig.parseLines(preferences.torBridges)
         val bridgeText = bridges.joinToString("\n").ifBlank { null }
         val ptPath = resolveManagedPtPath(preferences.torBridges)
 
-        if (bridges.isNotEmpty() && ptPath == null) {
+        if (bridges.isNotEmpty() && ptPath == null && !hasConjureOnly(preferences.torBridges)) {
             val transports = TorBridgeConfig.requiredTransports(preferences.torBridges)
             throw TunnelFailure.TorBinary(
-                "Arti bridges need a managed PT binary (Lyrebird/obfs4proxy) for $transports",
+                "Arti bridges need a managed PT binary (Lyrebird/obfs4proxy/Conjure) for $transports",
             )
         }
 
+        OpTrace.info(
+            "arti",
+            "Starting socks=${ports.torSocksPort} dns=${ports.torDnsPort} " +
+                "bridges=${bridges.size} pt=${ptPath?.name ?: "none"}",
+        )
         Timber.i(
             "Starting Arti socks=%d dns=%d bridges=%d pt=%s",
             ports.torSocksPort,
@@ -82,28 +105,27 @@ internal class ArtiRuntime(
             ptPath?.name ?: "none",
         )
 
-        val result = try {
-            ArtiMobileNative.start(
-                cacheDir = cacheDirectory.absolutePath,
-                stateDir = stateDirectory.absolutePath,
-                obfs4Port = 0,
-                snowflakePort = 0,
-                obfs4proxyPath = ptPath?.absolutePath,
-                bridgeLines = bridgeText,
-                socksPort = ports.torSocksPort,
-                dnsPort = ports.torDnsPort,
-                logListener = { line ->
-                    Timber.tag(LOG_TAG).d(line)
-                    onLogLine?.invoke(line)
-                },
-            )
-        } catch (error: Throwable) {
+        var result = try {
+            OpTrace.step("arti", "jni_start", ProcessLogLevel.INFO) {
+                invokeNativeStart(ports, bridgeText, ptPath)
+            }
+        } catch (error: Exception) {
             running = false
             writeStatus(ports, preferences, ready = false, error = error.message)
-            throw TunnelFailure.TorBinary(
-                "Arti JNI start failed: ${error.message ?: error.javaClass.simpleName}",
-                error,
-            )
+            throw error
+        }
+        if (isWrongStateError(result)) {
+            OpTrace.warn("arti", "still stopping — waiting then retrying start")
+            awaitNativeIdle(previousSocksPort = null)
+            result = try {
+                OpTrace.step("arti", "jni_start_retry", ProcessLogLevel.INFO) {
+                    invokeNativeStart(ports, bridgeText, ptPath)
+                }
+            } catch (error: Exception) {
+                running = false
+                writeStatus(ports, preferences, ready = false, error = error.message)
+                throw error
+            }
         }
 
         if (result.startsWith("Error:", ignoreCase = true)) {
@@ -113,17 +135,32 @@ internal class ArtiRuntime(
         }
 
         running = true
-        waitForListeners(ports)
-        // Patched libarti_mobile_ex.so: timing file applied at TorClientConfig build +
+        OpTrace.stepSuspending("arti", "wait_listeners", ProcessLogLevel.INFO) {
+            waitForListeners(ports)
+        }
+        // Patched libarti_mobile_ex.so: timing/path prefs applied at TorClientConfig build +
         // live reconfigure after client handle is published. Stock AAR: record-only.
         val controlApi = ArtiControlNative.isAvailable()
+        val pred = artiPredictionLifetimeSec(preferences.torNewCircuitPeriodSec)
         val liveApplied = controlApi &&
-            ArtiControlNative.applyMaxDirtiness(preferences.torMaxCircuitDirtinessSec)
+            ArtiControlNative.applyCircuitTiming(
+                preferences.torMaxCircuitDirtinessSec.coerceIn(60, 7_200),
+                pred,
+            )
+        if (controlApi) {
+            applyExitCountryLive(preferences.torExitNodes)
+        }
         writeStatus(
             ports,
             preferences,
             ready = true,
-            dirtinessApplied = controlApi, // start builder applied when Ext SO present
+            dirtinessApplied = controlApi,
+            predictionLifetimeApplied = pred,
+        )
+        OpTrace.info(
+            "arti",
+            "listeners ready socks=${ports.torSocksPort} dns=${ports.torDnsPort} " +
+                "controlApi=$controlApi liveDirt=$liveApplied",
         )
         Timber.i(
             "Arti listeners ready socks=%d dns=%d controlApi=%s liveDirt=%s",
@@ -135,36 +172,103 @@ internal class ArtiRuntime(
     }
 
     /**
-     * Persist MaxCircuitDirtiness for the native start path
-     * (`state_dir/onionvpn_circuit_timing`) and optional live [ArtiControlNative] reconfigure.
+     * Persist MaxCircuitDirtiness + Arti preemptive prediction_lifetime for native start.
+     * [predictionLifetimeSec] is the UI/C-Tor NewCircuitPeriod; Arti gets a floored value.
      */
-    fun writeCircuitTimingPref(maxDirtinessSec: Int) {
-        val secs = maxDirtinessSec.coerceIn(60, 7_200)
+    fun writeCircuitTimingPref(maxDirtinessSec: Int, predictionLifetimeSec: Int = maxDirtinessSec) {
+        val dirt = maxDirtinessSec.coerceIn(60, 7_200)
+        val pred = artiPredictionLifetimeSec(predictionLifetimeSec)
         val f = File(stateDirectory, TIMING_FILE_NAME)
-        runCatching { f.writeText("max_dirtiness_sec=$secs\n") }
-            .onFailure { Timber.w(it, "Failed to write Arti circuit timing pref") }
+        runCatching {
+            f.writeText("max_dirtiness_sec=$dirt\nprediction_lifetime_sec=$pred\n")
+        }.onFailure { Timber.w(it, "Failed to write Arti circuit timing pref") }
+    }
+
+    /** Persist ExitNodes country for SOCKS StreamPrefs::exit_country. */
+    fun writePathPrefs(exitNodesRaw: String) {
+        val cc = singleExitCountryOrNull(exitNodesRaw).orEmpty()
+        val f = File(stateDirectory, PATH_PREFS_FILE_NAME)
+        runCatching { f.writeText("exit_country=$cc\n") }
+            .onFailure { Timber.w(it, "Failed to write Arti path prefs") }
+    }
+
+    /** Persist Conjure PT path + register URL for native TransportConfig. */
+    fun writePtPlugins(bridgeText: String) {
+        val f = File(stateDirectory, PT_PLUGINS_FILE_NAME)
+        val needed = TorBridgeConfig.requiredTransports(bridgeText)
+        if ("conjure" !in needed) {
+            runCatching { f.delete() }
+            return
+        }
+        val conjure = TorBridgeConfig.binaryForTransport("conjure", nativeLibraryDir)
+            ?: return
+        if (!conjure.canExecute()) {
+            conjure.setExecutable(true, false)
+        }
+        runCatching {
+            f.writeText(
+                buildString {
+                    appendLine("conjure_path=${conjure.absolutePath}")
+                    appendLine("conjure_register_url=${TorBridgeConfig.CONJURE_REGISTER_URL}")
+                },
+            )
+        }.onFailure { Timber.w(it, "Failed to write Arti PT plugins pref") }
     }
 
     /**
-     * Live max_dirtiness via Ext JNI reconfigure. Returns false when Ext API absent
-     * (stock AAR) — caller should treat as record-only.
+     * Live max_dirtiness + prediction_lifetime via Ext JNI reconfigure.
+     * Returns false when Ext API absent (stock AAR) — caller should treat as record-only.
      */
-    fun applyMaxDirtinessLive(maxDirtinessSec: Int): Boolean {
-        writeCircuitTimingPref(maxDirtinessSec)
+    fun applyCircuitTimingLive(maxDirtinessSec: Int, predictionLifetimeSec: Int): Boolean {
+        val dirt = maxDirtinessSec.coerceIn(60, 7_200)
+        // Do NOT map C Tor NewCircuitPeriod → Arti prediction_lifetime 1:1.
+        // Arti's default is ~1h (how long to keep preemptive circuits for a port).
+        // Feeding 30–180s thrashs preemptive builds and feels like a bandwidth cap.
+        // Floor at Arti default; still honor larger UI values.
+        val pred = artiPredictionLifetimeSec(predictionLifetimeSec)
+        writeCircuitTimingPref(dirt, predictionLifetimeSec)
         lastPreferences = (lastPreferences ?: TunnelPreferences()).copy(
-            torMaxCircuitDirtinessSec = maxDirtinessSec.coerceIn(60, 7_200),
+            torMaxCircuitDirtinessSec = dirt,
+            // Persist the C Tor NewCircuitPeriod the UI asked for; Arti uses [pred] separately.
+            torNewCircuitPeriodSec = predictionLifetimeSec.coerceIn(10, 86_400),
         )
         if (!ArtiControlNative.isAvailable()) return false
-        val ok = ArtiControlNative.applyMaxDirtiness(maxDirtinessSec)
+        val ok = ArtiControlNative.applyCircuitTiming(dirt, pred)
         lastPorts?.let { ports ->
             writeStatus(
                 ports,
                 lastPreferences ?: TunnelPreferences(),
                 ready = running,
                 dirtinessApplied = ok,
+                predictionLifetimeApplied = pred,
             )
         }
         return ok
+    }
+
+    /** @deprecated Prefer [applyCircuitTimingLive]. */
+    fun applyMaxDirtinessLive(maxDirtinessSec: Int): Boolean {
+        val period = lastPreferences?.torNewCircuitPeriodSec ?: maxDirtinessSec
+        return applyCircuitTimingLive(maxDirtinessSec, period)
+    }
+
+    /**
+     * Apply ExitNodes as a single ISO country for SOCKS streams.
+     * Multi-country lists are rejected (arti-client StreamPrefs supports one country).
+     */
+    fun applyExitCountryLive(exitNodesRaw: String): Boolean {
+        writePathPrefs(exitNodesRaw)
+        lastPreferences = (lastPreferences ?: TunnelPreferences()).copy(torExitNodes = exitNodesRaw)
+        if (ArtiControlNative.controlApiVersion() < 2) return false
+        val codes = parseCountryCodes(exitNodesRaw)
+        return when {
+            codes.isEmpty() -> ArtiControlNative.applyExitCountry("")
+            codes.size == 1 -> ArtiControlNative.applyExitCountry(codes.first())
+            else -> {
+                Timber.w("Arti ExitNodes supports a single country; got %s", codes)
+                false
+            }
+        }
     }
 
     fun setDormantNative(soft: Boolean): Boolean =
@@ -175,7 +279,14 @@ internal class ArtiRuntime(
     fun readyForTrafficNative(): Boolean =
         ArtiControlNative.isAvailable() && ArtiControlNative.readyForTraffic()
 
+    fun bootstrapBlockageOrEmpty(): String = ArtiControlNative.bootstrapBlockage()
+
+    fun resolveHostnameNative(hostname: String): String? =
+        ArtiControlNative.resolveHostname(hostname)
+
     fun hasControlApi(): Boolean = ArtiControlNative.isAvailable()
+
+    fun controlApiVersion(): Int = ArtiControlNative.controlApiVersion()
 
     /**
      * New-identity equivalent: stop + start Arti on the same ports (drops all circuits).
@@ -211,16 +322,74 @@ internal class ArtiRuntime(
     fun currentPorts(): TunnelRuntimePorts? = lastPorts
 
     fun stop() {
-        if (!running) {
-            runCatching { ArtiMobileNative.stop() }
-            runCatching { statusFile.delete() }
-            return
-        }
+        signalNativeStop()
+    }
+
+    /**
+     * Signal Arti to stop and wait until the previous SOCKS listener is gone (or timeout).
+     * Required before [start] — native AMEx rejects start while state is `Stopping`.
+     */
+    suspend fun stopAndAwait(timeoutMs: Long = STOP_AWAIT_TIMEOUT_MS) {
+        val previousSocks = lastPorts?.torSocksPort
+        signalNativeStop()
+        awaitNativeIdle(previousSocksPort = previousSocks, timeoutMs = timeoutMs)
+        logBuffer.flush()
+    }
+
+    private fun signalNativeStop() {
         runCatching { ArtiMobileNative.stop() }
             .onFailure { Timber.w(it, "Arti stop failed") }
         running = false
         runCatching { statusFile.delete() }
     }
+
+    private suspend fun awaitNativeIdle(
+        previousSocksPort: Int?,
+        timeoutMs: Long = STOP_AWAIT_TIMEOUT_MS,
+    ) {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        if (previousSocksPort != null && previousSocksPort > 0) {
+            while (System.currentTimeMillis() < deadline) {
+                if (!TorReadiness.isSocksReady(previousSocksPort, timeoutMs = 150)) {
+                    // Native poll loop is 200ms; brief grace for Stopping → Stopped.
+                    delay(250)
+                    return
+                }
+                delay(100)
+            }
+            Timber.w("Arti SOCKS :%d still accepting after stop wait", previousSocksPort)
+            return
+        }
+        delay(400)
+    }
+
+    private fun invokeNativeStart(
+        ports: TunnelRuntimePorts,
+        bridgeText: String?,
+        ptPath: File?,
+    ): String = try {
+        ArtiMobileNative.start(
+            cacheDir = cacheDirectory.absolutePath,
+            stateDir = stateDirectory.absolutePath,
+            obfs4Port = 0,
+            snowflakePort = 0,
+            obfs4proxyPath = ptPath?.absolutePath,
+            bridgeLines = bridgeText,
+            socksPort = ports.torSocksPort,
+            dnsPort = ports.torDnsPort,
+            logListener = { chunk -> logBuffer.accept(chunk) },
+        )
+    } catch (error: Throwable) {
+        running = false
+        throw TunnelFailure.TorBinary(
+            "Arti JNI start failed: ${error.message ?: error.javaClass.simpleName}",
+            error,
+        )
+    }
+
+    private fun isWrongStateError(result: String): Boolean =
+        result.startsWith("Error:", ignoreCase = true) &&
+            result.contains("wrong state", ignoreCase = true)
 
     private fun writeStatus(
         ports: TunnelRuntimePorts,
@@ -228,13 +397,16 @@ internal class ArtiRuntime(
         ready: Boolean,
         error: String? = null,
         dirtinessApplied: Boolean = false,
+        predictionLifetimeApplied: Int = artiPredictionLifetimeSec(preferences.torNewCircuitPeriodSec),
     ) {
         val bridges = TorBridgeConfig.parseLines(preferences.torBridges).size
         val pt = runCatching {
             resolveManagedPtPath(preferences.torBridges)?.name
         }.getOrNull().orEmpty()
         val dirt = preferences.torMaxCircuitDirtinessSec.coerceIn(60, 7_200)
-        val controlApi = if (ArtiControlNative.isAvailable()) 1 else 0
+        val newCirc = preferences.torNewCircuitPeriodSec.coerceIn(10, 86_400)
+        val controlApi = ArtiControlNative.controlApiVersion()
+        val exitCc = singleExitCountryOrNull(preferences.torExitNodes).orEmpty()
         val text = buildString {
             appendLine("engine=arti")
             appendLine("version=$VERSION_LABEL")
@@ -250,8 +422,10 @@ internal class ArtiRuntime(
             appendLine("pt=$pt")
             appendLine("synthesize_onion_automap=1")
             appendLine("max_dirtiness_sec=$dirt")
-            appendLine("new_circuit_period_sec=${preferences.torNewCircuitPeriodSec}")
+            appendLine("prediction_lifetime_sec=$predictionLifetimeApplied")
+            appendLine("new_circuit_period_sec=$newCirc")
             appendLine("max_dirtiness_applied=${if (dirtinessApplied) 1 else 0}")
+            appendLine("exit_country=$exitCc")
             if (error != null) appendLine("error=${error.replace('\n', ' ')}")
         }
         runCatching { statusFile.writeText(text) }
@@ -262,12 +436,10 @@ internal class ArtiRuntime(
         if (!TorBridgeConfig.isConfigured(bridgeText)) return null
         val needed = TorBridgeConfig.requiredTransports(bridgeText)
         if (needed.isEmpty()) return null
-        if ("conjure" in needed) {
-            throw TunnelFailure.TorBinary(
-                "Arti engine does not support conjure bridges — switch Tor engine to C Tor",
-            )
-        }
-        val path = needed
+        // Conjure is registered via onionvpn_pt_plugins; Lyrebird path still passed to JNI.
+        val lyrebirdNeeded = needed - setOf("conjure")
+        if (lyrebirdNeeded.isEmpty()) return null
+        val path = lyrebirdNeeded
             .asSequence()
             .mapNotNull { TorBridgeConfig.binaryForTransport(it, nativeLibraryDir) }
             .firstOrNull()
@@ -276,6 +448,12 @@ internal class ArtiRuntime(
             path.setExecutable(true, false)
         }
         return path
+    }
+
+    private fun hasConjureOnly(bridgeText: String): Boolean {
+        val needed = TorBridgeConfig.requiredTransports(bridgeText)
+        return needed.isNotEmpty() && needed.all { it == "conjure" } &&
+            TorBridgeConfig.binaryForTransport("conjure", nativeLibraryDir) != null
     }
 
     private suspend fun waitForListeners(
@@ -313,7 +491,33 @@ internal class ArtiRuntime(
         const val VERSION_LABEL = "arti-mobile"
         /** Matches arti-client crate embedded in arti-mobile 1.7.0.1. */
         const val ARTI_CLIENT_VERSION = "0.36.0"
+        /**
+         * arti-client default [preemptive_circuits.prediction_lifetime] ≈ 1 hour.
+         * Must not track C Tor NewCircuitPeriod (often 30–180s).
+         */
+        const val ARTI_PREDICTION_LIFETIME_DEFAULT_SEC = 3_600
         const val STATUS_FILE_NAME = "arti.status"
         const val TIMING_FILE_NAME = "onionvpn_circuit_timing"
+        const val PATH_PREFS_FILE_NAME = "onionvpn_path_prefs"
+        const val PT_PLUGINS_FILE_NAME = "onionvpn_pt_plugins"
+        private const val STOP_AWAIT_TIMEOUT_MS = 20_000L
+
+        /** Map UI/C-Tor NewCircuitPeriod → Arti prediction_lifetime (floored). */
+        fun artiPredictionLifetimeSec(uiNewCircuitPeriodSec: Int): Int =
+            maxOf(uiNewCircuitPeriodSec, ARTI_PREDICTION_LIFETIME_DEFAULT_SEC)
+                .coerceIn(ARTI_PREDICTION_LIFETIME_DEFAULT_SEC, 86_400)
+
+        /** Parse Tor `{cc},{cc}` (also tolerates bare `cc`). */
+        fun parseCountryCodes(raw: String): Set<String> =
+            raw.split(',')
+                .map { it.trim().removePrefix("{").removeSuffix("}").lowercase() }
+                .filter { it.length == 2 && it.all(Char::isLetter) }
+                .toSet()
+
+        /** Single-country ExitNodes for Arti StreamPrefs::exit_country, or null. */
+        fun singleExitCountryOrNull(raw: String): String? {
+            val codes = parseCountryCodes(raw)
+            return codes.singleOrNull()
+        }
     }
 }

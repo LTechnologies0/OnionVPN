@@ -3,6 +3,7 @@ package ltechnologies.onionphone.onionvpn.service.lifecycle
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 import ltechnologies.onionphone.onionvpn.core.model.TorEngine
+import ltechnologies.onionphone.onionvpn.core.model.observability.OpTrace
 import ltechnologies.onionphone.onionvpn.core.model.stability.StabilityAction
 import ltechnologies.onionphone.onionvpn.core.tor.TorProcessManager
 import ltechnologies.onionphone.onionvpn.core.tor.control.model.TorControlStatus
@@ -38,15 +39,18 @@ internal class TunnelStabilityRecovery(
         lastHandledStabilityCode = code
         when (action) {
             StabilityAction.HARD_RECOVER -> {
+                OpTrace.warn("stability", "HARD_RECOVER code=$code")
                 Timber.w("Stability HARD_RECOVER code=%s", code)
                 scope.launch {
                     tor.recoverNetworkHard().onFailure {
+                        OpTrace.warn("stability", "HARD_RECOVER failed — soft fallback", it)
                         Timber.w(it, "Stability HARD_RECOVER failed — falling back to soft")
                         tor.onNetworkChanged()
                     }
                 }
             }
             StabilityAction.SOFT_RECOVER -> {
+                OpTrace.info("stability", "SOFT_RECOVER code=$code")
                 Timber.i("Stability SOFT_RECOVER code=%s", code)
                 tor.onNetworkChanged()
             }

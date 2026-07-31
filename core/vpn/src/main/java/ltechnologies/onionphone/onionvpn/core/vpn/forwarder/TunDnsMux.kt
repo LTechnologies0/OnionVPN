@@ -149,6 +149,15 @@ class TunDnsMux(
                             val blackhole = LeakPacketFilter.blackholeBeforeTorTcp(buf, n)
                             if (blackhole != null) {
                                 LeakPacketFilter.noteBlackhole(blackhole)
+                                // Silent UDP drops stall Chromium QUIC→TCP fallback; ICMP
+                                // port-unreachable makes the stack fail over promptly.
+                                IcmpUnreachable.buildForBlackholedUdp(buf, n)?.let { icmp ->
+                                    synchronized(tunWriteLock) {
+                                        if (running.get()) {
+                                            localTunOut.write(icmp, 0, icmp.size)
+                                        }
+                                    }
+                                }
                             } else if (!FirewallBridge.engine.allowOutbound(buf, n)) {
                                 // Drop
                             } else {
@@ -440,6 +449,42 @@ class TunDnsMux(
                 Timber.d("TunDnsMux DNS id mismatch expect=$expectId got=$respId — skip stale")
             }
             if (!matched) {
+                // One retry on a fresh socket — shared ThreadLocal socket can be wedged
+                // after a prior Tor-slow timeout with stale datagrams.
+                Timber.d("DNS forward timeout/mismatch — retry once q=$qname")
+                scratch.resetSocket()
+                val retrySock = scratch.socket()
+                retrySock.soTimeout = DNS_TIMEOUT_MS
+                retrySock.send(
+                    DatagramPacket(
+                        packet,
+                        dnsOffset,
+                        queryLen,
+                        upstreamHost,
+                        upstreamPort,
+                    ),
+                )
+                val retryDeadline = System.nanoTime() + DNS_TIMEOUT_MS * 1_000_000L
+                while (System.nanoTime() < retryDeadline) {
+                    val remainingMs =
+                        ((retryDeadline - System.nanoTime()) / 1_000_000L).coerceAtLeast(1L)
+                    retrySock.soTimeout = remainingMs.toInt().coerceAtMost(DNS_TIMEOUT_MS)
+                    try {
+                        retrySock.receive(response)
+                    } catch (_: java.net.SocketTimeoutException) {
+                        break
+                    }
+                    if (expectId < 0 || response.length < 2) continue
+                    val respId =
+                        ((scratch.responseBuf[0].toInt() and 0xff) shl 8) or
+                            (scratch.responseBuf[1].toInt() and 0xff)
+                    if (respId == expectId) {
+                        matched = true
+                        break
+                    }
+                }
+            }
+            if (!matched) {
                 Timber.d("DNS forward timeout/mismatch — query dropped q=$qname")
                 return
             }
@@ -534,18 +579,30 @@ class TunDnsMux(
         fun socket(): DatagramSocket {
             val existing = socket
             if (existing != null && !existing.isClosed) return existing
+            runCatching { existing?.close() }
+            socket = null
             // Bind loopback — never let the stub pick a clearnet interface.
             return DatagramSocket(0, InetAddress.getByName(TunnelEndpoints.LOOPBACK)).also {
                 it.soTimeout = DNS_TIMEOUT_MS
                 socket = it
             }
         }
+
+        fun resetSocket() {
+            runCatching { socket?.close() }
+            socket = null
+        }
     }
 
     companion object {
         private const val MTU = 1280
         private const val PROTO_UDP = 17
-        private const val DNS_TIMEOUT_MS = 8_000
+        /**
+         * Must exceed DNSCrypt's `timeout` (15s) — under Tor the stub often answers
+         * after 8–14s on a cold circuit; dropping earlier causes browser refresh timeouts
+         * while Arti bootstrap is already 100%.
+         */
+        private const val DNS_TIMEOUT_MS = 20_000
         private const val DNS_RESPONSE_CAP = 2048
         private const val EMPTY_READ_BASE_NS = 200_000L // 0.2ms base, exponential cap ~51ms
         private val DNS_CORE_THREADS =

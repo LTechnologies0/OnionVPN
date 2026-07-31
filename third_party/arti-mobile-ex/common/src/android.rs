@@ -1,8 +1,9 @@
 #![allow(non_snake_case)]
 
 use crate::{
-    apply_arti_max_dirtiness, arti_bootstrap_fraction, arti_ready_for_traffic, set_arti_dormant,
-    start_arti_proxy, stop_arti_proxy, ONIONVPN_CONTROL_API_VERSION,
+    apply_arti_circuit_timing, apply_arti_exit_country, apply_arti_max_dirtiness,
+    arti_bootstrap_blockage, arti_bootstrap_fraction, arti_ready_for_traffic, arti_resolve_hostname,
+    set_arti_dormant, start_arti_proxy, stop_arti_proxy, ONIONVPN_CONTROL_API_VERSION,
 };
 use std::sync::Arc;
 
@@ -147,6 +148,97 @@ pub extern "system" fn Java_org_torproject_arti_ArtiControlNative_applyMaxDirtin
             JNI_FALSE
         }
     }
+}
+
+#[no_mangle]
+#[allow(non_snake_case)]
+pub extern "system" fn Java_org_torproject_arti_ArtiControlNative_applyCircuitTimingJNI<'local>(
+    _env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    maxDirtinessSec: jint,
+    predictionLifetimeSec: jint,
+) -> jboolean {
+    let dirt = if maxDirtinessSec < 60 {
+        60u64
+    } else {
+        maxDirtinessSec as u64
+    };
+    let pred = if predictionLifetimeSec < 3_600 {
+        3_600u64
+    } else {
+        predictionLifetimeSec as u64
+    };
+    match apply_arti_circuit_timing(dirt, pred) {
+        Ok(()) => JNI_TRUE,
+        Err(e) => {
+            tracing::warn!("applyCircuitTimingJNI failed: {e}");
+            JNI_FALSE
+        }
+    }
+}
+
+#[no_mangle]
+#[allow(non_snake_case)]
+pub extern "system" fn Java_org_torproject_arti_ArtiControlNative_applyExitCountryJNI<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    countryCode: JString<'local>,
+) -> jboolean {
+    let cc: Option<String> = match env.get_string(&countryCode) {
+        Ok(v) => {
+            let s = v.to_string_lossy().into_owned();
+            if s.trim().is_empty() {
+                None
+            } else {
+                Some(s)
+            }
+        }
+        Err(_) => None,
+    };
+    match apply_arti_exit_country(cc.as_deref()) {
+        Ok(()) => JNI_TRUE,
+        Err(e) => {
+            tracing::warn!("applyExitCountryJNI failed: {e}");
+            JNI_FALSE
+        }
+    }
+}
+
+#[no_mangle]
+#[allow(non_snake_case)]
+pub extern "system" fn Java_org_torproject_arti_ArtiControlNative_resolveHostnameJNI<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    hostname: JString<'local>,
+) -> jstring {
+    let host: String = match env.get_string(&hostname) {
+        Ok(v) => v.to_string_lossy().into_owned(),
+        Err(_) => {
+            return env
+                .new_string("Error: invalid hostname")
+                .expect("jstring")
+                .into_raw();
+        }
+    };
+    let result = match arti_resolve_hostname(&host) {
+        Ok(ips) => format!("OK:{ips}"),
+        Err(e) => format!("Error: {e}"),
+    };
+    env.new_string(result)
+        .expect("Couldn't create Java string!")
+        .into_raw()
+}
+
+#[no_mangle]
+#[allow(non_snake_case)]
+pub extern "system" fn Java_org_torproject_arti_ArtiControlNative_bootstrapBlockageJNI<'local>(
+    env: JNIEnv<'local>,
+    _class: JClass<'local>,
+) -> jstring {
+    let msg = arti_bootstrap_blockage().unwrap_or_default();
+    env.new_string(msg)
+        .expect("Couldn't create Java string!")
+        .into_raw()
 }
 
 #[no_mangle]

@@ -32,6 +32,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -39,6 +40,8 @@ import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import ltechnologies.onionphone.onionvpn.core.model.observability.DiagnosticsGate
+import ltechnologies.onionphone.onionvpn.core.model.stability.StabilitySeverity
 import ltechnologies.onionphone.onionvpn.logging.LogLine
 import ltechnologies.onionphone.onionvpn.logging.LogSource
 import ltechnologies.onionphone.onionvpn.logging.TunnelLogBuffer
@@ -50,6 +53,7 @@ fun LogsScreen() {
     val tabs = listOf("OnionVPN", "DNSCrypt", "Tor")
     val sources = listOf(LogSource.APP, LogSource.DNSCRYPT, LogSource.TOR)
     val context = LocalContext.current
+    val diagnosticsOn by DiagnosticsGate.diagnosticsEnabled.collectAsStateWithLifecycle()
 
     val appLogs by TunnelLogBuffer.appLogs.collectAsStateWithLifecycle()
     val dnsLogs by TunnelLogBuffer.dnsCryptLogs.collectAsStateWithLifecycle()
@@ -61,6 +65,15 @@ fun LogsScreen() {
     }
 
     Column(modifier = Modifier.fillMaxSize()) {
+        if (!diagnosticsOn) {
+            Text(
+                text = "Logging disabled — turn off “No logs (privacy)” in Settings to capture " +
+                    "TRACE→ERROR pipeline and native logs.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(16.dp),
+            )
+        }
         PrimaryScrollableTabRow(
             selectedTabIndex = tabIndex,
             containerColor = MaterialTheme.colorScheme.surface,
@@ -164,16 +177,24 @@ private fun LogList(lines: List<LogLine>) {
         ) {
             items(lines) { line ->
                 Text(
-                    text = "${formatter.format(Date(line.timestampMs))}  ${line.text}",
+                    text = "${formatter.format(Date(line.timestampMs))}  ${line.level.exportMark}  ${line.text}",
                     style = MaterialTheme.typography.bodySmall,
-                    color = if (line.isError) {
-                        MaterialTheme.colorScheme.error
-                    } else {
-                        MaterialTheme.colorScheme.onSurface
-                    },
+                    color = logColor(line.severity),
                     modifier = Modifier.fillMaxWidth(),
                 )
             }
         }
+    }
+}
+
+@Composable
+private fun logColor(severity: StabilitySeverity): Color {
+    val scheme = MaterialTheme.colorScheme
+    return when (severity) {
+        StabilitySeverity.CRITICAL, StabilitySeverity.ERROR -> scheme.error
+        StabilitySeverity.WARN -> scheme.tertiary
+        StabilitySeverity.INFO -> scheme.onSurface
+        StabilitySeverity.DEBUG, StabilitySeverity.TRACE, StabilitySeverity.IGNORE ->
+            scheme.onSurfaceVariant.copy(alpha = 0.75f)
     }
 }

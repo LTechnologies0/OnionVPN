@@ -21,6 +21,8 @@ class Socks5Client(
     private val username: String,
     private val password: String,
     private val connectTimeoutMs: Int = 20_000,
+    /** Bound for SOCKS greeting/auth/CONNECT reply — Tor circuit build on cold path. */
+    private val handshakeTimeoutMs: Int = 55_000,
     private val protect: ((Socket) -> Boolean)? = null,
 ) {
     fun connect(destHost: String, destPort: Int): Socket {
@@ -31,8 +33,9 @@ class Socks5Client(
             throw IOException("VpnService.protect failed for SOCKS $proxyHost:$proxyPort")
         }
         socket.tcpNoDelay = true
-        socket.soTimeout = 0
         socket.connect(InetSocketAddress(proxyHost, proxyPort), connectTimeoutMs)
+        // Handshake must not hang forever when Arti is bootstrapped but exits are cold.
+        socket.soTimeout = handshakeTimeoutMs
         val input = DataInputStream(socket.getInputStream())
         val output = DataOutputStream(socket.getOutputStream())
 
@@ -41,92 +44,103 @@ class Socks5Client(
         require(username.isNotBlank() && password.isNotBlank()) {
             "SOCKS5 username/password required for IsolateSOCKSAuth"
         }
-        output.write(byteArrayOf(0x05, 0x01, 0x02))
-        output.flush()
-        val ver = input.readUnsignedByte()
-        val method = input.readUnsignedByte()
-        if (ver != 0x05 || method != 0x02) {
-            socket.close()
-            throw IOException("SOCKS5 auth method rejected ver=$ver method=$method")
-        }
-
-        val userBytes = username.toByteArray(StandardCharsets.UTF_8)
-        val passBytes = password.toByteArray(StandardCharsets.UTF_8)
-        if (userBytes.size > 255 || passBytes.size > 255) {
-            socket.close()
-            throw IOException("SOCKS5 credentials too long")
-        }
-        output.writeByte(0x01)
-        output.writeByte(userBytes.size)
-        output.write(userBytes)
-        output.writeByte(passBytes.size)
-        output.write(passBytes)
-        output.flush()
-        val authVer = input.readUnsignedByte()
-        val authStatus = input.readUnsignedByte()
-        if (authVer != 0x01 || authStatus != 0x00) {
-            socket.close()
-            throw IOException("SOCKS5 username/password rejected")
-        }
-
-        // CONNECT — IPv4 literal, IPv6 literal, or hostname (SOCKS5A via Tor).
-        val hostBytes = destHost.toByteArray(StandardCharsets.UTF_8)
-        val isIpv4 = destHost.matches(IPV4_REGEX)
-        val isIpv6 = !isIpv4 && destHost.indexOf(':') >= 0
-        output.writeByte(0x05)
-        output.writeByte(0x01) // CONNECT
-        output.writeByte(0x00)
-        when {
-            isIpv4 -> {
-                output.writeByte(0x01)
-                output.write(InetAddress.getByName(destHost).address)
-            }
-            isIpv6 -> {
-                val addr = InetAddress.getByName(destHost).address
-                if (addr.size != 16) {
-                    socket.close()
-                    throw IOException("SOCKS5 IPv6 address length ${addr.size}")
-                }
-                output.writeByte(0x04)
-                output.write(addr)
-            }
-            else -> {
-                if (hostBytes.size > 255) {
-                    socket.close()
-                    throw IOException("SOCKS5 hostname too long")
-                }
-                output.writeByte(0x03)
-                output.writeByte(hostBytes.size)
-                output.write(hostBytes)
-            }
-        }
-        output.writeShort(destPort)
-        output.flush()
-
-        val respVer = input.readUnsignedByte()
-        val respStatus = input.readUnsignedByte()
-        input.readUnsignedByte() // reserved
-        val atyp = input.readUnsignedByte()
-        when (atyp) {
-            0x01 -> input.skipBytes(4)
-            0x03 -> {
-                val n = input.readUnsignedByte()
-                input.skipBytes(n)
-            }
-            0x04 -> input.skipBytes(16)
-            else -> {
+        try {
+            output.write(byteArrayOf(0x05, 0x01, 0x02))
+            output.flush()
+            val ver = input.readUnsignedByte()
+            val method = input.readUnsignedByte()
+            if (ver != 0x05 || method != 0x02) {
                 socket.close()
-                throw IOException("SOCKS5 bad atyp=$atyp")
+                throw IOException("SOCKS5 auth method rejected ver=$ver method=$method")
             }
-        }
-        input.skipBytes(2) // bind port
-        if (respVer != 0x05 || respStatus != 0x00) {
-            socket.close()
-            val signal = TorStabilityCodes.SocksReply.signalFor(respStatus)
+
+            val userBytes = username.toByteArray(StandardCharsets.UTF_8)
+            val passBytes = password.toByteArray(StandardCharsets.UTF_8)
+            if (userBytes.size > 255 || passBytes.size > 255) {
+                socket.close()
+                throw IOException("SOCKS5 credentials too long")
+            }
+            output.writeByte(0x01)
+            output.writeByte(userBytes.size)
+            output.write(userBytes)
+            output.writeByte(passBytes.size)
+            output.write(passBytes)
+            output.flush()
+            val authVer = input.readUnsignedByte()
+            val authStatus = input.readUnsignedByte()
+            if (authVer != 0x01 || authStatus != 0x00) {
+                socket.close()
+                throw IOException("SOCKS5 username/password rejected")
+            }
+
+            // CONNECT — IPv4 literal, IPv6 literal, or hostname (SOCKS5A via Tor).
+            val hostBytes = destHost.toByteArray(StandardCharsets.UTF_8)
+            val isIpv4 = destHost.matches(IPV4_REGEX)
+            val isIpv6 = !isIpv4 && destHost.indexOf(':') >= 0
+            output.writeByte(0x05)
+            output.writeByte(0x01) // CONNECT
+            output.writeByte(0x00)
+            when {
+                isIpv4 -> {
+                    output.writeByte(0x01)
+                    output.write(InetAddress.getByName(destHost).address)
+                }
+                isIpv6 -> {
+                    val addr = InetAddress.getByName(destHost).address
+                    if (addr.size != 16) {
+                        socket.close()
+                        throw IOException("SOCKS5 IPv6 address length ${addr.size}")
+                    }
+                    output.writeByte(0x04)
+                    output.write(addr)
+                }
+                else -> {
+                    if (hostBytes.size > 255) {
+                        socket.close()
+                        throw IOException("SOCKS5 hostname too long")
+                    }
+                    output.writeByte(0x03)
+                    output.writeByte(hostBytes.size)
+                    output.write(hostBytes)
+                }
+            }
+            output.writeShort(destPort)
+            output.flush()
+
+            val respVer = input.readUnsignedByte()
+            val respStatus = input.readUnsignedByte()
+            input.readUnsignedByte() // reserved
+            val atyp = input.readUnsignedByte()
+            when (atyp) {
+                0x01 -> input.skipBytes(4)
+                0x03 -> {
+                    val n = input.readUnsignedByte()
+                    input.skipBytes(n)
+                }
+                0x04 -> input.skipBytes(16)
+                else -> {
+                    socket.close()
+                    throw IOException("SOCKS5 bad atyp=$atyp")
+                }
+            }
+            input.skipBytes(2) // bind port
+            if (respVer != 0x05 || respStatus != 0x00) {
+                socket.close()
+                val signal = TorStabilityCodes.SocksReply.signalFor(respStatus)
+                throw IOException(
+                    "SOCKS5 CONNECT failed status=$respStatus (${signal.detail.ifBlank { signal.code }})",
+                )
+            }
+        } catch (e: java.net.SocketTimeoutException) {
+            runCatching { socket.close() }
             throw IOException(
-                "SOCKS5 CONNECT failed status=$respStatus (${signal.detail.ifBlank { signal.code }})",
+                "SOCKS5 handshake timed out after ${handshakeTimeoutMs}ms " +
+                    "(cold circuit / congested Tor)",
+                e,
             )
         }
+        // Streaming payload — no idle read deadline on the tunnel pipe.
+        socket.soTimeout = 0
         return socket
     }
 
