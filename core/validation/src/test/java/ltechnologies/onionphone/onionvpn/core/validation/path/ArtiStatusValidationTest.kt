@@ -51,6 +51,7 @@ class ArtiStatusValidationTest {
             engine=arti
             version=arti-mobile
             arti_client=0.36.0
+            control_api=1
             ready=1
             socks=9050
             dns=9053
@@ -58,7 +59,7 @@ class ArtiStatusValidationTest {
             socks_auth_isolation=1
             synthesize_onion_automap=1
             max_dirtiness_sec=600
-            max_dirtiness_applied=0
+            max_dirtiness_applied=1
         """.trimIndent()
         val check = TorPathValidator.validateArtiStatusContent(
             status,

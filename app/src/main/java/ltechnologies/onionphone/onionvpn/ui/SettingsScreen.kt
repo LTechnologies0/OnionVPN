@@ -417,8 +417,8 @@ fun SettingsScreen(
                 TorEngine.ARTI ->
                     "Arti (arti-client ${ltechnologies.onionphone.onionvpn.core.tor.control.TorControlCompat.ARTI_CLIENT_DOCS_VERSION}): " +
                         "SOCKS+DNS, Automap synth, SOCKS-auth isolation, NEWNYM/bridges/RELOAD = restart. " +
-                        "DORMANT/ACTIVE = synthetic status (set_dormant not in JNI). " +
-                        "No circuits UI / Entry·Exit / Conjure / live max_dirtiness (JNI gap)."
+                        "DORMANT/ACTIVE + MaxCircuitDirtiness via Ext JNI when patched SO present. " +
+                        "No circuits UI / Entry·Exit / Conjure / NewCircuitPeriod (no Arti field)."
             },
         )
         Text(

@@ -45,6 +45,8 @@ android {
     packaging {
         jniLibs {
             useLegacyPackaging = true
+            // Prefer OnionVPN-patched libarti_mobile_ex.so from app/jniLibs over Maven AAR.
+            pickFirsts += "**/libarti_mobile_ex.so"
         }
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"

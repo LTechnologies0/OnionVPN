@@ -47,7 +47,7 @@ class TorEnginePortAllocatorTest {
         assertFalse(a.nodePrefs)
         assertTrue(a.bridgesAtStart)
         assertTrue(a.socksAuthIsolation)
-        assertTrue(a.dormantSignals) // app-layer synthetic (set_dormant not in JNI)
+        assertTrue(a.dormantSignals) // TorClient::set_dormant via Ext JNI when patched
         assertTrue(c.nodePrefs)
         assertTrue(c.bridgesAtStart)
         assertTrue(c.socksAuthIsolation)

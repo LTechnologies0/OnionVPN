@@ -45,6 +45,7 @@ class TorControlCompatTest {
             "DORMANT",
             "HEARTBEAT",
             "SOCKS_AUTH_ISOLATION",
+            "SETCONF_circuit_timing",
         )
         for (name in oneToOne) {
             assertTrue(name, TorControlCompat.isOneToOneOnArti(name))
@@ -56,11 +57,14 @@ class TorControlCompatTest {
         assertEquals(ArtiBehavior.EQUIVALENT, TorControlCompat.behavior("RESOLVE"))
         assertEquals(Parity.APP_LAYER_1_1, TorControlCompat.parity("RESOLVE"))
         assertEquals(Parity.APP_LAYER_1_1, TorControlCompat.parity("CLEARDNSCACHE"))
-        assertEquals(Parity.APP_LAYER_1_1, TorControlCompat.parity("ACTIVE"))
-        assertEquals(Parity.APP_LAYER_1_1, TorControlCompat.parity("DORMANT"))
+        assertEquals(Parity.SEMANTIC_1_1, TorControlCompat.parity("ACTIVE"))
+        assertEquals(Parity.SEMANTIC_1_1, TorControlCompat.parity("DORMANT"))
         assertEquals(ArtiBehavior.EQUIVALENT, TorControlCompat.behavior("ACTIVE"))
         assertEquals(ArtiBehavior.EQUIVALENT, TorControlCompat.behavior("DORMANT"))
         assertEquals(ArtiBehavior.EQUIVALENT, TorControlCompat.behavior("SOCKS_AUTH_ISOLATION"))
+        assertEquals(Parity.SEMANTIC_1_1, TorControlCompat.parity("SETCONF_circuit_timing"))
+        assertEquals(ArtiBehavior.EQUIVALENT, TorControlCompat.behavior("SETCONF_circuit_timing"))
+        assertEquals(Parity.SEMANTIC_1_1, TorControlCompat.parity("GETINFO_bootstrap"))
     }
 
     @Test
@@ -75,7 +79,6 @@ class TorControlCompatTest {
             "AUTHENTICATE",
             "SETCONF_geoip",
             "SETCONF_nodes",
-            "SETCONF_circuit_timing",
         )
         for (name in limited) {
             assertEquals(name, Parity.ENGINE_LIMITATION, TorControlCompat.parity(name))
@@ -86,8 +89,8 @@ class TorControlCompatTest {
         )) {
             assertFalse(name, TorControlCompat.isSupported(TorEngine.ARTI, name))
         }
-        assertEquals(ArtiBehavior.NOOP_OK, TorControlCompat.behavior("SETCONF_circuit_timing"))
         assertTrue(TorControlCompat.isSupported(TorEngine.ARTI, "SETCONF_circuit_timing"))
+        assertTrue(TorControlCompat.isOneToOneOnArti("SETCONF_circuit_timing"))
     }
 
     @Test

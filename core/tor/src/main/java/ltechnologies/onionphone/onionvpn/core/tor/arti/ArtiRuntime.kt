@@ -9,6 +9,7 @@ import ltechnologies.onionphone.onionvpn.core.model.TunnelPreferences
 import ltechnologies.onionphone.onionvpn.core.model.TunnelRuntimePorts
 import ltechnologies.onionphone.onionvpn.core.tor.config.TorBridgeConfig
 import ltechnologies.onionphone.onionvpn.core.tor.lifecycle.TorReadiness
+import org.torproject.arti.ArtiControlNative
 import org.torproject.arti.ArtiMobileNative
 import timber.log.Timber
 
@@ -59,7 +60,8 @@ internal class ArtiRuntime(
         stop()
         lastPorts = ports
         lastPreferences = preferences
-        writeStatus(ports, preferences, ready = false)
+        writeCircuitTimingPref(preferences.torMaxCircuitDirtinessSec)
+        writeStatus(ports, preferences, ready = false, dirtinessApplied = false)
 
         val bridges = TorBridgeConfig.parseLines(preferences.torBridges)
         val bridgeText = bridges.joinToString("\n").ifBlank { null }
@@ -112,9 +114,68 @@ internal class ArtiRuntime(
 
         running = true
         waitForListeners(ports)
-        writeStatus(ports, preferences, ready = true)
-        Timber.i("Arti listeners ready socks=%d dns=%d", ports.torSocksPort, ports.torDnsPort)
+        // Patched libarti_mobile_ex.so: timing file applied at TorClientConfig build +
+        // live reconfigure after client handle is published. Stock AAR: record-only.
+        val controlApi = ArtiControlNative.isAvailable()
+        val liveApplied = controlApi &&
+            ArtiControlNative.applyMaxDirtiness(preferences.torMaxCircuitDirtinessSec)
+        writeStatus(
+            ports,
+            preferences,
+            ready = true,
+            dirtinessApplied = controlApi, // start builder applied when Ext SO present
+        )
+        Timber.i(
+            "Arti listeners ready socks=%d dns=%d controlApi=%s liveDirt=%s",
+            ports.torSocksPort,
+            ports.torDnsPort,
+            controlApi,
+            liveApplied,
+        )
     }
+
+    /**
+     * Persist MaxCircuitDirtiness for the native start path
+     * (`state_dir/onionvpn_circuit_timing`) and optional live [ArtiControlNative] reconfigure.
+     */
+    fun writeCircuitTimingPref(maxDirtinessSec: Int) {
+        val secs = maxDirtinessSec.coerceIn(60, 7_200)
+        val f = File(stateDirectory, TIMING_FILE_NAME)
+        runCatching { f.writeText("max_dirtiness_sec=$secs\n") }
+            .onFailure { Timber.w(it, "Failed to write Arti circuit timing pref") }
+    }
+
+    /**
+     * Live max_dirtiness via Ext JNI reconfigure. Returns false when Ext API absent
+     * (stock AAR) — caller should treat as record-only.
+     */
+    fun applyMaxDirtinessLive(maxDirtinessSec: Int): Boolean {
+        writeCircuitTimingPref(maxDirtinessSec)
+        lastPreferences = (lastPreferences ?: TunnelPreferences()).copy(
+            torMaxCircuitDirtinessSec = maxDirtinessSec.coerceIn(60, 7_200),
+        )
+        if (!ArtiControlNative.isAvailable()) return false
+        val ok = ArtiControlNative.applyMaxDirtiness(maxDirtinessSec)
+        lastPorts?.let { ports ->
+            writeStatus(
+                ports,
+                lastPreferences ?: TunnelPreferences(),
+                ready = running,
+                dirtinessApplied = ok,
+            )
+        }
+        return ok
+    }
+
+    fun setDormantNative(soft: Boolean): Boolean =
+        ArtiControlNative.isAvailable() && ArtiControlNative.setDormant(soft)
+
+    fun bootstrapFractionOrNull(): Float? = ArtiControlNative.bootstrapFraction()
+
+    fun readyForTrafficNative(): Boolean =
+        ArtiControlNative.isAvailable() && ArtiControlNative.readyForTraffic()
+
+    fun hasControlApi(): Boolean = ArtiControlNative.isAvailable()
 
     /**
      * New-identity equivalent: stop + start Arti on the same ports (drops all circuits).
@@ -166,17 +227,20 @@ internal class ArtiRuntime(
         preferences: TunnelPreferences,
         ready: Boolean,
         error: String? = null,
+        dirtinessApplied: Boolean = false,
     ) {
         val bridges = TorBridgeConfig.parseLines(preferences.torBridges).size
         val pt = runCatching {
             resolveManagedPtPath(preferences.torBridges)?.name
         }.getOrNull().orEmpty()
         val dirt = preferences.torMaxCircuitDirtinessSec.coerceIn(60, 7_200)
+        val controlApi = if (ArtiControlNative.isAvailable()) 1 else 0
         val text = buildString {
             appendLine("engine=arti")
             appendLine("version=$VERSION_LABEL")
             // Embedded crate (libarti_mobile_ex.so) — docs: docs.rs/arti-client/0.36.0
             appendLine("arti_client=$ARTI_CLIENT_VERSION")
+            appendLine("control_api=$controlApi")
             appendLine("ready=${if (ready) 1 else 0}")
             appendLine("socks=${ports.torSocksPort}")
             appendLine("dns=${ports.torDnsPort}")
@@ -185,10 +249,9 @@ internal class ArtiRuntime(
             appendLine("bridges=$bridges")
             appendLine("pt=$pt")
             appendLine("synthesize_onion_automap=1")
-            // Recorded preference only — CircuitTimingBuilder::max_dirtiness not set via JNI.
             appendLine("max_dirtiness_sec=$dirt")
             appendLine("new_circuit_period_sec=${preferences.torNewCircuitPeriodSec}")
-            appendLine("max_dirtiness_applied=0")
+            appendLine("max_dirtiness_applied=${if (dirtinessApplied) 1 else 0}")
             if (error != null) appendLine("error=${error.replace('\n', ' ')}")
         }
         runCatching { statusFile.writeText(text) }
@@ -251,5 +314,6 @@ internal class ArtiRuntime(
         /** Matches arti-client crate embedded in arti-mobile 1.7.0.1. */
         const val ARTI_CLIENT_VERSION = "0.36.0"
         const val STATUS_FILE_NAME = "arti.status"
+        const val TIMING_FILE_NAME = "onionvpn_circuit_timing"
     }
 }

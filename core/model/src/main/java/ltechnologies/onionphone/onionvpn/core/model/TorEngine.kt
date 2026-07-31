@@ -63,8 +63,8 @@ data class TorEngineCapabilities(
     val liveSetConf: Boolean,
     /**
      * DORMANT / ACTIVE semantics.
-     * C Tor: real SIGNAL. Arti: app-layer status flag
-     * ([TorClient::set_dormant] exists in 0.36.0 but is not in arti-mobile JNI).
+     * C Tor: real SIGNAL. Arti: TorClient::set_dormant via OnionVPN Ext JNI when present;
+     * otherwise app-layer status flag.
      */
     val dormantSignals: Boolean,
     /** Runtime torrc file is authoritative config. */
@@ -108,7 +108,7 @@ data class TorEngineCapabilities(
             newIdentity = true,
             circuitInspection = false,
             liveSetConf = false,
-            // App-layer synthetic dormant flag (Rust set_dormant not in JNI).
+            // TorClient::set_dormant via Ext JNI when patched .so is loaded.
             dormantSignals = true,
             torrcConfig = false,
             conjureBridges = false,

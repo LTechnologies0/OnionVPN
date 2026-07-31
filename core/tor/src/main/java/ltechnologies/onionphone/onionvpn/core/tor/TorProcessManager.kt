@@ -67,8 +67,8 @@ class TorProcessManager(
     private var activeEngine: TorEngine = TorEngine.LITTLE_T
     private val arti = ArtiRuntime(context)
     /**
-     * App-layer dormant flag for Arti (arti-client 0.36.0 has set_dormant but JNI does not).
-     * Runtime stays running under Blocking TUN; status.dormant mirrors little-t GETINFO dormant.
+     * App-layer dormant flag for Arti when Ext JNI is absent.
+     * Prefer [ArtiControlNative.setDormant] (TorClient::set_dormant) when patched .so is loaded.
      */
     @Volatile
     private var artiDormant: Boolean = false
@@ -294,12 +294,16 @@ class TorProcessManager(
         }
     }
 
-    /** SIGNAL ACTIVE — Arti: clear synthetic dormant (DormantMode::Normal analogue). */
+    /** SIGNAL ACTIVE — Arti: TorClient::set_dormant(Normal) when Ext JNI present. */
     fun signalActive(): Result<Unit> {
         if (activeEngine == TorEngine.ARTI) {
             artiDormant = false
+            val native = arti.setDormantNative(soft = false)
             publishArtiReadyStatus()
-            Timber.i("Arti ACTIVE (synthetic dormant cleared; runtime kept)")
+            Timber.i(
+                "Arti ACTIVE (native set_dormant=%s; runtime kept)",
+                native,
+            )
             return Result.success(Unit)
         }
         if (!control.isConnected) return Result.failure(IOException("control not connected"))
@@ -310,14 +314,18 @@ class TorProcessManager(
     }
 
     /**
-     * SIGNAL DORMANT — Arti: synthetic dormant flag (set_dormant Soft not in JNI).
-     * Runtime stays up so kill-switch Blocking recovery avoids cold bootstrap.
+     * SIGNAL DORMANT — Arti: TorClient::set_dormant(Soft) when Ext JNI present;
+     * otherwise synthetic flag. Runtime stays up under Blocking TUN.
      */
     fun signalDormant(): Result<Unit> {
         if (activeEngine == TorEngine.ARTI) {
             artiDormant = true
+            val native = arti.setDormantNative(soft = true)
             publishArtiReadyStatus()
-            Timber.i("Arti DORMANT (synthetic; runtime kept under Blocking)")
+            Timber.i(
+                "Arti DORMANT (native set_dormant Soft=%s; runtime kept under Blocking)",
+                native,
+            )
             return Result.success(Unit)
         }
         if (!control.isConnected) return Result.failure(IOException("control not connected"))
@@ -370,8 +378,8 @@ class TorProcessManager(
 
     /**
      * Live SETCONF MaxCircuitDirtiness / NewCircuitPeriod.
-     * Arti: prefs updated for next C Tor switch; arti-mobile JNI cannot set
-     * circuit_timing.max_dirtiness — documented ENGINE_LIMITATION / NOOP_OK.
+     * Arti: CircuitTimingBuilder::max_dirtiness via Ext JNI reconfigure when available;
+     * NewCircuitPeriod has no arti-client 0.36.0 field (recorded only).
      */
     fun applyCircuitTimingLive(
         maxCircuitDirtinessSec: Int,
@@ -382,36 +390,12 @@ class TorProcessManager(
             torNewCircuitPeriodSec = newCircuitPeriodSec,
         )
         if (activeEngine == TorEngine.ARTI) {
-            // Persist recorded preference into arti.status (not applied — JNI gap).
-            runtimePorts?.let { ports ->
-                // rewrite status via a soft restart-free update: stopInternal not needed
-                // ArtiRuntime writes status only on start — update file here for validators/UI.
-                runCatching {
-                    val f = arti.statusFile
-                    if (f.exists()) {
-                        val body = f.readText()
-                            .lineSequence()
-                            .filterNot {
-                                it.startsWith("max_dirtiness_sec=") ||
-                                    it.startsWith("new_circuit_period_sec=") ||
-                                    it.startsWith("max_dirtiness_applied=")
-                            }
-                            .joinToString("\n")
-                        f.writeText(
-                            body.trimEnd() + "\n" +
-                                "max_dirtiness_sec=$maxCircuitDirtinessSec\n" +
-                                "new_circuit_period_sec=$newCircuitPeriodSec\n" +
-                                "max_dirtiness_applied=0\n",
-                        )
-                    }
-                }
-            }
+            val applied = arti.applyMaxDirtinessLive(maxCircuitDirtinessSec)
             Timber.i(
-                "Arti circuit timing stored only (dirt=%ds period=%ds) — " +
-                    "CircuitTimingBuilder::max_dirtiness not exposed by arti-mobile JNI; " +
-                    "NewCircuitPeriod has no arti-client 0.36.0 field",
+                "Arti circuit timing dirt=%ds period=%ds applied=%s (NewCircuitPeriod has no Arti field)",
                 maxCircuitDirtinessSec,
                 newCircuitPeriodSec,
+                applied,
             )
             return Result.success(Unit)
         }
@@ -666,19 +650,36 @@ class TorProcessManager(
 
     private fun publishArtiReadyStatus() {
         val socksUp = runtimePorts?.let { TorReadiness.areSocksPortsReady(it) } == true
-        val ready = socksUp && arti.isRunning() && !artiDormant
+        val frac = arti.bootstrapFractionOrNull()
+        val nativeReady = arti.readyForTrafficNative()
+        val ready = when {
+            artiDormant -> false
+            nativeReady -> true
+            frac != null && frac >= 0.99f && socksUp && arti.isRunning() -> true
+            else -> socksUp && arti.isRunning() && !artiDormant
+        }
+        val bootPct = when {
+            ready -> 100
+            frac != null -> (frac * 100f).toInt().coerceIn(0, 99)
+            arti.isRunning() && socksUp -> 100
+            arti.isRunning() -> 50
+            else -> 0
+        }
         // connected=true = runtime healthy (UI bootstrap). Circuits stay 0 — no control plane.
-        // bootstrapProgress mirrors BootstrapStatus::as_frac (0.0→0, ready_for_traffic→100).
         control.publishSyntheticStatus(
             TorControlStatus(
                 connected = arti.isRunning() && socksUp,
-                torVersion = "${ArtiRuntime.VERSION_LABEL} (arti-client ${ArtiRuntime.ARTI_CLIENT_VERSION})",
-                bootstrapProgress = when {
-                    ready -> 100
-                    arti.isRunning() && socksUp -> 100
-                    arti.isRunning() -> 50
-                    else -> 0
+                torVersion = buildString {
+                    append(ArtiRuntime.VERSION_LABEL)
+                    append(" (arti-client ")
+                    append(ArtiRuntime.ARTI_CLIENT_VERSION)
+                    if (arti.hasControlApi()) {
+                        append("; control-api=")
+                        append(org.torproject.arti.ArtiControlNative.controlApiVersion())
+                    }
+                    append(')')
                 },
+                bootstrapProgress = bootPct,
                 bootstrapTag = when {
                     ready -> "done"
                     artiDormant -> "dormant"
@@ -686,7 +687,11 @@ class TorProcessManager(
                     else -> "off"
                 },
                 bootstrapSummary = when {
+                    ready && arti.hasControlApi() ->
+                        "Arti ready_for_traffic (bootstrap as_frac=${frac ?: 1f})"
                     ready -> "Arti SOCKS/DNS ready (ready_for_traffic)"
+                    artiDormant && arti.hasControlApi() ->
+                        "Arti dormant (TorClient::set_dormant Soft)"
                     artiDormant -> "Arti dormant (synthetic Soft)"
                     arti.isRunning() -> "Waiting for Arti listeners"
                     else -> "Arti stopped"

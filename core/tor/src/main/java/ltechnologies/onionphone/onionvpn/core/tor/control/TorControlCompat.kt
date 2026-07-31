@@ -11,9 +11,11 @@ import ltechnologies.onionphone.onionvpn.core.model.TorEngine
  * - **arti-client 0.36.0** (all 122 pages): https://docs.rs/arti-client/0.36.0/arti_client/
  *   — this is the crate version embedded in Guardian `arti-mobile` 1.7.0.1
  *   (`libarti_mobile_ex.so` strings: `arti-client-0.36.0` / `arti-1.7.0`)
- * - arti-mobile-ex JNI (`common/src/android.rs` + `lib.rs`): only
- *   `startArtiProxyJNI(cache, state, obfs4, snowflake, ptPath, bridges, socks, dns)`
- *   + `stopArtiProxyJNI()` — `ConfigurationSources::default()` (no TOML load)
+ * - arti-mobile-ex JNI (`common/src/android.rs` + `lib.rs`): stock AAR only has
+ *   `startArtiProxyJNI` + `stopArtiProxyJNI`. OnionVPN ships a patched
+ *   `libarti_mobile_ex.so` (see `native/arti-mobile-ex/`) that also exports
+ *   `ArtiControlNative` — `setDormant` / `applyMaxDirtiness` / `bootstrapFraction`.
+ *   When the Ext API is absent, app-layer fallbacks remain.
  *
  * ## arti-client 0.36.0 APIs that map to little-t (Rust / RPC)
  * | little-t | arti-client 0.36.0 |
@@ -29,10 +31,11 @@ import ltechnologies.onionphone.onionvpn.core.model.TorEngine
  * | Bridges / PT | `config::BridgesConfig` + `pt::TransportConfig` |
  * | IsolateSOCKSAuth | SOCKS username → `StreamIsolation` / IsolationToken |
  *
- * ## JNI gap
- * Those Rust APIs exist inside the `.so` but are **not** exposed by arti-mobile JNI.
- * OnionVPN therefore implements the closest semantic / app-layer 1:1 behaviour
- * available through start/stop + SOCKS/DNS + app caches.
+ * ## JNI gap (stock AAR) vs OnionVPN patch
+ * Stock Guardian AAR does not export set_dormant / reconfigure / bootstrap_status.
+ * OnionVPN's patched `libarti_mobile_ex.so` closes the dormant + max_dirtiness +
+ * bootstrap-frac gaps. Remaining ENGINE_LIMITATION: CIRC/STREAM UI, Entry/Exit over
+ * SOCKS, Conjure, NewCircuitPeriod (no arti-client field).
  */
 object TorControlCompat {
 
@@ -110,20 +113,20 @@ object TorControlCompat {
             wire = "SIGNAL ACTIVE",
             littleT = "Leave dormant mode; resume activity",
             arti = ArtiBehavior.EQUIVALENT,
-            parity = Parity.APP_LAYER_1_1,
-            artiImpl = "Clear synthetic dormant flag + republish ready status " +
-                "(Rust: TorClient::set_dormant(DormantMode::Normal) — not in JNI)",
-            docs = "arti-client 0.36.0 DormantMode::Normal; JNI gap → app-layer status + keep listeners up",
+            parity = Parity.SEMANTIC_1_1,
+            artiImpl = "ArtiControlNative.setDormant(false) → TorClient::set_dormant(Normal); " +
+                "fallback: clear synthetic dormant flag",
+            docs = "arti-client 0.36.0 DormantMode::Normal via OnionVPN Ext JNI (control-api≥1)",
         ),
         Op(
             name = "DORMANT",
             wire = "SIGNAL DORMANT",
             littleT = "Become dormant (reduce background network use)",
             arti = ArtiBehavior.EQUIVALENT,
-            parity = Parity.APP_LAYER_1_1,
-            artiImpl = "Set synthetic dormant=true in TorControlStatus; keep Arti runtime running " +
-                "under Blocking TUN (Soft dormant would wake on next use per docs anyway)",
-            docs = "arti-client 0.36.0 set_dormant(DormantMode::Soft); JNI missing — status parity only",
+            parity = Parity.SEMANTIC_1_1,
+            artiImpl = "ArtiControlNative.setDormant(true) → TorClient::set_dormant(Soft); " +
+                "fallback: synthetic dormant=true; runtime kept under Blocking TUN",
+            docs = "arti-client 0.36.0 set_dormant(DormantMode::Soft) via OnionVPN Ext JNI",
         ),
         Op(
             name = "RELOAD",
@@ -184,13 +187,13 @@ object TorControlCompat {
             name = "SETCONF_circuit_timing",
             wire = "SETCONF MaxCircuitDirtiness/NewCircuitPeriod",
             littleT = "Live circuit dirtiness / new-circuit period",
-            arti = ArtiBehavior.NOOP_OK,
-            parity = Parity.ENGINE_LIMITATION,
-            artiImpl = "Prefs + arti.status max_dirtiness recorded; JNI cannot call " +
-                "CircuitTimingBuilder::max_dirtiness / TorClient::reconfigure. " +
-                "NewCircuitPeriod has no Arti field.",
+            arti = ArtiBehavior.EQUIVALENT,
+            parity = Parity.SEMANTIC_1_1,
+            artiImpl = "ArtiControlNative.applyMaxDirtiness → CircuitTimingBuilder::max_dirtiness " +
+                "+ TorClient::reconfigure; also written to state_dir/onionvpn_circuit_timing " +
+                "for start-time apply. NewCircuitPeriod has no Arti field (recorded only).",
             docs = "arti-client 0.36.0 CircuitTimingBuilder::max_dirtiness (= MaxCircuitDirtiness); " +
-                "live via reconfigure — not exposed by arti-mobile start API",
+                "live via reconfigure — OnionVPN Ext JNI control-api≥1",
         ),
         Op(
             name = "SETCONF_bridges",
@@ -226,11 +229,11 @@ object TorControlCompat {
             wire = "GETINFO status/bootstrap-phase",
             littleT = "Bootstrap progress / tags",
             arti = ArtiBehavior.EQUIVALENT,
-            parity = Parity.APP_LAYER_1_1,
-            artiImpl = "Synthetic TorControlStatus from SOCKS+DNS readiness " +
-                "(maps ready_for_traffic → boot=100 / circuitEstablished)",
-            docs = "arti-client 0.36.0 BootstrapStatus::as_frac / ready_for_traffic / blocked — " +
-                "JNI has no bootstrap_status export; listener probe is the mobile stand-in",
+            parity = Parity.SEMANTIC_1_1,
+            artiImpl = "ArtiControlNative.bootstrapFraction / readyForTraffic when Ext JNI present; " +
+                "else synthetic TorControlStatus from SOCKS+DNS readiness",
+            docs = "arti-client 0.36.0 BootstrapStatus::as_frac / ready_for_traffic — " +
+                "OnionVPN Ext JNI; listener probe remains the stock-AAR stand-in",
         ),
         Op(
             name = "GETINFO_circuits",
