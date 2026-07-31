@@ -11,6 +11,7 @@ import android.os.Build
 import android.os.Process
 import androidx.core.content.ContextCompat
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.Executors
 import timber.log.Timber
 
 /**
@@ -48,16 +49,23 @@ class AppUidResolver(
 
     @Volatile private var receiverRegistered = false
 
+    /** getInstalledApplications is multi‑100ms — never on the package-broadcast / main thread. */
+    private val indexExecutor = Executors.newSingleThreadExecutor { r ->
+        Thread(r, "onionvpn-uid-index").apply { isDaemon = true }
+    }
+
     private val packageReceiver = object : BroadcastReceiver() {
         override fun onReceive(ctx: Context?, intent: Intent?) {
-            refreshIndex()
-            cache.clear()
+            indexExecutor.execute {
+                refreshIndex()
+                cache.clear()
+            }
         }
     }
 
     fun start() {
         if (receiverRegistered) return
-        refreshIndex()
+        indexExecutor.execute { refreshIndex() }
         val filter = IntentFilter().apply {
             addAction(Intent.ACTION_PACKAGE_ADDED)
             addAction(Intent.ACTION_PACKAGE_REMOVED)

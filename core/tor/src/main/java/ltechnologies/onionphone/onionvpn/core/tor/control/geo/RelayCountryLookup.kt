@@ -148,26 +148,40 @@ class RelayCountryLookup(
 
     private fun ensureConsensusIndex(dir: File) {
         val now = System.currentTimeMillis()
+        val file: File
+        val mtime: Long
         synchronized(consensusLock) {
             if (now - consensusLoadedAtMs < CONSENSUS_RELOAD_MIN_MS &&
                 consensusIpByIdentityB64.isNotEmpty()
             ) {
                 return
             }
-            val file = CONSENSUS_CANDIDATES
+            file = CONSENSUS_CANDIDATES
                 .map { File(dir, it) }
                 .firstOrNull { it.isFile && it.length() > 0 }
                 ?: return
-            val mtime = file.lastModified()
+            mtime = file.lastModified()
             if (mtime == consensusSourceMtime && consensusIpByIdentityB64.isNotEmpty()) {
                 consensusLoadedAtMs = now
                 return
             }
-            val map = indexConsensusRelayIps(file.readText())
-            consensusIpByIdentityB64 = map
-            consensusSourceMtime = mtime
-            consensusLoadedAtMs = now
-            Timber.v("Consensus relay IP index size=%d from %s", map.size, file.name)
+        }
+        // Parse outside the lock: consensus is multi‑MB; holding the lock during
+        // readText/index blocked Circuits UI (ANR) and stalled other IO workers.
+        val map = runCatching {
+            file.bufferedReader().use { reader ->
+                indexConsensusRelayIps(reader.lineSequence())
+            }
+        }.onFailure { err ->
+            Timber.w(err, "Consensus relay IP index failed (%s)", file.name)
+        }.getOrNull() ?: return
+        synchronized(consensusLock) {
+            if (mtime == file.lastModified()) {
+                consensusIpByIdentityB64 = map
+                consensusSourceMtime = mtime
+                consensusLoadedAtMs = System.currentTimeMillis()
+                Timber.v("Consensus relay IP index size=%d from %s", map.size, file.name)
+            }
         }
     }
 
@@ -212,11 +226,15 @@ class RelayCountryLookup(
         )
 
         /** Parse Tor consensus `r` lines → identityB64 (no `=`) → IPv4. */
-        internal fun indexConsensusRelayIps(text: String): Map<String, String> {
+        internal fun indexConsensusRelayIps(text: String): Map<String, String> =
+            indexConsensusRelayIps(text.lineSequence())
+
+        /** Stream-friendly overload — avoid loading the whole consensus into a String. */
+        internal fun indexConsensusRelayIps(lines: Sequence<String>): Map<String, String> {
             val map = HashMap<String, String>(8_192)
-            for (line in text.lineSequence()) {
+            for (line in lines) {
                 if (!line.startsWith("r ")) continue
-                val parts = line.split(Regex("\\s+"))
+                val parts = line.split(WHITESPACE)
                 // r Nickname IdentityDigest DescriptorDigest Date Time IP ORPort DirPort
                 if (parts.size < 7) continue
                 val identity = parts[2].trimEnd('=')
@@ -227,6 +245,8 @@ class RelayCountryLookup(
             }
             return map
         }
+
+        private val WHITESPACE = Regex("\\s+")
 
         /** SHA-1 fingerprint hex → Tor consensus IdentityDigest (base64, `=` stripped). */
         internal fun fingerprintToIdentityB64(fingerprint: String): String? {

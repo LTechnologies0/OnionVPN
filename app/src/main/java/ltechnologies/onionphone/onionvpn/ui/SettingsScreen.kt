@@ -62,8 +62,8 @@ import ltechnologies.onionphone.onionvpn.util.SystemSecurityIntents
 fun SettingsScreen(
     preferences: TunnelPreferences,
     domainReputation: DomainReputationRepository,
-    onLoadTorrc: () -> String,
-    onLoadDnsCryptToml: () -> String,
+    onLoadTorrc: suspend () -> String,
+    onLoadDnsCryptToml: suspend () -> String,
     onSavePreferences: (TunnelPreferences, restartIfConnected: Boolean) -> Unit,
     onSaveTorrc: (String) -> Unit,
     onSaveDnsCryptToml: (String) -> Unit,
@@ -733,8 +733,10 @@ fun SettingsScreen(
         )
         FilledTonalButton(
             onClick = {
-                torrcDraft = onLoadTorrc()
-                editingTorrc = true
+                scope.launch {
+                    torrcDraft = onLoadTorrc()
+                    editingTorrc = true
+                }
             },
             modifier = Modifier.fillMaxWidth(),
             shape = MaterialTheme.shapes.large,
@@ -815,8 +817,10 @@ fun SettingsScreen(
         )
         OutlinedButton(
             onClick = {
-                tomlDraft = onLoadDnsCryptToml()
-                editingToml = true
+                scope.launch {
+                    tomlDraft = onLoadDnsCryptToml()
+                    editingToml = true
+                }
             },
             modifier = Modifier.fillMaxWidth(),
             shape = MaterialTheme.shapes.large,

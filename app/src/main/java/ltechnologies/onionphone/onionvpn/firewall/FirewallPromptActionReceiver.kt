@@ -5,6 +5,10 @@ import android.content.Context
 import android.content.Intent
 import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import ltechnologies.onionphone.onionvpn.core.model.FirewallRuleScope
 import ltechnologies.onionphone.onionvpn.core.model.FirewallVerdict
 import timber.log.Timber
@@ -31,7 +35,16 @@ class FirewallPromptActionReceiver : BroadcastReceiver() {
                 return
             }
         }
-        engine.answerPrompt(requestId, verdict, FirewallRuleScope.PERMANENT)
+        val pending = goAsync()
+        CoroutineScope(SupervisorJob() + Dispatchers.Default).launch {
+            try {
+                engine.answerPrompt(requestId, verdict, FirewallRuleScope.PERMANENT)
+            } catch (e: Exception) {
+                Timber.w(e, "Firewall prompt answer failed")
+            } finally {
+                pending.finish()
+            }
+        }
     }
 
     companion object {

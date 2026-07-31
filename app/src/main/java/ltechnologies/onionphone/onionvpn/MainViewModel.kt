@@ -8,11 +8,13 @@ import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
 import java.io.File
 import javax.inject.Inject
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import ltechnologies.onionphone.onionvpn.core.dnscrypt.DnsCryptProcessManager
 import ltechnologies.onionphone.onionvpn.core.model.TunnelPhase
 import ltechnologies.onionphone.onionvpn.core.model.TunnelPreferences
@@ -85,13 +87,17 @@ class MainViewModel @Inject constructor(
         }
     }
 
-    fun readTorrc(): String = tor.torrcFile.takeIf { it.exists() }?.readText().orEmpty()
+    suspend fun readTorrc(): String = withContext(Dispatchers.IO) {
+        tor.torrcFile.takeIf { it.exists() }?.readText().orEmpty()
+    }
 
-    fun readDnsCryptToml(): String = dnsCrypt.configFile.takeIf { it.exists() }?.readText().orEmpty()
+    suspend fun readDnsCryptToml(): String = withContext(Dispatchers.IO) {
+        dnsCrypt.configFile.takeIf { it.exists() }?.readText().orEmpty()
+    }
 
     fun saveTorrc(content: String) {
         viewModelScope.launch {
-            writeConfigFile(tor.torrcFile, content)
+            withContext(Dispatchers.IO) { writeConfigFile(tor.torrcFile, content) }
             if (snapshot.value.phase == TunnelPhase.Connected) {
                 orchestrator.stop()
                 kotlinx.coroutines.delay(750)
@@ -102,7 +108,7 @@ class MainViewModel @Inject constructor(
 
     fun saveDnsCryptToml(content: String) {
         viewModelScope.launch {
-            writeConfigFile(dnsCrypt.configFile, content)
+            withContext(Dispatchers.IO) { writeConfigFile(dnsCrypt.configFile, content) }
             if (snapshot.value.phase == TunnelPhase.Connected) {
                 orchestrator.stop()
                 kotlinx.coroutines.delay(750)

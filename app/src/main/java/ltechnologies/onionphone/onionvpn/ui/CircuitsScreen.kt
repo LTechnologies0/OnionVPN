@@ -109,11 +109,17 @@ fun CircuitsScreen(
             ) {
                 items(circuits, key = { it.info.id }) { live ->
                     val uid = live.socksUsername?.let { TunnelEndpoints.uidFromSocksUser(it) }
+                    val appLabel = remember(live.socksUsername) {
+                        labelForSocksUser(live.socksUsername, appUidResolver)
+                    }
+                    val appIcon = remember(uid) {
+                        uid?.takeIf { it >= 0 }?.let { appUidResolver.iconDrawable(it) }
+                    }
                     CircuitCard(
                         live = live,
                         streamCount = live.streamIds.size,
-                        appLabel = labelForSocksUser(live.socksUsername, appUidResolver),
-                        appIcon = uid?.takeIf { it >= 0 }?.let { appUidResolver.iconDrawable(it) },
+                        appLabel = appLabel,
+                        appIcon = appIcon,
                         onCloseUnused = {
                             lifecycle.closeCircuit(live.info.id, ifUnused = true)
                         },

@@ -15,20 +15,28 @@ object BuiltinBridges {
     const val PRESET_MEEK = "meek"
     const val PRESET_CUSTOM = "custom"
 
+    @Volatile private var cached: Map<String, List<String>>? = null
+
     fun load(context: Context): Map<String, List<String>> {
-        val text = context.assets.open("pt_bridges.json").bufferedReader().use { it.readText() }
-        val root = JSONObject(text)
-        val bridges = root.getJSONObject("bridges")
-        return buildMap {
-            bridges.keys().forEach { key ->
-                val arr = bridges.getJSONArray(key)
-                put(
-                    key,
-                    buildList {
-                        for (i in 0 until arr.length()) add(arr.getString(i))
-                    },
-                )
+        cached?.let { return it }
+        synchronized(this) {
+            cached?.let { return it }
+            val text = context.assets.open("pt_bridges.json").bufferedReader().use { it.readText() }
+            val root = JSONObject(text)
+            val bridges = root.getJSONObject("bridges")
+            val map = buildMap {
+                bridges.keys().forEach { key ->
+                    val arr = bridges.getJSONArray(key)
+                    put(
+                        key,
+                        buildList {
+                            for (i in 0 until arr.length()) add(arr.getString(i))
+                        },
+                    )
+                }
             }
+            cached = map
+            return map
         }
     }
 

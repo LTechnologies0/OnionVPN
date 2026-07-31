@@ -63,6 +63,20 @@ class RelayCountryLookupTest {
     }
 
     @Test
+    fun indexConsensusRelayIps_streamsLinesWithoutFullBuffer() {
+        val identity = RelayCountryLookup.fingerprintToIdentityB64(
+            "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+        )!!
+        val lines = sequenceOf(
+            "network-status-version 3",
+            "r Unnamed $identity AAAAAAAAAAAAAAAAAAAAAAAAAAAg 2026-01-01 00:00:00 203.0.113.5 9001 0",
+            "s Fast Running Valid",
+        )
+        val map = RelayCountryLookup.indexConsensusRelayIps(lines)
+        assertEquals("203.0.113.5", map[identity])
+    }
+
+    @Test
     fun consensusFile_presentDoesNotThrowWhenDisconnected() {
         val dir = java.nio.file.Files.createTempDirectory("onionvpn-tor-geo").toFile()
         try {

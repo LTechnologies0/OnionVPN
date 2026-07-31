@@ -6,8 +6,11 @@ import android.content.Intent
 import android.net.VpnService
 import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import ltechnologies.onionphone.onionvpn.core.model.TunnelPhase
 import ltechnologies.onionphone.onionvpn.prefs.TunnelPreferencesStore
@@ -30,30 +33,33 @@ class BootCompletedReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent?) {
         val action = intent?.action ?: return
         if (action !in BOOT_ACTIONS) return
+        // Never runBlocking on the receiver thread (often main) — DataStore + start can ANR.
         val pending = goAsync()
-        try {
-            val prefs = runBlocking {
-                withTimeoutOrNull(8_000) { preferencesStore.preferences.first() }
-            } ?: return
-            if (!prefs.autoStartOnBoot) {
-                Timber.d("Boot autostart disabled — skip")
-                return
+        val appCtx = context.applicationContext
+        CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
+            try {
+                val prefs = withTimeoutOrNull(8_000) { preferencesStore.preferences.first() }
+                    ?: return@launch
+                if (!prefs.autoStartOnBoot) {
+                    Timber.d("Boot autostart disabled — skip")
+                    return@launch
+                }
+                if (VpnService.prepare(appCtx) != null) {
+                    Timber.i("Boot autostart: VPN permission missing — open app once")
+                    return@launch
+                }
+                val phase = TunnelForegroundService.snapshot.value.phase
+                if (phase != TunnelPhase.Idle && phase != TunnelPhase.Error) {
+                    Timber.d("Boot autostart: tunnel already %s", phase)
+                    return@launch
+                }
+                Timber.i("Boot autostart: starting tunnel")
+                orchestrator.start(prefs)
+            } catch (e: Exception) {
+                Timber.w(e, "Boot autostart failed")
+            } finally {
+                pending.finish()
             }
-            if (VpnService.prepare(context) != null) {
-                Timber.i("Boot autostart: VPN permission missing — open app once")
-                return
-            }
-            val phase = TunnelForegroundService.snapshot.value.phase
-            if (phase != TunnelPhase.Idle && phase != TunnelPhase.Error) {
-                Timber.d("Boot autostart: tunnel already %s", phase)
-                return
-            }
-            Timber.i("Boot autostart: starting tunnel")
-            orchestrator.start(prefs)
-        } catch (e: Exception) {
-            Timber.w(e, "Boot autostart failed")
-        } finally {
-            pending.finish()
         }
     }
 

@@ -4,6 +4,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.os.Looper
 import android.os.Process
 import androidx.core.content.ContextCompat
 import java.io.File
@@ -132,7 +133,21 @@ class CircuitLifecycleManager(
         _streams.value = emptyList()
     }
 
+    /**
+     * Refresh circuit/stream snapshot from GETINFO.
+     *
+     * Safe to call from Compose/UI: hops may parse Tor's multi‑MB consensus for GeoIP,
+     * which must never run on the main thread (ANR on Circuits screen).
+     */
     fun refreshFromGetInfo() {
+        if (Looper.getMainLooper().isCurrentThread) {
+            scope.launch { refreshFromGetInfoSync() }
+            return
+        }
+        refreshFromGetInfoSync()
+    }
+
+    private fun refreshFromGetInfoSync() {
         if (!control.isConnected) return
         runCatching {
             val circList = control.listCircuits()
@@ -183,14 +198,35 @@ class CircuitLifecycleManager(
         }.onFailure { Timber.d(it, "CircuitLifecycleManager refresh failed") }
     }
 
-    fun closeCircuit(id: String, ifUnused: Boolean = true): Result<Unit> =
-        control.closeCircuit(id, ifUnused).also {
-            pendingIdleClose.remove(id)
-            refreshFromGetInfo()
+    fun closeCircuit(id: String, ifUnused: Boolean = true): Result<Unit> {
+        if (Looper.getMainLooper().isCurrentThread) {
+            scope.launch {
+                runCatching {
+                    control.closeCircuit(id, ifUnused)
+                    pendingIdleClose.remove(id)
+                    refreshFromGetInfoSync()
+                }.onFailure { Timber.d(it, "closeCircuit failed") }
+            }
+            return Result.success(Unit)
         }
+        return control.closeCircuit(id, ifUnused).also {
+            pendingIdleClose.remove(id)
+            refreshFromGetInfoSync()
+        }
+    }
 
-    fun extendNewCircuit(): Result<String> =
-        control.extendNewCircuit().also { refreshFromGetInfo() }
+    fun extendNewCircuit(): Result<String> {
+        if (Looper.getMainLooper().isCurrentThread) {
+            scope.launch {
+                runCatching {
+                    control.extendNewCircuit()
+                    refreshFromGetInfoSync()
+                }.onFailure { Timber.d(it, "extendNewCircuit failed") }
+            }
+            return Result.success("")
+        }
+        return control.extendNewCircuit().also { refreshFromGetInfoSync() }
+    }
 
     private fun onStreamEvent(event: TorControlEvent.Stream) {
         val now = System.currentTimeMillis()
