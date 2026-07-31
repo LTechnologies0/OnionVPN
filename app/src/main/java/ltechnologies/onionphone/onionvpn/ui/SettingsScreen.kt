@@ -50,6 +50,7 @@ import ltechnologies.onionphone.onionvpn.core.model.DnsResolverMode
 import ltechnologies.onionphone.onionvpn.core.model.FirewallDefaultAction
 import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
 import ltechnologies.onionphone.onionvpn.core.model.TunnelPreferences
+import ltechnologies.onionphone.onionvpn.core.tor.config.TorBridgeConfig
 import ltechnologies.onionphone.onionvpn.threat.repo.DomainReputationRepository
 import ltechnologies.onionphone.onionvpn.ui.components.SectionHeader
 import ltechnologies.onionphone.onionvpn.ui.components.TonalSection
@@ -461,7 +462,8 @@ fun SettingsScreen(
         )
         Text(
             text = "Presets paste built-in Tor Browser PT lines (Lyrebird / Conjure). " +
-                "Request from Tor Project uses Moat circumvention settings (BridgeDB). " +
+                "Request from Tor Project uses Moat (obfs4 / Snowflake / WebTunnel). " +
+                "WebTunnel gets utls=none so Lyrebird uses stdlib TLS. " +
                 "Apply & restart tunnel after changing.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -584,7 +586,11 @@ fun SettingsScreen(
                             "Ask Tor Project (Moat) for bridge lines.",
                             style = MaterialTheme.typography.bodySmall,
                         )
-                        listOf("obfs4", "snowflake", "webtunnel").forEach { transport ->
+                        listOf(
+                            "obfs4" to "obfs4 (recommended)",
+                            "snowflake" to "Snowflake",
+                            "webtunnel" to "WebTunnel",
+                        ).forEach { (transport, label) ->
                             TextButton(
                                 onClick = {
                                     pickBridgeTransport = false
@@ -592,21 +598,23 @@ fun SettingsScreen(
                                     bridgeRequestStatus = "Contacting bridges.torproject.org…"
                                     scope.launch {
                                         runCatching {
-                                            val result = MoatCircumventionClient.fetchSettings(
-                                                transports = listOf(transport),
+                                            val outcome = MoatCircumventionClient.fetchBridges(
+                                                transport = transport,
                                                 viaTor = local.moatRequestViaTor,
                                                 socksPort = torSocksPort(),
                                             )
-                                            val lines = MoatCircumventionClient.pickLines(result, transport)
-                                            if (lines.isEmpty()) {
-                                                error("No $transport bridges in Moat response")
-                                            }
-                                            val joined = lines.joinToString("\n")
+                                            val normalized = TorBridgeConfig.parseLines(
+                                                outcome.lines.joinToString("\n"),
+                                            )
+                                            val joined = normalized.joinToString("\n")
                                             commit(local.copy(torBridges = joined), restart = false)
-                                            val src = if (result.fromDefaults) "defaults" else "settings"
-                                            bridgeRequestStatus =
-                                                "Got ${lines.size} $transport line(s) ($src" +
-                                                    (result.country?.let { ", $it" } ?: "") + ")"
+                                            bridgeRequestStatus = buildString {
+                                                append("Got ${normalized.size} ${outcome.transport} line(s)")
+                                                append(" (${outcome.source}")
+                                                outcome.country?.let { append(", $it") }
+                                                append(")")
+                                                outcome.note?.let { append(" — $it") }
+                                            }
                                         }.onFailure { e ->
                                             bridgeRequestStatus = "Request failed: ${e.message}"
                                         }
@@ -615,7 +623,7 @@ fun SettingsScreen(
                                 },
                                 modifier = Modifier.fillMaxWidth(),
                             ) {
-                                Text(transport)
+                                Text(label)
                             }
                         }
                     }

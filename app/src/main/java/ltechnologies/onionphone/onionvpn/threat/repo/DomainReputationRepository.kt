@@ -309,7 +309,11 @@ class DomainReputationRepository @Inject constructor(
                 if (dest.length() > 0L) return
             } catch (error: Exception) {
                 lastError = error
-                Timber.d(error, "Blocklist mirror failed: %s", url)
+                if (isProbeGone(error)) {
+                    Timber.d("Blocklist mirror aborted (Tor SOCKS gone): %s", url)
+                } else {
+                    Timber.d("Blocklist mirror failed: %s (%s)", url, error.message)
+                }
             }
         }
         throw lastError ?: IllegalStateException("No blocklist mirrors configured")

@@ -140,9 +140,15 @@ object TorConfigWriter {
         appendLine("FetchUselessDescriptors 0")
         appendLine("DownloadExtraInfo 0")
         // Prefer IPv4 for OR (guards), but allow IPv6 OR when needed; exit dest may be IPv6.
+        // With bridges, Tor's "auto" prefers the configured Bridge address (important for
+        // WebTunnel placeholders) instead of Preferring learned IPv4 ORPorts.
         appendLine("ClientUseIPv4 1")
         appendLine("ClientUseIPv6 1")
-        appendLine("ClientPreferIPv6ORPort 0")
+        if (TorBridgeConfig.isConfigured(preferences.torBridges)) {
+            appendLine("ClientPreferIPv6ORPort auto")
+        } else {
+            appendLine("ClientPreferIPv6ORPort 0")
+        }
 
         appendLine("HardwareAccel 1")
         appendLine("VanguardsLiteEnabled 1")

@@ -74,7 +74,38 @@ class TorBridgeConfigTest {
             nativeLibraryDir = libDir,
         )
         assertTrue(fragment.contains("Bridge webtunnel "))
+        assertTrue(fragment.contains("utls=none"))
         assertTrue(fragment.contains("webtunnel exec ") || fragment.contains("scramblesuit,webtunnel"))
+    }
+
+    @Test
+    fun webtunnelInjectsUtlsNoneWhenMissing() {
+        val line = "webtunnel [2001:db8::1]:443 AABBCCDDEEFF00112233445566778899AABBCCDD url=https://deardrloveagain.com/x ver=0.0.4"
+        val out = TorBridgeConfig.normalizeBridgeLine(line)
+        assertTrue(out.contains("utls=none"))
+        assertTrue(out.contains("url=https://deardrloveagain.com/x"))
+        assertTrue(out.contains("addr=deardrloveagain.com:443"))
+        assertTrue(out.matches(Regex("""webtunnel 192\.0\.2\.\d+:443 .*""")))
+        assertFalse(out.contains("2001:db8"))
+    }
+
+    @Test
+    fun webtunnelReplacesBrokenRandomizedUtls() {
+        val line =
+            "webtunnel 192.0.2.1:443 AABBCCDDEEFF00112233445566778899AABBCCDD url=https://x.example/p utls=hellorandomizednoalpn"
+        val out = TorBridgeConfig.normalizeBridgeLine(line)
+        assertTrue(out.contains("utls=none"))
+        assertFalse(out.contains("hellorandomizednoalpn"))
+        assertTrue(out.contains("addr=x.example:443"))
+    }
+
+    @Test
+    fun webtunnelKeepsExplicitChromeUtls() {
+        val line =
+            "webtunnel 192.0.2.1:443 AABBCCDDEEFF00112233445566778899AABBCCDD url=https://x.example/p utls=hellochrome_auto"
+        val out = TorBridgeConfig.normalizeBridgeLine(line)
+        assertTrue(out.contains("utls=hellochrome_auto"))
+        assertTrue(out.contains("addr=x.example:443"))
     }
 
     @Test

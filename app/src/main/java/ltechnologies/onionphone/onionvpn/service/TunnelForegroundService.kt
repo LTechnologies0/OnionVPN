@@ -226,6 +226,8 @@ class TunnelForegroundService : Service() {
     private suspend fun startTunnel() {
         acquireBootstrapWakeLock()
         preferences = applyDebugBridgeOverride(preferences)
+        // Cancel Tor-bound downloads before we tear down / recycle SOCKS ports.
+        domainReputation.onTorUnavailable()
 
         // Always own the default route BEFORE Tor bootstrap (constant kill-switch).
         if (VpnService.prepare(this) == null) {
@@ -528,6 +530,7 @@ class TunnelForegroundService : Service() {
         lastError: String?,
         validations: List<ValidationCheck> = emptyList(),
     ) {
+        domainReputation.onTorUnavailable()
         updateSnapshot(phase, lastError = lastError, validations = validations)
         validationJob?.cancel()
         validationJob = null

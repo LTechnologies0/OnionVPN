@@ -24,7 +24,8 @@ class MoatCircumventionClientTest {
             fromDefaults = false,
         )
         assertEquals(listOf("obfs4 b", "obfs4 c"), MoatCircumventionClient.pickLines(result, "obfs4"))
-        assertEquals(listOf("snowflake a"), MoatCircumventionClient.pickLines(result, null))
+        // No preference → rank by transport (obfs4 before snowflake).
+        assertEquals(listOf("obfs4 b", "obfs4 c"), MoatCircumventionClient.pickLines(result, null))
     }
 
     @Test
@@ -35,5 +36,66 @@ class MoatCircumventionClientTest {
             fromDefaults = true,
         )
         assertTrue(MoatCircumventionClient.pickLines(result, "obfs4").isEmpty())
+    }
+
+    @Test
+    fun pickLines_prefersBridgedbOverBuiltin() {
+        val result = MoatCircumventionClient.Result(
+            settings = listOf(
+                MoatCircumventionClient.BridgeSetting(
+                    type = "obfs4",
+                    source = "builtin",
+                    bridgeStrings = listOf("obfs4 builtin"),
+                ),
+                MoatCircumventionClient.BridgeSetting(
+                    type = "obfs4",
+                    source = "bridgedb",
+                    bridgeStrings = listOf("obfs4 fresh"),
+                ),
+            ),
+            country = "at",
+            fromDefaults = true,
+        )
+        assertEquals(listOf("obfs4 fresh", "obfs4 builtin"), MoatCircumventionClient.pickLines(result, "obfs4"))
+    }
+
+    @Test
+    fun pickLines_nullPrefersObfs4OverWebtunnel() {
+        val result = MoatCircumventionClient.Result(
+            settings = listOf(
+                MoatCircumventionClient.BridgeSetting(
+                    type = "webtunnel",
+                    source = "bridgedb",
+                    bridgeStrings = listOf("webtunnel 192.0.2.1:443 FPR url=https://x.example/"),
+                ),
+                MoatCircumventionClient.BridgeSetting(
+                    type = "obfs4",
+                    source = "bridgedb",
+                    bridgeStrings = listOf("obfs4 1.2.3.4:443 FPR cert=x iat-mode=0"),
+                ),
+            ),
+            country = null,
+            fromDefaults = true,
+        )
+        assertEquals(
+            listOf("obfs4 1.2.3.4:443 FPR cert=x iat-mode=0"),
+            MoatCircumventionClient.pickLines(result, null),
+        )
+    }
+
+    @Test
+    fun pickLines_dropsWebtunnelWithoutUrl() {
+        val result = MoatCircumventionClient.Result(
+            settings = listOf(
+                MoatCircumventionClient.BridgeSetting(
+                    type = "webtunnel",
+                    source = "bridgedb",
+                    bridgeStrings = listOf("webtunnel 192.0.2.1:443 FPR"),
+                ),
+            ),
+            country = null,
+            fromDefaults = false,
+        )
+        assertTrue(MoatCircumventionClient.pickLines(result, "webtunnel").isEmpty())
     }
 }

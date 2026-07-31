@@ -32,9 +32,97 @@ object TorBridgeConfig {
         bridgeText.lineSequence()
             .map { it.trim() }
             .filter { it.isNotEmpty() && !it.startsWith("#") }
+            .map { normalizeBridgeLine(it) }
             .toList()
 
     fun isConfigured(bridgeText: String): Boolean = parseLines(bridgeText).isNotEmpty()
+
+    /**
+     * Lyrebird webtunnel defaults to `utls=hellorandomizednoalpn`. On Android that ClientHello
+     * is frequently rejected by Moat HTTPS fronts (`remote error: tls: protocol version not
+     * supported`) while Go/stdlib TLS to the same host succeeds. Inject `utls=none` so
+     * lyrebird uses plain crypto/tls ([webtunnel client.go](https://gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/lyrebird)).
+     *
+     * Also rewrite Moat documentation ORPorts (`2001:db8:` / learned IPv4) to TBA-style
+     * `192.0.2.x:443` and set `addr=<url-host>:<port>` so Tor dials only via the HTTPS front
+     * and does not Prefer a direct IPv4 ORPort from the bridge descriptor.
+     */
+    fun normalizeBridgeLine(line: String): String {
+        val trimmed = line.trim()
+        if (trimmed.isEmpty() || trimmed.startsWith("#")) return trimmed
+        val hadBridgePrefix = trimmed.startsWith("Bridge ", ignoreCase = true)
+        val body = trimmed
+            .removePrefix("Bridge ")
+            .removePrefix("bridge ")
+            .trim()
+        if (!body.startsWith("webtunnel", ignoreCase = true)) return trimmed
+        if (!body.contains("url=", ignoreCase = true)) return trimmed
+
+        val tokens = body.split(Regex("\\s+")).filter { it.isNotEmpty() }
+        if (tokens.size < 2) return trimmed
+
+        val fingerprint = tokens.getOrNull(2)
+            ?.takeIf { FINGERPRINT_HEX.matches(it) }
+        val argTokens = tokens.drop(if (fingerprint != null) 3 else 2)
+            .filterNot { it.substringBefore('=').equals("addr", ignoreCase = true) }
+            .toMutableList()
+
+        val urlValue = Regex("""(?i)\burl=(\S+)""").find(body)?.groupValues?.getOrNull(1)
+            ?: return trimmed
+        val urlHostPort = urlToTcpEndpoint(urlValue) ?: return trimmed
+
+        val fpKey = fingerprint ?: urlValue
+        val octet = (fpKey.hashCode().ushr(1) % 254) + 1
+        val placeholder = "192.0.2.$octet:443"
+
+        val hasUtls = argTokens.any { it.startsWith("utls=", ignoreCase = true) }
+        when {
+            !hasUtls -> argTokens += "utls=none"
+            else -> {
+                val idx = argTokens.indexOfFirst { it.startsWith("utls=", ignoreCase = true) }
+                val value = argTokens[idx].substringAfter('=')
+                if (value.lowercase() in BROKEN_WEBTUNNEL_UTLS) {
+                    argTokens[idx] = "utls=none"
+                }
+            }
+        }
+        if (argTokens.none { it.startsWith("addr=", ignoreCase = true) }) {
+            argTokens += "addr=$urlHostPort"
+        }
+
+        val rebuilt = buildString {
+            append("webtunnel ")
+            append(placeholder)
+            if (fingerprint != null) {
+                append(' ')
+                append(fingerprint)
+            }
+            argTokens.forEach { arg ->
+                append(' ')
+                append(arg)
+            }
+        }
+        return if (hadBridgePrefix) "Bridge $rebuilt" else rebuilt
+    }
+
+    private fun urlToTcpEndpoint(urlValue: String): String? {
+        return try {
+            val uri = java.net.URI(urlValue)
+            val host = uri.host?.trim().orEmpty()
+            if (host.isEmpty()) return null
+            val port = uri.port.takeIf { it > 0 } ?: when (uri.scheme?.lowercase()) {
+                "http" -> 80
+                else -> 443
+            }
+            if (host.contains(':') && !host.startsWith('[')) {
+                "[$host]:$port"
+            } else {
+                "$host:$port"
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
 
     fun transportOf(line: String): String? {
         val body = line
@@ -49,6 +137,15 @@ object TorBridgeConfig {
         }
         return first.lowercase()
     }
+
+    private val FINGERPRINT_HEX = Regex("""^[0-9A-Fa-f]{40}$""")
+
+    /** Randomized uTLS fingerprints that Moat WebTunnel fronts reject on our Lyrebird build. */
+    private val BROKEN_WEBTUNNEL_UTLS = setOf(
+        "hellorandomized",
+        "hellorandomizedalpn",
+        "hellorandomizednoalpn",
+    )
 
     fun requiredTransports(bridgeText: String): Set<String> =
         parseLines(bridgeText).mapNotNull { transportOf(it) }.toSet()

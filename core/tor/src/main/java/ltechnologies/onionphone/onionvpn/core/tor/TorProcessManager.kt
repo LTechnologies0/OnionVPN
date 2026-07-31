@@ -105,6 +105,7 @@ class TorProcessManager(
             ensureExecutable(binaryFile)
             ensurePluggableTransportBinaries(preferences.torBridges)
             ensureGeoIpFiles()
+            prepareDataDirectoryForBridges(preferences.torBridges)
             // Step 2
             writeTorrc(ports)
             // Step 3
@@ -265,7 +266,7 @@ class TorProcessManager(
     /** Live SETCONF bridges from multiline preference text. */
     fun setBridgesLive(bridgeText: String): Result<Unit> {
         if (!control.isConnected) return Result.failure(IOException("control not connected"))
-        val lines = bridgeText.lineSequence().map { it.trim() }.filter { it.isNotEmpty() }.toList()
+        val lines = TorBridgeConfig.parseLines(bridgeText)
         return control.setBridges(lines).also {
             it.onSuccess { Timber.i("SETCONF bridges live count=%d", lines.size) }
         }
@@ -305,6 +306,39 @@ class TorProcessManager(
                 TorBridgeConfig.parseLines(preferences.torBridges).size,
             )
         }
+    }
+
+    /**
+     * Switching default→bridges with a warm DataDirectory reuses enough_dirinfo from clearnet
+     * bootstrap, then sticks at ap_handshake against dead ORPorts. Drop entry/guard caches so
+     * directory fetches happen through the configured PTs.
+     */
+    private fun prepareDataDirectoryForBridges(bridgeText: String) {
+        if (!TorBridgeConfig.isConfigured(bridgeText)) return
+        val doomed = buildList {
+            add("state")
+            add("unparseable-desc")
+            configDirectory.listFiles()?.forEach { file ->
+                val n = file.name
+                if (n.startsWith("cached-microdesc") ||
+                    n.startsWith("cached-descriptor") ||
+                    n.startsWith("cached-consensus") ||
+                    n.startsWith("cached-certs") ||
+                    n == "diff-cache"
+                ) {
+                    add(n)
+                }
+            }
+        }
+        var removed = 0
+        doomed.forEach { name ->
+            val f = File(configDirectory, name)
+            when {
+                f.isFile && f.delete() -> removed++
+                f.isDirectory && f.deleteRecursively() -> removed++
+            }
+        }
+        Timber.i("Cleared Tor bridge bootstrap caches files=%d", removed)
     }
 
     /** Make PT .so files executable for transports required by current bridges. */
