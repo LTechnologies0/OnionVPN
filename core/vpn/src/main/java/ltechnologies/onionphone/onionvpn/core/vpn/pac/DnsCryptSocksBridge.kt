@@ -192,8 +192,8 @@ class DnsCryptSocksBridge(
                 remote.soTimeout = 0
                 pipe(c, remote)
             } catch (e: Exception) {
-                if (isClientAbort(e)) {
-                    Timber.v("PAC SOCKS client closed mid-handshake: %s", e.message)
+                if (isBenignSessionEnd(e)) {
+                    Timber.v("PAC SOCKS session end: %s", e.javaClass.simpleName)
                 } else {
                     Timber.d(e, "PAC SOCKS bridge session failed")
                 }
@@ -252,10 +252,22 @@ class DnsCryptSocksBridge(
         output.flush()
     }
 
-    private fun isClientAbort(e: Throwable): Boolean {
-        if (e is SocketException) return true
+    /**
+     * Probes / browsers often open SOCKS then hang up, or race DNSCrypt before
+     * the stub is listening — not actionable failures.
+     */
+    private fun isBenignSessionEnd(e: Throwable): Boolean {
+        when (e) {
+            is java.io.EOFException -> return true
+            is SocketException -> return true
+            is java.net.SocketTimeoutException -> return true
+            is java.net.UnknownHostException -> return true
+        }
         val msg = e.message?.lowercase() ?: return false
-        return "broken pipe" in msg || "connection reset" in msg || "connection abort" in msg
+        return "broken pipe" in msg ||
+            "connection reset" in msg ||
+            "connection abort" in msg ||
+            "poll timed out" in msg
     }
 
     private fun pipe(a: Socket, b: Socket) {

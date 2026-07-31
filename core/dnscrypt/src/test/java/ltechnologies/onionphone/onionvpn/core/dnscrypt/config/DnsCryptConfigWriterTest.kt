@@ -55,4 +55,15 @@ class DnsCryptConfigWriterTest {
         assertFalse(config.contains("[static]"))
         assertTrue(config.contains("[sources.'public-resolvers']"))
     }
+
+    @Test
+    fun multiServerNames_emitsStaticBlocks() {
+        val config = DnsCryptConfigWriter.write(
+            configDirectory = "/tmp",
+            serverName = "cloudflare,adguard-dns",
+        )
+        assertTrue(config.contains("server_names = ['cloudflare', 'adguard-dns']"))
+        assertTrue(config.contains("[static.'cloudflare']"))
+        assertTrue(config.contains("[static.'adguard-dns']"))
+    }
 }

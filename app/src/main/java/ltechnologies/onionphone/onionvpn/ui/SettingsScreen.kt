@@ -1,6 +1,5 @@
 package ltechnologies.onionphone.onionvpn.ui
 
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -8,10 +7,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.verticalScroll
@@ -32,6 +28,7 @@ import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -44,8 +41,10 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicReference
+import kotlinx.coroutines.launch
 import ltechnologies.onionphone.onionvpn.R
 import ltechnologies.onionphone.onionvpn.bridges.BuiltinBridges
+import ltechnologies.onionphone.onionvpn.bridges.MoatCircumventionClient
 import ltechnologies.onionphone.onionvpn.core.dnscrypt.config.DnsCryptPublicResolvers
 import ltechnologies.onionphone.onionvpn.core.model.DnsResolverMode
 import ltechnologies.onionphone.onionvpn.core.model.FirewallDefaultAction
@@ -54,8 +53,10 @@ import ltechnologies.onionphone.onionvpn.core.model.TunnelPreferences
 import ltechnologies.onionphone.onionvpn.threat.repo.DomainReputationRepository
 import ltechnologies.onionphone.onionvpn.ui.components.SectionHeader
 import ltechnologies.onionphone.onionvpn.ui.components.TonalSection
+import ltechnologies.onionphone.onionvpn.ui.settings.DnsCryptResolverMultiPickerDialog
+import ltechnologies.onionphone.onionvpn.ui.settings.TorCountryCatalog
+import ltechnologies.onionphone.onionvpn.ui.settings.TorNodePickerDialog
 import ltechnologies.onionphone.onionvpn.util.SystemSecurityIntents
-
 @Composable
 fun SettingsScreen(
     preferences: TunnelPreferences,
@@ -65,6 +66,7 @@ fun SettingsScreen(
     onSavePreferences: (TunnelPreferences, restartIfConnected: Boolean) -> Unit,
     onSaveTorrc: (String) -> Unit,
     onSaveDnsCryptToml: (String) -> Unit,
+    torSocksPort: () -> Int? = { null },
 ) {
     var local by remember(preferences) { mutableStateOf(preferences) }
     val latestLocal = remember { AtomicReference(local) }
@@ -87,8 +89,16 @@ fun SettingsScreen(
     var editingTorrc by remember { mutableStateOf(false) }
     var editingToml by remember { mutableStateOf(false) }
     var pickingResolver by remember { mutableStateOf(false) }
+    var pickingEntry by remember { mutableStateOf(false) }
+    var pickingExit by remember { mutableStateOf(false) }
+    var pickingExclude by remember { mutableStateOf(false) }
+    var requestingBridges by remember { mutableStateOf(false) }
+    var bridgeRequestStatus by remember { mutableStateOf<String?>(null) }
+    var pickBridgeTransport by remember { mutableStateOf(false) }
     var torrcDraft by remember { mutableStateOf("") }
     var tomlDraft by remember { mutableStateOf("") }
+    val scope = rememberCoroutineScope()
+    val bridgeCtx = LocalContext.current
 
     if (editingTorrc) {
         ConfigEditor(
@@ -277,6 +287,18 @@ fun SettingsScreen(
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+        PrefSwitch(
+            label = "Start tunnel at device boot",
+            checked = local.autoStartOnBoot,
+            onChecked = { commit(local.copy(autoStartOnBoot = it), restart = false) },
+        )
+        Text(
+            text = "Off by default. After reboot, starts Tor + DNSCrypt + TUN only if VPN " +
+                "permission was already granted (open the app once first). " +
+                "Also enable system Always-on VPN for strongest coverage.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
 
         SectionHeader(
             title = "Interactive firewall",
@@ -438,14 +460,12 @@ fun SettingsScreen(
             style = MaterialTheme.typography.titleMedium,
         )
         Text(
-            text = "Tor bridges use Tor Browser pluggable transports " +
-                "(Lyrebird: obfs4 / meek / webtunnel / snowflake; Conjure when shipped). " +
-                "Presets paste built-in lines; Custom accepts any Bridge line. " +
+            text = "Presets paste built-in Tor Browser PT lines (Lyrebird / Conjure). " +
+                "Request from Tor Project uses Moat circumvention settings (BridgeDB). " +
                 "Apply & restart tunnel after changing.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        val bridgeCtx = LocalContext.current
         val bridgePreset = remember(local.torBridges) {
             BuiltinBridges.detectPreset(bridgeCtx, local.torBridges)
         }
@@ -502,37 +522,181 @@ fun SettingsScreen(
             )
             FilterChip(
                 selected = bridgePreset == BuiltinBridges.PRESET_CUSTOM,
-                onClick = { /* keep text; mark custom by editing field */ },
-                label = { Text("Custom") },
+                onClick = { /* keep text */ },
+                label = { Text("Own list") },
+            )
+        }
+        PrefSwitch(
+            label = "Request bridges via Tor",
+            checked = local.moatRequestViaTor,
+            onChecked = { commit(local.copy(moatRequestViaTor = it), restart = false) },
+        )
+        Text(
+            text = "Off = clearnet HTTPS to bridges.torproject.org (default). " +
+                "On = Moat through Tor SOCKS (needed when the site is blocked; tunnel must be up).",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            FilledTonalButton(
+                onClick = { pickBridgeTransport = true },
+                enabled = !requestingBridges,
+                modifier = Modifier.weight(1f),
+                shape = MaterialTheme.shapes.large,
+            ) {
+                Text(if (requestingBridges) "Requesting…" else "Request bridges")
+            }
+            OutlinedButton(
+                onClick = {
+                    val cm = bridgeCtx.getSystemService(android.content.Context.CLIPBOARD_SERVICE)
+                        as android.content.ClipboardManager
+                    val text = cm.primaryClip?.getItemAt(0)?.coerceToText(bridgeCtx)?.toString().orEmpty()
+                    if (text.isNotBlank()) {
+                        commit(local.copy(torBridges = text.trim()), restart = false)
+                        bridgeRequestStatus = "Pasted ${text.lines().count { it.isNotBlank() }} line(s)"
+                    } else {
+                        bridgeRequestStatus = "Clipboard empty"
+                    }
+                },
+                modifier = Modifier.weight(1f),
+                shape = MaterialTheme.shapes.large,
+            ) {
+                Text("Add from clipboard")
+            }
+        }
+        bridgeRequestStatus?.let { status ->
+            Text(
+                text = status,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        if (pickBridgeTransport) {
+            AlertDialog(
+                onDismissRequest = { pickBridgeTransport = false },
+                title = { Text("Bridge transport") },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text(
+                            "Ask Tor Project (Moat) for bridge lines.",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                        listOf("obfs4", "snowflake", "webtunnel").forEach { transport ->
+                            TextButton(
+                                onClick = {
+                                    pickBridgeTransport = false
+                                    requestingBridges = true
+                                    bridgeRequestStatus = "Contacting bridges.torproject.org…"
+                                    scope.launch {
+                                        runCatching {
+                                            val result = MoatCircumventionClient.fetchSettings(
+                                                transports = listOf(transport),
+                                                viaTor = local.moatRequestViaTor,
+                                                socksPort = torSocksPort(),
+                                            )
+                                            val lines = MoatCircumventionClient.pickLines(result, transport)
+                                            if (lines.isEmpty()) {
+                                                error("No $transport bridges in Moat response")
+                                            }
+                                            val joined = lines.joinToString("\n")
+                                            commit(local.copy(torBridges = joined), restart = false)
+                                            val src = if (result.fromDefaults) "defaults" else "settings"
+                                            bridgeRequestStatus =
+                                                "Got ${lines.size} $transport line(s) ($src" +
+                                                    (result.country?.let { ", $it" } ?: "") + ")"
+                                        }.onFailure { e ->
+                                            bridgeRequestStatus = "Request failed: ${e.message}"
+                                        }
+                                        requestingBridges = false
+                                    }
+                                },
+                                modifier = Modifier.fillMaxWidth(),
+                            ) {
+                                Text(transport)
+                            }
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = { pickBridgeTransport = false }) { Text("Cancel") }
+                },
             )
         }
         OutlinedTextField(
             value = local.torBridges,
             onValueChange = { local = local.copy(torBridges = it) },
-            label = { Text("Bridge lines (obfs4 / snowflake / vanilla)") },
+            label = { Text("Bridge lines (own list)") },
             modifier = Modifier
                 .fillMaxWidth()
                 .height(120.dp),
             minLines = 3,
         )
-        OutlinedTextField(
-            value = local.torEntryNodes,
-            onValueChange = { local = local.copy(torEntryNodes = it) },
-            label = { Text("EntryNodes") },
-            modifier = Modifier.fillMaxWidth(),
+        Text(
+            text = "Node countries (StrictNodes)",
+            style = MaterialTheme.typography.titleMedium,
         )
-        OutlinedTextField(
-            value = local.torExitNodes,
-            onValueChange = { local = local.copy(torExitNodes = it) },
-            label = { Text("ExitNodes") },
-            modifier = Modifier.fillMaxWidth(),
+        Text(
+            text = "Pick countries / federations. Tor syntax: {cc},{cc}",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        OutlinedTextField(
-            value = local.torExcludeNodes,
-            onValueChange = { local = local.copy(torExcludeNodes = it) },
-            label = { Text("ExcludeNodes") },
+        OutlinedButton(
+            onClick = { pickingEntry = true },
             modifier = Modifier.fillMaxWidth(),
-        )
+            shape = MaterialTheme.shapes.large,
+        ) {
+            Text("EntryNodes — ${TorCountryCatalog.summarize(local.torEntryNodes)}")
+        }
+        OutlinedButton(
+            onClick = { pickingExit = true },
+            modifier = Modifier.fillMaxWidth(),
+            shape = MaterialTheme.shapes.large,
+        ) {
+            Text("ExitNodes — ${TorCountryCatalog.summarize(local.torExitNodes)}")
+        }
+        OutlinedButton(
+            onClick = { pickingExclude = true },
+            modifier = Modifier.fillMaxWidth(),
+            shape = MaterialTheme.shapes.large,
+        ) {
+            Text("ExcludeNodes — ${TorCountryCatalog.summarize(local.torExcludeNodes)}")
+        }
+        if (pickingEntry) {
+            TorNodePickerDialog(
+                title = "EntryNodes",
+                initialRaw = local.torEntryNodes,
+                onConfirm = {
+                    commit(local.copy(torEntryNodes = it), restart = false)
+                    pickingEntry = false
+                },
+                onDismiss = { pickingEntry = false },
+            )
+        }
+        if (pickingExit) {
+            TorNodePickerDialog(
+                title = "ExitNodes",
+                initialRaw = local.torExitNodes,
+                onConfirm = {
+                    commit(local.copy(torExitNodes = it), restart = false)
+                    pickingExit = false
+                },
+                onDismiss = { pickingExit = false },
+            )
+        }
+        if (pickingExclude) {
+            TorNodePickerDialog(
+                title = "ExcludeNodes",
+                initialRaw = local.torExcludeNodes,
+                onConfirm = {
+                    commit(local.copy(torExcludeNodes = it), restart = false)
+                    pickingExclude = false
+                },
+                onDismiss = { pickingExclude = false },
+            )
+        }
         OutlinedTextField(
             value = local.torNewCircuitPeriodSec.toString(),
             onValueChange = {
@@ -593,38 +757,25 @@ fun SettingsScreen(
         ) {
             Text("Apply hardened DNSCrypt profile")
         }
-        Row(
-            modifier = Modifier.horizontalScroll(rememberScrollState()),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            FilterChip(
-                selected = local.dnsCryptServerName == DnsCryptPublicResolvers.AUTO,
-                onClick = { commit(local.copy(dnsCryptServerName = DnsCryptPublicResolvers.AUTO)) },
-                label = { Text("Auto (all matching)") },
-            )
-            listOf("cloudflare", "adguard-dns", "quad9-dnscrypt-ip4-nofilter-pri").forEach { name ->
-                FilterChip(
-                    selected = local.dnsCryptServerName == name,
-                    onClick = { commit(local.copy(dnsCryptServerName = name)) },
-                    label = { Text(name.substringBefore("-dns").substringBefore("-dnscrypt")) },
-                )
+        val resolverSummary = remember(local.dnsCryptServerName) {
+            val names = DnsCryptPublicResolvers.resolveNames(local.dnsCryptServerName)
+            when {
+                names.size == 1 && names[0] == DnsCryptPublicResolvers.AUTO -> "Auto (all matching)"
+                names.size == 1 -> names[0]
+                else -> "${names.size} resolvers"
             }
         }
-        Text(
-            text = "Selected: ${local.dnsCryptServerName}",
-            style = MaterialTheme.typography.bodyMedium,
-        )
         OutlinedButton(
             onClick = { pickingResolver = true },
             modifier = Modifier.fillMaxWidth(),
             shape = MaterialTheme.shapes.large,
         ) {
-            Text("Browse all DNSCrypt resolvers…")
+            Text("DNSCrypt resolvers — $resolverSummary")
         }
         if (pickingResolver) {
-            DnsCryptResolverPickerDialog(
-                selected = local.dnsCryptServerName,
-                onSelect = {
+            DnsCryptResolverMultiPickerDialog(
+                selectedRaw = local.dnsCryptServerName,
+                onConfirm = {
                     commit(local.copy(dnsCryptServerName = it))
                     pickingResolver = false
                 },
@@ -682,93 +833,6 @@ fun SettingsScreen(
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }
-}
-
-@Composable
-private fun DnsCryptResolverPickerDialog(
-    selected: String,
-    onSelect: (String) -> Unit,
-    onDismiss: () -> Unit,
-) {
-    var query by remember { mutableStateOf("") }
-    val resolvers = remember { DnsCryptPublicResolvers.all.filterNot { it.ipv6 } }
-    val filtered = remember(query) {
-        val q = query.trim()
-        if (q.isEmpty()) {
-            resolvers
-        } else {
-            resolvers.filter {
-                it.name.contains(q, ignoreCase = true) ||
-                    it.description.contains(q, ignoreCase = true)
-            }
-        }
-    }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("DNSCrypt resolvers (${resolvers.size})") },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedTextField(
-                    value = query,
-                    onValueChange = { query = it },
-                    label = { Text("Search") },
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true,
-                )
-                Text(
-                    text = "${filtered.size} match(es). Filters (no-log / DNSSEC / …) still apply.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                LazyColumn(modifier = Modifier.heightIn(max = 420.dp)) {
-                    item {
-                        Text(
-                            text = "Auto (all matching filters)",
-                            style = MaterialTheme.typography.titleSmall,
-                            color = if (selected == DnsCryptPublicResolvers.AUTO) {
-                                MaterialTheme.colorScheme.primary
-                            } else {
-                                MaterialTheme.colorScheme.onSurface
-                            },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable { onSelect(DnsCryptPublicResolvers.AUTO) }
-                                .padding(vertical = 10.dp),
-                        )
-                    }
-                    items(filtered, key = { it.name }) { entry ->
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable { onSelect(entry.name) }
-                                .padding(vertical = 8.dp),
-                        ) {
-                            Text(
-                                text = entry.name,
-                                style = MaterialTheme.typography.bodyLarge,
-                                color = if (entry.name == selected) {
-                                    MaterialTheme.colorScheme.primary
-                                } else {
-                                    MaterialTheme.colorScheme.onSurface
-                                },
-                            )
-                            if (entry.description.isNotBlank()) {
-                                Text(
-                                    text = entry.description,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    maxLines = 2,
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-        },
-        confirmButton = {
-            TextButton(onClick = onDismiss) { Text("Close") }
-        },
-    )
 }
 
 @Composable

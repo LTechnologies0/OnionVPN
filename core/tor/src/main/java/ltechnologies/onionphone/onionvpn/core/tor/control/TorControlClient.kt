@@ -104,26 +104,33 @@ class TorControlClient {
 
     /**
      * Incremental SETEVENTS: each successful tier becomes the new baseline.
-     * If optional fails, PT is still attempted against core alone (not core+optional).
+     * Optional / PT keywords are tried **one event at a time** — Tor 552s the
+     * entire SETEVENTS if any keyword is unknown (e.g. PT_LOG on some builds),
+     * which would otherwise drop TRANSPORT_LAUNCHED too.
      */
     private fun subscribeClientEvents(bridgesConfigured: Boolean) {
         val core = TorControlCatalog.CLIENT_EVENTS
         transport.command("SETEVENTS $core")
         var active = core
 
-        fun tryAdd(extra: String, label: String) {
-            if (extra.isBlank()) return
+        fun tryAddOne(event: String) {
+            if (event.isBlank() || active.split(' ').contains(event)) return
             runCatching {
-                transport.command("SETEVENTS $active $extra")
-                active = "$active $extra"
+                transport.command("SETEVENTS $active $event")
+                active = "$active $event"
             }.onFailure { err ->
-                Timber.d(err, "SETEVENTS %s skipped (active=%s)", label, active)
+                // Expected on older / stripped Tor — no stack in APP export.
+                Timber.v("SETEVENTS skip %s (%s)", event, err.message)
             }
         }
 
-        tryAdd(TorControlCatalog.CLIENT_EVENTS_OPTIONAL, "optional")
+        TorControlCatalog.CLIENT_EVENTS_OPTIONAL.split(' ')
+            .filter { it.isNotBlank() }
+            .forEach(::tryAddOne)
         if (bridgesConfigured) {
-            tryAdd(TorControlCatalog.CLIENT_EVENTS_PT, "PT")
+            TorControlCatalog.CLIENT_EVENTS_PT.split(' ')
+                .filter { it.isNotBlank() }
+                .forEach(::tryAddOne)
         }
     }
 

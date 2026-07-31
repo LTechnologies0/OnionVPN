@@ -847,9 +847,43 @@ object DnsCryptPublicResolvers {
     fun resolveName(requested: String): String {
         val key = requested.trim().ifBlank { "cloudflare" }
         if (key.equals(AUTO, ignoreCase = true)) return AUTO
+        // Multi-select stores comma-separated names — keep first for legacy callers.
+        if (',' in key) {
+            val first = key.split(',').map { it.trim() }.firstOrNull { it.isNotEmpty() }
+                ?: return "cloudflare"
+            return resolveName(first)
+        }
         LEGACY_ALIASES[key]?.let { return it }
         if (byName.containsKey(key)) return key
         return "cloudflare"
+    }
+
+    /**
+     * Resolve a preference value that may be [AUTO], a single name, or comma-separated
+     * multi-select names. Empty / blank → cloudflare singleton (not AUTO).
+     */
+    fun resolveNames(requested: String): List<String> {
+        val raw = requested.trim()
+        if (raw.isEmpty()) return listOf("cloudflare")
+        if (raw.equals(AUTO, ignoreCase = true)) return listOf(AUTO)
+        val parts = raw.split(',')
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+            .map { part ->
+                LEGACY_ALIASES[part] ?: part.takeIf { byName.containsKey(it) } ?: part
+            }
+            .filter { byName.containsKey(it) || it.equals(AUTO, ignoreCase = true) }
+            .distinct()
+        if (parts.any { it.equals(AUTO, ignoreCase = true) }) return listOf(AUTO)
+        return parts.ifEmpty { listOf("cloudflare") }
+    }
+
+    fun encodeNames(names: Collection<String>): String {
+        val cleaned = names.map { it.trim() }.filter { it.isNotEmpty() }.distinct()
+        if (cleaned.isEmpty() || cleaned.any { it.equals(AUTO, ignoreCase = true) }) {
+            return AUTO
+        }
+        return cleaned.joinToString(",")
     }
 
     private val LEGACY_ALIASES = mapOf(

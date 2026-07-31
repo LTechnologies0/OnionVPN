@@ -98,7 +98,12 @@ internal object DnsCryptReadiness {
             is PortUnreachableException -> "port-unreachable"
             else -> error.javaClass.simpleName
         }
-        Timber.d("DNSCrypt probe %s:%d → %s (%s)", kind, port, label, error.message)
+        // Timeouts are expected while the stub is still binding — keep out of APP export.
+        if (error is SocketTimeoutException) {
+            Timber.v("DNSCrypt probe %s:%d → %s", kind, port, label)
+        } else {
+            Timber.d("DNSCrypt probe %s:%d → %s (%s)", kind, port, label, error.message)
+        }
     }
 
     private fun exampleComQuery(id: Int): ByteArray = byteArrayOf(

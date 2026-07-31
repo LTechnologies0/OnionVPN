@@ -6,6 +6,7 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.os.Process
 import androidx.core.content.ContextCompat
+import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -43,6 +44,8 @@ import timber.log.Timber
 class CircuitLifecycleManager(
     private val context: Context,
     private val control: TorControlClient,
+    /** Tor DataDirectory (cached-*-consensus for GeoIP when GETINFO ns/id is unavailable). */
+    private val torDataDirectory: File = File(context.filesDir, "tor"),
 ) {
     data class LiveCircuit(
         val info: TorCircuitInfo,
@@ -72,7 +75,7 @@ class CircuitLifecycleManager(
     private val circuits = ConcurrentHashMap<String, LiveCircuit>()
     /** Circuit ids waiting for idle grace before CLOSECIRCUIT IfUnused. */
     private val pendingIdleClose = ConcurrentHashMap<String, Long>()
-    private val countryLookup = RelayCountryLookup(control)
+    private val countryLookup = RelayCountryLookup(control, torDataDirectory)
 
     private val _circuits = MutableStateFlow<List<LiveCircuit>>(emptyList())
     val liveCircuits: StateFlow<List<LiveCircuit>> = _circuits.asStateFlow()

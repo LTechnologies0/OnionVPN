@@ -44,6 +44,8 @@ class TunnelPreferencesStore @Inject constructor(
         val appLock = booleanPreferencesKey("app_lock")
         val allowScreenshots = booleanPreferencesKey("allow_screenshots")
         val autoStartOnLaunch = booleanPreferencesKey("auto_start_on_launch")
+        val autoStartOnBoot = booleanPreferencesKey("auto_start_on_boot")
+        val moatRequestViaTor = booleanPreferencesKey("moat_request_via_tor")
     }
 
     val preferences: Flow<TunnelPreferences> = context.tunnelDataStore.data.map { prefs ->
@@ -73,6 +75,8 @@ class TunnelPreferencesStore @Inject constructor(
             prefs[Keys.appLock] = next.appLockEnabled
             prefs[Keys.allowScreenshots] = next.allowScreenshots
             prefs[Keys.autoStartOnLaunch] = next.autoStartOnAppLaunch
+            prefs[Keys.autoStartOnBoot] = next.autoStartOnBoot
+            prefs[Keys.moatRequestViaTor] = next.moatRequestViaTor
         }
     }
 
@@ -101,5 +105,7 @@ class TunnelPreferencesStore @Inject constructor(
         appLockEnabled = this[Keys.appLock] ?: true,
         allowScreenshots = this[Keys.allowScreenshots] ?: false,
         autoStartOnAppLaunch = this[Keys.autoStartOnLaunch] ?: true,
+        autoStartOnBoot = this[Keys.autoStartOnBoot] ?: false,
+        moatRequestViaTor = this[Keys.moatRequestViaTor] ?: false,
     )
 }

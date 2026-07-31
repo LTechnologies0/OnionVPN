@@ -43,6 +43,8 @@ class MainViewModel @Inject constructor(
     /** First DataStore emission (not the Compose initialValue). */
     suspend fun awaitStoredPreferences(): TunnelPreferences = preferencesStore.preferences.first()
 
+    fun currentTorSocksPort(): Int? = tor.currentProbeSocksPort()
+
     fun prepareVpnPermission(activity: Activity): Intent? = VpnService.prepare(activity)
 
     fun startTunnel() {

@@ -49,4 +49,14 @@ data class TunnelPreferences(
      * Tor + DNSCrypt + Connected TUN automatically.
      */
     val autoStartOnAppLaunch: Boolean = true,
+    /**
+     * When true, [android.content.Intent.ACTION_BOOT_COMPLETED] starts the tunnel
+     * if VPN permission was already granted. Default off — user must opt in.
+     */
+    val autoStartOnBoot: Boolean = false,
+    /**
+     * When true, Moat / BridgeDB requests to bridges.torproject.org go through
+     * Tor SOCKS. When false (default), clearnet HTTPS is used.
+     */
+    val moatRequestViaTor: Boolean = false,
 )

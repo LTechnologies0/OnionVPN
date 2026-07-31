@@ -31,5 +31,9 @@ object TunnelModule {
     fun provideCircuitLifecycleManager(
         @ApplicationContext context: Context,
         tor: TorProcessManager,
-    ): CircuitLifecycleManager = CircuitLifecycleManager(context, tor.control)
+    ): CircuitLifecycleManager = CircuitLifecycleManager(
+        context = context,
+        control = tor.control,
+        torDataDirectory = tor.configDirectory,
+    )
 }

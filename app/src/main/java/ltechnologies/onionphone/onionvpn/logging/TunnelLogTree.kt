@@ -8,6 +8,8 @@ class TunnelLogTree : Timber.Tree() {
     override fun log(priority: Int, tag: String?, message: String, t: Throwable?) {
         // Tor / DNSCrypt have dedicated buffers — avoid duplicating them under OnionVPN.
         if (tag == "tor" || tag == "dnscrypt") return
+        // VERBOSE is for expected handshake noise (PAC EOF, SETEVENTS 552, DNS probes).
+        if (priority < Log.DEBUG) return
 
         val prefix = tag?.let { "[$it] " }.orEmpty()
         val text = if (t != null) "$prefix$message (${t.message})" else "$prefix$message"

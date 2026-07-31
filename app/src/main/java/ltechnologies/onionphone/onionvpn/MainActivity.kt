@@ -121,6 +121,7 @@ class MainActivity : FragmentActivity() {
                             onLoadDnsCryptToml = viewModel::readDnsCryptToml,
                             onSaveTorrc = viewModel::saveTorrc,
                             onSaveDnsCryptToml = viewModel::saveDnsCryptToml,
+                            torSocksPort = viewModel::currentTorSocksPort,
                         )
                     }
                 }
@@ -178,6 +179,7 @@ private fun OnionVpnApp(
     onLoadDnsCryptToml: () -> String,
     onSaveTorrc: (String) -> Unit,
     onSaveDnsCryptToml: (String) -> Unit,
+    torSocksPort: () -> Int?,
 ) {
     var selected by remember { mutableIntStateOf(0) }
     data class Dest(
@@ -236,6 +238,7 @@ private fun OnionVpnApp(
                     onSavePreferences = onSavePreferences,
                     onSaveTorrc = onSaveTorrc,
                     onSaveDnsCryptToml = onSaveDnsCryptToml,
+                    torSocksPort = torSocksPort,
                 )
             }
         }
