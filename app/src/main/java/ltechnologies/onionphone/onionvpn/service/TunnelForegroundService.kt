@@ -24,6 +24,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeout
+import ltechnologies.onionphone.onionvpn.BuildConfig
 import ltechnologies.onionphone.onionvpn.core.dnscrypt.DnsCryptProcessManager
 import ltechnologies.onionphone.onionvpn.core.model.DnsResolverMode
 import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
@@ -48,6 +49,7 @@ import ltechnologies.onionphone.onionvpn.service.lifecycle.TunnelStabilityRecove
 import ltechnologies.onionphone.onionvpn.service.lifecycle.TunnelThroughputTracker
 import ltechnologies.onionphone.onionvpn.threat.repo.DomainReputationRepository
 import timber.log.Timber
+import java.io.File
 import java.net.InetSocketAddress
 import java.net.Socket
 
@@ -223,6 +225,7 @@ class TunnelForegroundService : Service() {
 
     private suspend fun startTunnel() {
         acquireBootstrapWakeLock()
+        preferences = applyDebugBridgeOverride(preferences)
 
         // Always own the default route BEFORE Tor bootstrap (constant kill-switch).
         if (VpnService.prepare(this) == null) {
@@ -801,5 +804,19 @@ class TunnelForegroundService : Service() {
             dnsCryptForceTcp = intent.getBooleanExtra(EXTRA_DNS_FORCE_TCP, true),
             dnsCryptRequireDnssec = intent.getBooleanExtra(EXTRA_DNS_DNSSEC, true),
         )
+    }
+
+    /**
+     * Debug-only: `files/tor/bridges.override.txt` replaces [TunnelPreferences.torBridges]
+     * so MCP/adb can inject bridges without unlocking the Settings UI.
+     */
+    private fun applyDebugBridgeOverride(prefs: TunnelPreferences): TunnelPreferences {
+        if (!BuildConfig.DEBUG) return prefs
+        val override = File(filesDir, "tor/bridges.override.txt")
+        if (!override.isFile || override.length() <= 0L) return prefs
+        val text = runCatching { override.readText() }.getOrNull()?.trim().orEmpty()
+        if (text.isEmpty()) return prefs
+        Timber.i("DEBUG bridges override applied (%d bytes, %d lines)", text.length, text.lines().size)
+        return prefs.copy(torBridges = text)
     }
 }

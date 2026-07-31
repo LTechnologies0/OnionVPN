@@ -15,6 +15,7 @@ import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
 import ltechnologies.onionphone.onionvpn.core.model.TunnelFailure
 import ltechnologies.onionphone.onionvpn.core.model.TunnelPreferences
 import ltechnologies.onionphone.onionvpn.core.model.TunnelRuntimePorts
+import ltechnologies.onionphone.onionvpn.core.tor.config.TorBridgeConfig
 import ltechnologies.onionphone.onionvpn.core.tor.config.TorConfigWriter
 import ltechnologies.onionphone.onionvpn.core.tor.control.TorControlClient
 import ltechnologies.onionphone.onionvpn.core.tor.control.catalog.TorControlCatalog
@@ -78,6 +79,9 @@ class TorProcessManager(
     val binaryFile: File
         get() = File(context.applicationInfo.nativeLibraryDir, "libtor.so")
 
+    val nativeLibraryDir: File
+        get() = File(context.applicationInfo.nativeLibraryDir)
+
     /** Optional sink for stderr/stdout lines from the Tor process. */
     var onLogLine: ((String) -> Unit)? = null
 
@@ -99,6 +103,7 @@ class TorProcessManager(
         runtimePorts = ports
         try {
             ensureExecutable(binaryFile)
+            ensurePluggableTransportBinaries(preferences.torBridges)
             ensureGeoIpFiles()
             // Step 2
             writeTorrc(ports)
@@ -110,9 +115,7 @@ class TorProcessManager(
             control.connect(
                 controlSocketPath = controlSocketFile,
                 cookieFile = cookieFile,
-                bridgesConfigured = preferences.torBridges.lineSequence()
-                    .map { it.trim() }
-                    .any { it.isNotEmpty() && !it.startsWith("#") },
+                bridgesConfigured = TorBridgeConfig.isConfigured(preferences.torBridges),
             )
             // Step 6
             waitForBootstrap(ports)
@@ -291,8 +294,37 @@ class TorProcessManager(
                 httpTunnelPort = ports.torHttpTunnelPort,
                 dnsPort = ports.torDnsPort,
                 preferences = preferences,
+                nativeLibraryDir = nativeLibraryDir.absolutePath,
             ),
         )
+        if (TorBridgeConfig.isConfigured(preferences.torBridges)) {
+            val transports = TorBridgeConfig.requiredTransports(preferences.torBridges)
+            Timber.i(
+                "Tor bridges enabled transports=%s lines=%d",
+                transports.ifEmpty { setOf("vanilla") },
+                TorBridgeConfig.parseLines(preferences.torBridges).size,
+            )
+        }
+    }
+
+    /** Make PT .so files executable for transports required by current bridges. */
+    private fun ensurePluggableTransportBinaries(bridgeText: String) {
+        if (!TorBridgeConfig.isConfigured(bridgeText)) return
+        // Resolve + chmod every binary referenced by the CTP block we will write.
+        TorBridgeConfig.clientTransportPluginLines(bridgeText, nativeLibraryDir).forEach { line ->
+            val path = line.substringAfter(" exec ").substringBefore(" -").trim()
+            if (path.isNotEmpty()) {
+                ensureExecutable(File(path))
+            }
+        }
+        TorBridgeConfig.requiredTransports(bridgeText).forEach { transport ->
+            val bin = TorBridgeConfig.binaryForTransport(transport, nativeLibraryDir)
+                ?: throw TunnelFailure.TorBinary(
+                    "Pluggable transport binary missing for '$transport' " +
+                        "(expected under ${nativeLibraryDir.absolutePath})",
+                )
+            Timber.i("PT ready transport=%s bin=%s", transport, bin.name)
+        }
     }
 
     /** Step 4: wait until ControlSocket + cookie exist. */

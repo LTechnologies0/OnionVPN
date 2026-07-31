@@ -113,15 +113,25 @@ class DnsCryptSocksBridge(
                 val cmd = input.readUnsignedByte()
                 input.readUnsignedByte() // rsv
                 val atyp = input.readUnsignedByte()
-                if (reqVer != 0x05 || cmd != 0x01) {
-                    reply(output, 0x07, InetAddress.getByName("0.0.0.0"), 0)
+                // Drain DST.ADDR+PORT before any reply — Chrome UDP ASSOCIATE probes
+                // leave those bytes queued; answering early desyncs and resets the socket.
+                val dest = try {
+                    readAddress(input, atyp)
+                } catch (_: Exception) {
+                    safeReply(output, REP_ATYP_NOT_SUPPORTED)
                     return
                 }
-                val (host, port) = readAddress(input, atyp)
+                if (reqVer != 0x05 || cmd != CMD_CONNECT) {
+                    // BIND / UDP ASSOCIATE unsupported (TCP-only Tor path).
+                    Timber.v("PAC SOCKS reject cmd=0x%02x (CONNECT only)", cmd)
+                    safeReply(output, REP_COMMAND_NOT_SUPPORTED)
+                    return
+                }
+                val (host, port) = dest
                 val torPort = torSocksPort.get()
                 val dnsPort = dnsCryptPort.get()
                 if (torPort <= 0 || dnsPort <= 0) {
-                    reply(output, 0x01, InetAddress.getByName("0.0.0.0"), 0)
+                    safeReply(output, REP_GENERAL_FAILURE)
                     return
                 }
 
@@ -137,7 +147,7 @@ class DnsCryptSocksBridge(
                             destPort = port,
                         )
                     ) {
-                        reply(output, 0x02, InetAddress.getByName("0.0.0.0"), 0) // not allowed
+                        safeReply(output, REP_NOT_ALLOWED)
                         return
                     }
                     Socks5Client(
@@ -147,12 +157,18 @@ class DnsCryptSocksBridge(
                         password = socksPass,
                     ).connect(host, port)
                 } else {
-                    val ip = DnsCryptResolver.resolveIpv4(
-                        hostname = host,
-                        dnsCryptHost = TunnelEndpoints.LOOPBACK,
-                        dnsCryptPort = dnsPort,
-                    )
-                    resolvedIp = ip.hostAddress ?: ip.hostName
+                    val connectHost = when (atyp) {
+                        ATYP_IPV4, ATYP_IPV6 -> host
+                        else -> {
+                            val ip = DnsCryptResolver.resolveIpv4(
+                                hostname = host,
+                                dnsCryptHost = TunnelEndpoints.LOOPBACK,
+                                dnsCryptPort = dnsPort,
+                            )
+                            ip.hostAddress ?: ip.hostName
+                        }
+                    }
+                    resolvedIp = connectHost
                     if (!FirewallBridge.engine.allowSocksConnect(
                             uid = clientUid,
                             destHost = host,
@@ -160,7 +176,7 @@ class DnsCryptSocksBridge(
                             destPort = port,
                         )
                     ) {
-                        reply(output, 0x02, InetAddress.getByName("0.0.0.0"), 0)
+                        safeReply(output, REP_NOT_ALLOWED)
                         return
                     }
                     Socks5Client(
@@ -171,35 +187,37 @@ class DnsCryptSocksBridge(
                     ).connect(resolvedIp, port)
                 }
 
-                reply(output, 0x00, InetAddress.getByName("0.0.0.0"), 0)
+                safeReply(output, REP_SUCCEEDED)
                 c.soTimeout = 0
                 remote.soTimeout = 0
                 pipe(c, remote)
             } catch (e: Exception) {
-                Timber.d(e, "PAC SOCKS bridge session failed")
-                runCatching {
-                    reply(output, 0x01, InetAddress.getByName("0.0.0.0"), 0)
+                if (isClientAbort(e)) {
+                    Timber.v("PAC SOCKS client closed mid-handshake: %s", e.message)
+                } else {
+                    Timber.d(e, "PAC SOCKS bridge session failed")
                 }
+                safeReply(output, REP_GENERAL_FAILURE)
             }
         }
     }
 
     private fun readAddress(input: DataInputStream, atyp: Int): Pair<String, Int> {
         return when (atyp) {
-            0x01 -> {
+            ATYP_IPV4 -> {
                 val addr = ByteArray(4)
                 input.readFully(addr)
                 val port = input.readUnsignedShort()
                 InetAddress.getByAddress(addr).hostAddress!! to port
             }
-            0x03 -> {
+            ATYP_DOMAIN -> {
                 val n = input.readUnsignedByte()
                 val name = ByteArray(n)
                 input.readFully(name)
                 val port = input.readUnsignedShort()
                 String(name, StandardCharsets.US_ASCII) to port
             }
-            0x04 -> {
+            ATYP_IPV6 -> {
                 val addr = ByteArray(16)
                 input.readFully(addr)
                 val port = input.readUnsignedShort()
@@ -209,20 +227,35 @@ class DnsCryptSocksBridge(
         }
     }
 
+    /** Best-effort SOCKS reply; ignores peer closes (Broken pipe / Connection reset). */
+    private fun safeReply(output: DataOutputStream, status: Int) {
+        try {
+            reply(output, status, InetAddress.getByName("0.0.0.0"), 0)
+        } catch (_: IOException) {
+            // Client already gone — normal after UDP ASSOCIATE / abort probes.
+        }
+    }
+
     private fun reply(output: DataOutputStream, status: Int, bind: InetAddress, port: Int) {
         output.writeByte(0x05)
         output.writeByte(status)
         output.writeByte(0x00)
         val raw = bind.address
         if (raw.size == 4) {
-            output.writeByte(0x01)
+            output.writeByte(ATYP_IPV4)
             output.write(raw)
         } else {
-            output.writeByte(0x01)
+            output.writeByte(ATYP_IPV4)
             output.write(byteArrayOf(0, 0, 0, 0))
         }
         output.writeShort(port)
         output.flush()
+    }
+
+    private fun isClientAbort(e: Throwable): Boolean {
+        if (e is SocketException) return true
+        val msg = e.message?.lowercase() ?: return false
+        return "broken pipe" in msg || "connection reset" in msg || "connection abort" in msg
     }
 
     private fun pipe(a: Socket, b: Socket) {
@@ -262,5 +295,17 @@ class DnsCryptSocksBridge(
         } else {
             TunnelEndpoints.SOCKS_PAC_USER to TunnelEndpoints.SOCKS_PAC_PASS
         }
+    }
+
+    companion object {
+        private const val CMD_CONNECT = 0x01
+        private const val ATYP_IPV4 = 0x01
+        private const val ATYP_DOMAIN = 0x03
+        private const val ATYP_IPV6 = 0x04
+        private const val REP_SUCCEEDED = 0x00
+        private const val REP_GENERAL_FAILURE = 0x01
+        private const val REP_NOT_ALLOWED = 0x02
+        private const val REP_COMMAND_NOT_SUPPORTED = 0x07
+        private const val REP_ATYP_NOT_SUPPORTED = 0x08
     }
 }

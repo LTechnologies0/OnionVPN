@@ -198,10 +198,7 @@ class SocksUidBridge(
         val cmd = input.readUnsignedByte()
         input.readUnsignedByte()
         val atyp = input.readUnsignedByte()
-        if (reqVer != 0x05 || cmd != 0x01) {
-            reply(output, 0x07)
-            return null
-        }
+        // Always drain DST.ADDR+PORT before reject replies (SOCKS5 framing).
         val host = when (atyp) {
             0x01 -> {
                 val b = ipv4Scratch.get()
@@ -226,6 +223,10 @@ class SocksUidBridge(
             }
         }
         val port = input.readUnsignedShort()
+        if (reqVer != 0x05 || cmd != 0x01) {
+            runCatching { reply(output, 0x07) }
+            return null
+        }
         return host to port
     }
 

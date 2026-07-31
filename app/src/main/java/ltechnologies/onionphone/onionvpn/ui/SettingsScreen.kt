@@ -45,6 +45,7 @@ import java.util.Date
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicReference
 import ltechnologies.onionphone.onionvpn.R
+import ltechnologies.onionphone.onionvpn.bridges.BuiltinBridges
 import ltechnologies.onionphone.onionvpn.core.dnscrypt.config.DnsCryptPublicResolvers
 import ltechnologies.onionphone.onionvpn.core.model.DnsResolverMode
 import ltechnologies.onionphone.onionvpn.core.model.FirewallDefaultAction
@@ -432,10 +433,83 @@ fun SettingsScreen(
                 label = { Text("Paranoid") },
             )
         }
+        Text(
+            text = "Tor bridges",
+            style = MaterialTheme.typography.titleMedium,
+        )
+        Text(
+            text = "Tor bridges use Tor Browser pluggable transports " +
+                "(Lyrebird: obfs4 / meek / webtunnel / snowflake; Conjure when shipped). " +
+                "Presets paste built-in lines; Custom accepts any Bridge line. " +
+                "Apply & restart tunnel after changing.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        val bridgeCtx = LocalContext.current
+        val bridgePreset = remember(local.torBridges) {
+            BuiltinBridges.detectPreset(bridgeCtx, local.torBridges)
+        }
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            FilterChip(
+                selected = bridgePreset == BuiltinBridges.PRESET_OFF,
+                onClick = { commit(local.copy(torBridges = ""), restart = false) },
+                label = { Text("Off") },
+            )
+            FilterChip(
+                selected = bridgePreset == BuiltinBridges.PRESET_OBFS4,
+                onClick = {
+                    commit(
+                        local.copy(torBridges = BuiltinBridges.linesForPreset(bridgeCtx, BuiltinBridges.PRESET_OBFS4)),
+                        restart = false,
+                    )
+                },
+                label = { Text("obfs4") },
+            )
+            FilterChip(
+                selected = bridgePreset == BuiltinBridges.PRESET_SNOWFLAKE,
+                onClick = {
+                    commit(
+                        local.copy(
+                            torBridges = BuiltinBridges.linesForPreset(
+                                bridgeCtx,
+                                BuiltinBridges.PRESET_SNOWFLAKE,
+                            ),
+                        ),
+                        restart = false,
+                    )
+                },
+                label = { Text("Snowflake") },
+            )
+            FilterChip(
+                selected = bridgePreset == BuiltinBridges.PRESET_MEEK,
+                onClick = {
+                    commit(
+                        local.copy(
+                            torBridges = BuiltinBridges.linesForPreset(
+                                bridgeCtx,
+                                BuiltinBridges.PRESET_MEEK,
+                            ),
+                        ),
+                        restart = false,
+                    )
+                },
+                label = { Text("meek") },
+            )
+            FilterChip(
+                selected = bridgePreset == BuiltinBridges.PRESET_CUSTOM,
+                onClick = { /* keep text; mark custom by editing field */ },
+                label = { Text("Custom") },
+            )
+        }
         OutlinedTextField(
             value = local.torBridges,
             onValueChange = { local = local.copy(torBridges = it) },
-            label = { Text("Bridges (one per line)") },
+            label = { Text("Bridge lines (obfs4 / snowflake / vanilla)") },
             modifier = Modifier
                 .fillMaxWidth()
                 .height(120.dp),

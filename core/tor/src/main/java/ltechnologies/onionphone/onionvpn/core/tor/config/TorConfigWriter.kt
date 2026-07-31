@@ -64,6 +64,7 @@ object TorConfigWriter {
      * @param httpTunnelPort unused (HTTPTunnelPort forced 0 — PAC bridge only)
      * @param dnsPort Tor DNSPort (Automap)
      * @param preferences bridges, nodes, circuit dirtiness
+     * @param nativeLibraryDir absolute path to extracted jniLibs (PT binaries); null skips auto-CTP
      */
     @Suppress("UNUSED_PARAMETER")
     fun write(
@@ -74,6 +75,7 @@ object TorConfigWriter {
         httpTunnelPort: Int = TunnelEndpoints.TOR_SOCKS_PORT + 3,
         dnsPort: Int = TunnelEndpoints.TOR_DNS_PORT,
         preferences: TunnelPreferences = TunnelPreferences(),
+        nativeLibraryDir: String? = null,
     ): String = buildString {
         appendLine("DataDirectory $dataDirectory")
         appendLine("ClientOnly 1")
@@ -174,21 +176,12 @@ object TorConfigWriter {
         appendLine("NewCircuitPeriod ${preferences.torNewCircuitPeriodSec}")
         appendLine("MaxCircuitDirtiness ${preferences.torMaxCircuitDirtinessSec}")
 
-        val bridges = preferences.torBridges.trim()
-        if (bridges.isNotEmpty()) {
-            appendLine("UseBridges 1")
-            bridges.lineSequence()
-                .map { it.trim() }
-                .filter { it.isNotEmpty() && !it.startsWith("#") }
-                .forEach { line ->
-                    if (line.startsWith("Bridge ", ignoreCase = true) ||
-                        line.startsWith("ClientTransportPlugin ", ignoreCase = true)
-                    ) {
-                        appendLine(line)
-                    } else {
-                        appendLine("Bridge $line")
-                    }
-                }
+        val bridgeBlock = TorBridgeConfig.torrcFragment(
+            bridgeText = preferences.torBridges,
+            nativeLibraryDir = nativeLibraryDir?.let { java.io.File(it) },
+        )
+        if (bridgeBlock.isNotEmpty()) {
+            append(bridgeBlock)
         }
 
         preferences.torEntryNodes.trim().takeIf { it.isNotEmpty() }?.let {
