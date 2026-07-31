@@ -46,6 +46,7 @@ class HevSocks5TunForwarder(
         socksPort: Int,
         dnsCryptPort: Int,
         torDnsPort: Int,
+        synthesizeOnionAutomap: Boolean,
     ) {
         stop()
         // Always divert UDP/53 via TunDnsMux. hev mapdns FakeDNS conflicts with Tor Automap
@@ -60,6 +61,7 @@ class HevSocks5TunForwarder(
             torDnsPort = torDnsPort,
             useMapDns = false,
             divertDns = true,
+            synthesizeOnionAutomap = synthesizeOnionAutomap,
         )
     }
 
@@ -70,6 +72,7 @@ class HevSocks5TunForwarder(
         torDnsPort: Int,
         useMapDns: Boolean,
         divertDns: Boolean,
+        synthesizeOnionAutomap: Boolean = false,
     ) {
         // Bridge before hev so the first SOCKS CONNECT never hits a closed port.
         val bridge = SocksUidBridge(
@@ -119,6 +122,7 @@ class HevSocks5TunForwarder(
             divertDnsToDnsCrypt = divertDns,
             torDnsHost = TunnelEndpoints.LOOPBACK,
             torDnsPort = torDnsPort,
+            synthesizeOnionAutomap = synthesizeOnionAutomap,
             onFatal = { error ->
                 Timber.e(error, "TunDnsMux died")
                 onFatal?.invoke(error)

@@ -1,6 +1,7 @@
 package ltechnologies.onionphone.onionvpn.core.model
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -30,5 +31,18 @@ class TorEnginePortAllocatorTest {
         assertEquals(TorEngine.LITTLE_T, TorEngine.fromPreference("nope"))
         assertEquals(TorEngine.ARTI, TorEngine.fromPreference("arti"))
         assertEquals(TorEngine.LITTLE_T, TorEngine.fromPreference("LITTLE_T"))
+    }
+
+    @Test
+    fun capabilities_differByEngine() {
+        val c = TorEngine.LITTLE_T.capabilities
+        val a = TorEngine.ARTI.capabilities
+        assertTrue(c.classicControlPlane && c.torrcConfig && c.multiSocksSessionGroups)
+        assertFalse(a.classicControlPlane)
+        assertFalse(a.torrcConfig)
+        assertTrue(a.synthesizeOnionAutomap)
+        assertTrue(a.newIdentity)
+        assertFalse(a.circuitInspection)
+        assertFalse(a.conjureBridges)
     }
 }

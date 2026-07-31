@@ -100,6 +100,7 @@ class OnionVpnService : VpnService() {
         val torSocksPort = intent.getIntExtra(EXTRA_TOR_SOCKS_PORT, TunnelEndpoints.DEFAULT_TOR_SOCKS_PORT)
         val dnsCryptPort = intent.getIntExtra(EXTRA_DNSCRYPT_PORT, TunnelEndpoints.DEFAULT_DNSCRYPT_LISTEN_PORT)
         val torDnsPort = intent.getIntExtra(EXTRA_TOR_DNS_PORT, TunnelEndpoints.DEFAULT_TOR_DNS_PORT)
+        val synthesizeOnionAutomap = intent.getBooleanExtra(EXTRA_SYNTHESIZE_ONION_AUTOMAP, false)
         val generation = intent.getIntExtra(EXTRA_GENERATION, -1)
         val dnsMode = intent.getStringExtra(EXTRA_DNS_MODE)
             ?.let { runCatching { DnsResolverMode.valueOf(it) }.getOrNull() }
@@ -126,7 +127,13 @@ class OnionVpnService : VpnService() {
                     previousTun.close()
                 }
                 if (startForwarder && mode == VpnProfileMode.Connected) {
-                    startForwarder(torSocksPort, dnsCryptPort, torDnsPort, dnsMode)
+                    startForwarder(
+                        torSocksPort,
+                        dnsCryptPort,
+                        torDnsPort,
+                        dnsMode,
+                        synthesizeOnionAutomap,
+                    )
                     startUnderlyingTracking()
                 } else {
                     stopUnderlyingTracking()
@@ -156,7 +163,13 @@ class OnionVpnService : VpnService() {
                     // Forwarder was stopped before establish — restart so apps are not stuck
                     // on a live TUN with no Tor drain path.
                     if (startForwarder && mode == VpnProfileMode.Connected) {
-                        startForwarder(torSocksPort, dnsCryptPort, torDnsPort, dnsMode)
+                        startForwarder(
+                            torSocksPort,
+                            dnsCryptPort,
+                            torDnsPort,
+                            dnsMode,
+                            synthesizeOnionAutomap,
+                        )
                         startUnderlyingTracking()
                         Timber.w("Restarted TUN forwarder on restored TUN after failed rebind")
                     }
@@ -237,6 +250,7 @@ class OnionVpnService : VpnService() {
         dnsCryptPort: Int,
         torDnsPort: Int,
         dnsMode: DnsResolverMode,
+        synthesizeOnionAutomap: Boolean = false,
     ) {
         val tun = tunInterface ?: return
         // hev → SocksUidBridge → Tor with per-UID IsolateSOCKSAuth (native TCP + circuit UX).
@@ -259,6 +273,7 @@ class OnionVpnService : VpnService() {
             socksPort = torSocksPort,
             dnsCryptPort = dnsCryptPort,
             torDnsPort = torDnsPort,
+            synthesizeOnionAutomap = synthesizeOnionAutomap,
         )
     }
 
@@ -336,6 +351,8 @@ class OnionVpnService : VpnService() {
         const val EXTRA_TOR_SOCKS_PORT = "tor_socks_port"
         const val EXTRA_DNSCRYPT_PORT = "dnscrypt_port"
         const val EXTRA_TOR_DNS_PORT = "tor_dns_port"
+        /** App-side `.onion` Automap when using Arti (no native AutomapHostsOnResolve). */
+        const val EXTRA_SYNTHESIZE_ONION_AUTOMAP = "synthesize_onion_automap"
         const val EXTRA_GENERATION = "vpn_generation"
         const val EXTRA_DNS_MODE = "dns_mode"
 

@@ -83,7 +83,7 @@ class TunnelForegroundService : Service() {
     private var runtimePorts: TunnelRuntimePorts? = null
     private val bandwidthSampler by lazy { TorBandwidthSampler(applicationInfo.uid) }
     private val throughputTracker by lazy { TunnelThroughputTracker(bandwidthSampler) }
-    private val stabilityRecovery by lazy { TunnelStabilityRecovery(tor) }
+    private val stabilityRecovery by lazy { TunnelStabilityRecovery(tor, scope) }
     private val throughputText: String get() = throughputTracker.displayText
     private val notifications by lazy { TunnelNotifications(this) }
     private var lastNotificationText: String? = null
@@ -97,10 +97,13 @@ class TunnelForegroundService : Service() {
         super.onCreate()
         notifications.createChannel()
         OnionVpnService.onUnderlyingNetworkChanged = {
-            // Never block the main looper with ControlPort I/O.
+            // Never block the main looper with ControlPort / Arti I/O.
             scope.launch(Dispatchers.IO) {
-                tor.onNetworkChanged().onFailure {
-                    Timber.w(it, "Tor network recovery failed")
+                tor.onNetworkChanged().onFailure { soft ->
+                    Timber.w(soft, "Tor soft network recovery failed — trying hard")
+                    tor.recoverNetworkHard().onFailure {
+                        Timber.w(it, "Tor hard network recovery failed")
+                    }
                 }
             }
         }
@@ -126,7 +129,10 @@ class TunnelForegroundService : Service() {
                 scope.launch {
                     val result = tor.newNym()
                     result.onSuccess {
-                        Timber.i("NEWNYM via control port")
+                        Timber.i(
+                            "New identity via %s",
+                            if (tor.engine.capabilities.classicControlPlane) "control NEWNYM" else "Arti restart",
+                        )
                         updateSnapshot(_snapshot.value.phase)
                     }
                     result.onFailure { err ->
@@ -147,6 +153,10 @@ class TunnelForegroundService : Service() {
                     torNewCircuitPeriodSec = period,
                 )
                 scope.launch {
+                    if (!preferences.torEngine.capabilities.liveSetConf) {
+                        Timber.i("Circuit timing ignored on %s (no live SETCONF)", preferences.torEngine)
+                        return@launch
+                    }
                     tor.applyCircuitTimingLive(dirt, period)
                         .onSuccess { Timber.i("Live circuit timing applied dirt=%d period=%d", dirt, period) }
                         .onFailure { Timber.w(it, "Live circuit timing SETCONF failed") }
@@ -378,13 +388,19 @@ class TunnelForegroundService : Service() {
             dnsCryptRunning = useDnsCrypt && dnsCrypt.isRunning(),
             vpnEstablished = true,
         )
-        // Wake Tor if we previously SIGNAL DORMANT from kill-switch Blocking.
+        // Wake Tor if we previously SIGNAL DORMANT from kill-switch Blocking (C Tor only).
         maybeSignalActive()
-        tor.applyCircuitTimingLive(
-            preferences.torMaxCircuitDirtinessSec,
-            preferences.torNewCircuitPeriodSec,
-        )
-        circuitLifecycle.start()
+        if (preferences.torEngine.capabilities.liveSetConf) {
+            tor.applyCircuitTimingLive(
+                preferences.torMaxCircuitDirtinessSec,
+                preferences.torNewCircuitPeriodSec,
+            )
+        }
+        if (preferences.torEngine.capabilities.circuitInspection) {
+            circuitLifecycle.start()
+        } else {
+            circuitLifecycle.stop()
+        }
         startPeriodicValidation()
         startForwarderWatchdog()
         startThroughputUpdates()
@@ -395,13 +411,17 @@ class TunnelForegroundService : Service() {
             tor.refreshControlInfo()
             TunnelValidator.validateAll(
                 context = applicationContext,
-                torConfigFile = tor.torrcFile,
+                torConfigFile = tor.runtimeConfigFile,
                 dnsCryptConfigFile = dnsCrypt.configFile,
                 vpnEstablished = OnionVpnService.vpnEstablished.value,
                 killSwitchEnabled = preferences.killSwitchEnabled,
                 runtimePorts = ports,
                 dnsResolverMode = preferences.dnsResolverMode,
-            ) + TorControlHealth.validate(tor.controlStatus.value)
+                torEngine = preferences.torEngine,
+            ) + TorControlHealth.validate(
+                status = tor.controlStatus.value,
+                engine = preferences.torEngine,
+            )
         }
     } catch (error: Exception) {
         Timber.e(error, "Validation timed out or failed")
@@ -490,7 +510,11 @@ class TunnelForegroundService : Service() {
             tor.stop()
         } else {
             tor.signalDormant()
-            Timber.i("Kill-switch Blocking TUN only — Tor dormant, kept for recovery")
+            Timber.i(
+                "Kill-switch Blocking TUN only — engine=%s kept for recovery (dormant=%s)",
+                preferences.torEngine,
+                preferences.torEngine.capabilities.dormantSignals,
+            )
         }
         updateSnapshot(
             phase = TunnelPhase.Blocking,
@@ -602,23 +626,25 @@ class TunnelForegroundService : Service() {
                     maybeSignalActive()
                     TunnelValidator.validateAll(
                         context = applicationContext,
-                        torConfigFile = tor.torrcFile,
+                        torConfigFile = tor.runtimeConfigFile,
                         dnsCryptConfigFile = dnsCrypt.configFile,
                         vpnEstablished = OnionVpnService.vpnEstablished.value,
                         killSwitchEnabled = preferences.killSwitchEnabled,
                         runtimePorts = ports,
                         dnsResolverMode = preferences.dnsResolverMode,
                         includeExitIp = true,
+                        torEngine = preferences.torEngine,
                     )
                 } else {
                     TunnelValidator.validateLite(
                         context = applicationContext,
-                        torConfigFile = tor.torrcFile,
+                        torConfigFile = tor.runtimeConfigFile,
                         dnsCryptConfigFile = dnsCrypt.configFile,
                         vpnEstablished = OnionVpnService.vpnEstablished.value,
                         killSwitchEnabled = preferences.killSwitchEnabled,
                         runtimePorts = ports,
                         dnsResolverMode = preferences.dnsResolverMode,
+                        torEngine = preferences.torEngine,
                     )
                 }
                 val hardFails = checks.filter { TunnelValidator.isHardKillSwitchFailure(it) }
@@ -716,9 +742,10 @@ class TunnelForegroundService : Service() {
         vpnEstablished: Boolean = _snapshot.value.vpnEstablished,
         lastError: String? = _snapshot.value.lastError,
     ) {
+        val caps = preferences.torEngine.capabilities
         val liveCircs = circuitLifecycle.liveCircuits.value
         val liveStreams = circuitLifecycle.liveStreams.value
-        val controlUp = tor.controlStatus.value.connected
+        val controlUp = caps.classicControlPlane && tor.control.isConnected
         val builtLive = liveCircs.count { it.info.status.equals("BUILT", ignoreCase = true) }
         _snapshot.value = TunnelSnapshotBuilder.build(
             phase = phase,
@@ -733,6 +760,7 @@ class TunnelForegroundService : Service() {
             runtimePorts = runtimePorts,
             liveBuiltCircuits = if (controlUp) builtLive else -1,
             liveStreamCount = if (controlUp) liveStreams.size else -1,
+            torEngine = preferences.torEngine,
         )
         notifications.updateIfChanged(phase, throughputText, lastNotificationText, lastNotificationUpdateMs)
             .also { (text, at) ->
@@ -742,8 +770,9 @@ class TunnelForegroundService : Service() {
     }
 
     private fun maybeSignalActive() {
+        if (!preferences.torEngine.capabilities.dormantSignals) return
         val st = tor.controlStatus.value
-        if (!st.connected) return
+        if (!tor.control.isConnected) return
         if (st.dormant || st.lastStabilityAction.isNotBlank()) {
             tor.signalActive()
         }

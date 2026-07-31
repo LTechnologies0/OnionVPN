@@ -181,14 +181,17 @@ fun StatusScreen(
             StatusDot(active = snapshot.killSwitchEnabled, label = "Kill switch")
         }
 
-        if (snapshot.torControlConnected || snapshot.torBootstrapProgress > 0) {
+        if (snapshot.torRuntimeReady || snapshot.torControlConnected || snapshot.torBootstrapProgress > 0) {
             FlowRow(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 MetricChip("Bootstrap", "${snapshot.torBootstrapProgress}%")
-                MetricChip("Circuits", "${snapshot.torBuiltCircuits}")
-                MetricChip("Streams", "${snapshot.torStreamCount}")
+                if (snapshot.torControlPlaneAvailable) {
+                    MetricChip("Circuits", "${snapshot.torBuiltCircuits}")
+                    MetricChip("Streams", "${snapshot.torStreamCount}")
+                }
+                MetricChip("Engine", snapshot.torEngine.displayName)
             }
             if (snapshot.torVersion.isNotBlank()) {
                 Text(
@@ -236,27 +239,33 @@ fun StatusScreen(
 
         AnimatedVisibility(visible = connected, enter = fadeIn(), exit = fadeOut()) {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                if (onNewNym != null) {
+                if (onNewNym != null && snapshot.torEngine.capabilities.newIdentity) {
                     FilledTonalButton(
                         onClick = onNewNym,
                         modifier = Modifier
                             .fillMaxWidth()
                             .height(52.dp),
-                        enabled = snapshot.torControlConnected,
+                        enabled = snapshot.torRuntimeReady || snapshot.torControlConnected,
                         shape = MaterialTheme.shapes.large,
                     ) {
                         Icon(Icons.Filled.SwapHoriz, contentDescription = null)
                         Spacer(modifier = Modifier.width(8.dp))
-                        Text("New identity")
+                        Text(
+                            if (snapshot.torEngine.capabilities.classicControlPlane) {
+                                "New identity"
+                            } else {
+                                "New identity (restart Arti)"
+                            },
+                        )
                     }
                 }
-                if (circuitLifecycle != null) {
+                if (circuitLifecycle != null && snapshot.torControlPlaneAvailable) {
                     OutlinedButton(
                         onClick = { showCircuits = true },
                         modifier = Modifier
                             .fillMaxWidth()
                             .height(52.dp),
-                        enabled = snapshot.torControlConnected,
+                        enabled = snapshot.torControlPlaneAvailable,
                         shape = MaterialTheme.shapes.large,
                     ) {
                         Icon(Icons.Filled.Hub, contentDescription = null)

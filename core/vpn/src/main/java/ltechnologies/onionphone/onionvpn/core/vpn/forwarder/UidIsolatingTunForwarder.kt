@@ -55,6 +55,7 @@ class UidIsolatingTunForwarder(
         socksPort: Int,
         dnsCryptPort: Int,
         torDnsPort: Int,
+        synthesizeOnionAutomap: Boolean,
     ) {
         stop()
         val pair = HevSocks5TunForwarder.createPacketSocketPair()
@@ -72,6 +73,7 @@ class UidIsolatingTunForwarder(
             divertDnsToDnsCrypt = true,
             torDnsHost = TunnelEndpoints.LOOPBACK,
             torDnsPort = torDnsPort,
+            synthesizeOnionAutomap = synthesizeOnionAutomap,
             onFatal = { error ->
                 Timber.e(error, "TunDnsMux died")
                 onFatal?.invoke(error)

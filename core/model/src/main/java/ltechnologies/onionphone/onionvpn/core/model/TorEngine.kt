@@ -18,8 +18,73 @@ enum class TorEngine {
             ARTI -> "Arti (Rust)"
         }
 
+    /** Feature matrix used to gate UI, validation, and recovery paths. */
+    val capabilities: TorEngineCapabilities
+        get() = when (this) {
+            LITTLE_T -> TorEngineCapabilities.LITTLE_T
+            ARTI -> TorEngineCapabilities.ARTI
+        }
+
     companion object {
         fun fromPreference(raw: String?): TorEngine =
             entries.firstOrNull { it.name.equals(raw, ignoreCase = true) } ?: LITTLE_T
+    }
+}
+
+/**
+ * What each Tor engine can do. Call sites must branch on these flags instead of
+ * sniffing version strings or assuming ControlSocket semantics.
+ */
+data class TorEngineCapabilities(
+    /** Classic Tor control-spec (ControlSocket + cookie + SIGNAL/SETCONF/GETINFO). */
+    val classicControlPlane: Boolean,
+    /** Distinct SocksPorts with SessionGroup isolation (apps / DNSCrypt / probe). */
+    val multiSocksSessionGroups: Boolean,
+    /** Native DNSPort AutomapHostsOnResolve → VirtualAddrNetwork. */
+    val nativeAutomapDnsPort: Boolean,
+    /**
+     * App-side Automap for `.onion`/`.exit` when [nativeAutomapDnsPort] is false
+     * (synthesize virtual A + DnsHostnameCache → SOCKS5A).
+     */
+    val synthesizeOnionAutomap: Boolean,
+    /** New identity (C Tor SIGNAL NEWNYM, or Arti runtime restart). */
+    val newIdentity: Boolean,
+    /** Live CIRC/STREAM inspection and CLOSECIRCUIT / EXTENDCIRCUIT. */
+    val circuitInspection: Boolean,
+    /** Live SETCONF (circuit timing, bridges, GeoIP, nodes). */
+    val liveSetConf: Boolean,
+    /** SIGNAL DORMANT / ACTIVE for kill-switch Blocking. */
+    val dormantSignals: Boolean,
+    /** Runtime torrc file is authoritative config. */
+    val torrcConfig: Boolean,
+    /** Conjure pluggable transport. */
+    val conjureBridges: Boolean,
+) {
+    companion object {
+        val LITTLE_T = TorEngineCapabilities(
+            classicControlPlane = true,
+            multiSocksSessionGroups = true,
+            nativeAutomapDnsPort = true,
+            synthesizeOnionAutomap = false,
+            newIdentity = true,
+            circuitInspection = true,
+            liveSetConf = true,
+            dormantSignals = true,
+            torrcConfig = true,
+            conjureBridges = true,
+        )
+
+        val ARTI = TorEngineCapabilities(
+            classicControlPlane = false,
+            multiSocksSessionGroups = false,
+            nativeAutomapDnsPort = false,
+            synthesizeOnionAutomap = true,
+            newIdentity = true,
+            circuitInspection = false,
+            liveSetConf = false,
+            dormantSignals = false,
+            torrcConfig = false,
+            conjureBridges = false,
+        )
     }
 }

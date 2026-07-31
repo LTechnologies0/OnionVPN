@@ -89,16 +89,20 @@ Refresh with `scripts/fetch-native-binaries.sh`:
 
 There is **no** runtime Tor binary OTA; ship updates by refreshing jniLibs / AAR and releasing a new OnionVPN APK.
 
-### Arti migration status
+### Tor engine (Settings → Tor)
+
+Pick **C Tor** or **Arti** at runtime. Capabilities are gated via `TorEngineCapabilities`
+(UI, validation, recovery, Automap).
 
 | Capability | C Tor | Arti |
 |------------|-------|------|
-| SOCKS proxy | Multi-port SessionGroups | Single shared SOCKS |
-| DNSPort | Automap / VirtualAddr | DNS proxy port |
-| Classic ControlSocket | Yes | No (synthetic bootstrap status) |
-| Circuits UI / NEWNYM / live SETCONF | Yes | Not yet |
-| Bridges + Lyrebird managed PT | Yes | Experimental (path-based) |
-| Conjure | Yes | Not yet |
+| SOCKS proxy | Multi-port SessionGroups | Single shared SOCKS (+ SOCKS user/pass) |
+| `.onion` Automap | Native DNSPort Automap | App-side synthesizer → SOCKS5A |
+| Classic ControlSocket | Yes | No (`arti.status` + synthetic bootstrap) |
+| Circuits UI / live SETCONF | Yes | No |
+| New identity | SIGNAL NEWNYM | Runtime restart |
+| Bridges + Lyrebird | Yes | Yes (managed path) |
+| Conjure | Yes | No (use C Tor) |
 
 ## License
 

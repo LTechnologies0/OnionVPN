@@ -96,6 +96,17 @@ class TorProcessManager(
     val engine: TorEngine
         get() = activeEngine
 
+    /** Arti runtime status file (null semantics when using C Tor). */
+    val artiStatusFile: File
+        get() = arti.statusFile
+
+    /** Config file path for validators: torrc (C Tor) or arti.status (Arti). */
+    val runtimeConfigFile: File
+        get() = when (activeEngine) {
+            TorEngine.ARTI -> arti.statusFile
+            TorEngine.LITTLE_T -> torrcFile
+        }
+
     /** Optional sink for stderr/stdout / Arti log lines. */
     var onLogLine: ((String) -> Unit)? = null
         set(value) {
@@ -204,17 +215,39 @@ class TorProcessManager(
     fun currentProbeSocksPort(): Int? =
         runtimePorts?.torProbeSocksPort?.takeIf { isRunning() }
 
-    /** SIGNAL NEWNYM + CLEARDNSCACHE (user “new identity”), rate-limited ~10s. */
-    fun newNym(): Result<Unit> {
-        if (activeEngine == TorEngine.ARTI) {
-            return Result.failure(
-                IOException("New identity is not available on Arti yet (no classic control port)"),
-            )
-        }
-        if (!control.isConnected) return Result.failure(IOException("control not connected"))
-        return control.newNym().also {
-            it.onSuccess { Timber.i("SIGNAL NEWNYM accepted") }
-            it.onFailure { e -> Timber.w(e, "NEWNYM failed") }
+    /**
+     * New identity: C Tor SIGNAL NEWNYM (+ CLEARDNSCACHE); Arti full runtime restart
+     * (drops circuits — VPN-equivalent of NEWNYM without control-spec).
+     */
+    suspend fun newNym(): Result<Unit> = withContext(Dispatchers.IO) {
+        when (activeEngine) {
+            TorEngine.ARTI -> {
+                if (!arti.isRunning()) {
+                    return@withContext Result.failure(IOException("Arti not running"))
+                }
+                runCatching {
+                    arti.restartForNewIdentity()
+                    publishArtiReadyStatus()
+                }.fold(
+                    onSuccess = {
+                        Timber.i("Arti new-identity restart complete")
+                        Result.success(Unit)
+                    },
+                    onFailure = { e ->
+                        Timber.w(e, "Arti new-identity failed")
+                        Result.failure(e)
+                    },
+                )
+            }
+            TorEngine.LITTLE_T -> {
+                if (!control.isConnected) {
+                    return@withContext Result.failure(IOException("control not connected"))
+                }
+                control.newNym().also {
+                    it.onSuccess { Timber.i("SIGNAL NEWNYM accepted") }
+                    it.onFailure { e -> Timber.w(e, "NEWNYM failed") }
+                }
+            }
         }
     }
 
@@ -301,9 +334,11 @@ class TorProcessManager(
      */
     fun onNetworkChanged(): Result<Unit> {
         if (activeEngine == TorEngine.ARTI) {
+            // Soft: re-probe listeners; Arti has no DROPTIMEOUTS/CLEARDNSCACHE.
             publishArtiReadyStatus()
-            Timber.i("Arti network change noted (no control-port recovery)")
-            return Result.success(Unit)
+            val ok = runtimePorts?.let { TorReadiness.areSocksPortsReady(it) } == true
+            Timber.i("Arti network change soft recovery socksReady=%s", ok)
+            return if (ok) Result.success(Unit) else Result.failure(IOException("Arti SOCKS not ready"))
         }
         if (!control.isConnected) return Result.failure(IOException("control not connected"))
         control.dropTimeouts().onFailure { Timber.w(it, "DROPTIMEOUTS failed") }
@@ -318,23 +353,43 @@ class TorProcessManager(
     }
 
     /**
-     * Hard recovery: DisableNetwork bounce to rebind OR sockets on a new path.
+     * Hard recovery: C Tor DisableNetwork bounce; Arti full runtime restart.
      * Tears down listeners/circuits — use only when soft recovery is insufficient.
      */
-    fun recoverNetworkHard(): Result<Unit> {
-        if (activeEngine == TorEngine.ARTI) {
-            return onNetworkChanged()
-        }
-        if (!control.isConnected) return Result.failure(IOException("control not connected"))
-        control.dropTimeouts().onFailure { Timber.w(it, "DROPTIMEOUTS failed") }
-        control.setDisableNetwork(true).onFailure { Timber.w(it, "DisableNetwork=1 failed") }
-        control.setDisableNetwork(false).onFailure { Timber.w(it, "DisableNetwork=0 failed") }
-        val active = control.setActive()
-        control.clearDnsCache().onFailure { Timber.w(it, "CLEARDNSCACHE failed") }
-        control.refreshHealthLite()
-        return active.also {
-            it.onSuccess {
-                Timber.w("Tor network recovery HARD: DROPTIMEOUTS+DisableNetwork bounce+ACTIVE+CLEARDNSCACHE")
+    suspend fun recoverNetworkHard(): Result<Unit> = withContext(Dispatchers.IO) {
+        when (activeEngine) {
+            TorEngine.ARTI -> {
+                runCatching {
+                    arti.restartHard()
+                    publishArtiReadyStatus()
+                }.fold(
+                    onSuccess = {
+                        Timber.w("Arti network recovery HARD: runtime restart")
+                        Result.success(Unit)
+                    },
+                    onFailure = { e ->
+                        Timber.w(e, "Arti hard recovery failed")
+                        Result.failure(e)
+                    },
+                )
+            }
+            TorEngine.LITTLE_T -> {
+                if (!control.isConnected) {
+                    return@withContext Result.failure(IOException("control not connected"))
+                }
+                control.dropTimeouts().onFailure { Timber.w(it, "DROPTIMEOUTS failed") }
+                control.setDisableNetwork(true).onFailure { Timber.w(it, "DisableNetwork=1 failed") }
+                control.setDisableNetwork(false).onFailure { Timber.w(it, "DisableNetwork=0 failed") }
+                val active = control.setActive()
+                control.clearDnsCache().onFailure { Timber.w(it, "CLEARDNSCACHE failed") }
+                control.refreshHealthLite()
+                active.also {
+                    it.onSuccess {
+                        Timber.w(
+                            "Tor network recovery HARD: DROPTIMEOUTS+DisableNetwork bounce+ACTIVE+CLEARDNSCACHE",
+                        )
+                    }
+                }
             }
         }
     }
@@ -386,7 +441,7 @@ class TorProcessManager(
     private fun publishArtiReadyStatus() {
         val socksUp = runtimePorts?.let { TorReadiness.areSocksPortsReady(it) } == true
         val ready = socksUp && arti.isRunning()
-        // connected=true means "runtime plane healthy" for UI/snapshot — not a ControlSocket.
+        // connected=true = runtime healthy (UI bootstrap). Circuits stay 0 — no control plane.
         control.publishSyntheticStatus(
             TorControlStatus(
                 connected = ready,
@@ -402,7 +457,8 @@ class TorProcessManager(
                 enoughDirInfo = ready,
                 networkLive = ready,
                 dormant = false,
-                builtCircuits = if (ready) 1 else 0,
+                builtCircuits = 0,
+                streamCount = 0,
             ),
         )
     }

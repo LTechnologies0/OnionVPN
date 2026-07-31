@@ -243,10 +243,20 @@ data class TunnelSnapshot(
      * (traffic/read|written deltas, then BW events, then UID TrafficStats).
      */
     val throughputText: String = "",
+    /** Active Tor client engine (C Tor or Arti). */
+    val torEngine: TorEngine = TorEngine.LITTLE_T,
     /** Tor control-spec bootstrap 0–100. */
     val torBootstrapProgress: Int = 0,
     val torBootstrapSummary: String = "",
+    /**
+     * True when the classic ControlSocket session is live (C Tor only).
+     * Arti sets [torRuntimeReady] instead — do not enable Circuits/NEWNYM from this alone on Arti.
+     */
     val torControlConnected: Boolean = false,
+    /** SOCKS/DNS listeners ready (both engines). */
+    val torRuntimeReady: Boolean = false,
+    /** Classic control-plane ops available (circuits UI, live SETCONF). */
+    val torControlPlaneAvailable: Boolean = false,
     val torBuiltCircuits: Int = 0,
     val torCircuitEstablished: Boolean = false,
     val torVersion: String = "",

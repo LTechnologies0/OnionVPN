@@ -1,5 +1,6 @@
 package ltechnologies.onionphone.onionvpn.core.tor.control
 
+import ltechnologies.onionphone.onionvpn.core.model.TorEngine
 import ltechnologies.onionphone.onionvpn.core.model.ValidationCheck
 import ltechnologies.onionphone.onionvpn.core.model.ValidationStatus
 import ltechnologies.onionphone.onionvpn.core.tor.control.model.TorControlStatus
@@ -18,10 +19,16 @@ object TorControlHealth {
     /**
      * @param status current control snapshot
      * @param requireConnected when true, disconnected → Fail (Connected phase)
-     *   unless [status] is an Arti synthetic snapshot (no classic ControlSocket).
+     * @param engine when set, uses capability matrix instead of version-string sniffing
      */
-    fun validate(status: TorControlStatus, requireConnected: Boolean = true): ValidationCheck {
-        if (isArtiSynthetic(status)) {
+    fun validate(
+        status: TorControlStatus,
+        requireConnected: Boolean = true,
+        engine: TorEngine? = null,
+    ): ValidationCheck {
+        val isArti = engine == TorEngine.ARTI ||
+            (engine == null && isArtiSynthetic(status))
+        if (isArti) {
             return validateArti(status)
         }
         if (requireConnected && !status.connected) {

@@ -409,19 +409,25 @@ fun SettingsScreen(
 
         SectionHeader(
             title = "Tor",
-            subtitle = "Circuit rotation (path-spec / prop. 368). Per-UID KeepAliveIsolateSOCKSAuth " +
-                "circuits stay sticky; dirtiness mainly affects non-auth streams. " +
-                "Default Stable=600s. Live SETCONF when connected (no Tor restart).",
+            subtitle = when (local.torEngine) {
+                TorEngine.LITTLE_T ->
+                    "Circuit rotation (path-spec / prop. 368). Per-UID KeepAliveIsolateSOCKSAuth " +
+                        "circuits stay sticky; dirtiness mainly affects non-auth streams. " +
+                        "Default Stable=600s. Live SETCONF when connected (no Tor restart)."
+                TorEngine.ARTI ->
+                    "Arti (Rust) client: shared SOCKS + DNS, app-side .onion Automap, " +
+                        "new identity restarts the runtime. No classic ControlSocket / circuits UI. " +
+                        "Circuit timing prefs apply after restart only if mapped later."
+            },
         )
         Text(
             text = "Tor engine",
             style = MaterialTheme.typography.titleMedium,
         )
         Text(
-            text = "C Tor (libtor) is the production default (multi-SocksPort, ControlSocket, " +
-                "full PT surface). Arti (Rust) is experimental: one shared SOCKS + DNS, " +
-                "no classic control port (circuits UI / NEWNYM / live SETCONF limited). " +
-                "Changing engine restarts the tunnel.",
+            text = "Choose which Tor client the tunnel launches. C Tor (libtor) is the full " +
+                "feature set. Arti is production-usable for SOCKS/DNS routing with known gaps " +
+                "(no circuits UI, no Conjure, shared SocksPort). Changing engine restarts the tunnel.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -444,59 +450,66 @@ fun SettingsScreen(
                 label = { Text("Arti") },
             )
         }
-        Row(
-            modifier = Modifier.horizontalScroll(rememberScrollState()),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            FilterChip(
-                selected = local.torNewCircuitPeriodSec == 30 &&
-                    local.torMaxCircuitDirtinessSec == 600,
-                onClick = {
-                    commit(
-                        local.copy(
-                            torNewCircuitPeriodSec = 30,
-                            torMaxCircuitDirtinessSec = 600,
-                        ),
-                    )
-                },
-                label = { Text("Stable") },
-            )
-            FilterChip(
-                selected = local.torNewCircuitPeriodSec == 30 &&
-                    local.torMaxCircuitDirtinessSec == 180,
-                onClick = {
-                    commit(
-                        local.copy(
-                            torNewCircuitPeriodSec = 30,
-                            torMaxCircuitDirtinessSec = 180,
-                        ),
-                    )
-                },
-                label = { Text("Balanced") },
-            )
-            FilterChip(
-                selected = local.torNewCircuitPeriodSec == 15 &&
-                    local.torMaxCircuitDirtinessSec == 60,
-                onClick = {
-                    commit(
-                        local.copy(
-                            torNewCircuitPeriodSec = 15,
-                            torMaxCircuitDirtinessSec = 60,
-                        ),
-                    )
-                },
-                label = { Text("Paranoid") },
-            )
+        if (local.torEngine.capabilities.liveSetConf) {
+            Row(
+                modifier = Modifier.horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                FilterChip(
+                    selected = local.torNewCircuitPeriodSec == 30 &&
+                        local.torMaxCircuitDirtinessSec == 600,
+                    onClick = {
+                        commit(
+                            local.copy(
+                                torNewCircuitPeriodSec = 30,
+                                torMaxCircuitDirtinessSec = 600,
+                            ),
+                        )
+                    },
+                    label = { Text("Stable") },
+                )
+                FilterChip(
+                    selected = local.torNewCircuitPeriodSec == 30 &&
+                        local.torMaxCircuitDirtinessSec == 180,
+                    onClick = {
+                        commit(
+                            local.copy(
+                                torNewCircuitPeriodSec = 30,
+                                torMaxCircuitDirtinessSec = 180,
+                            ),
+                        )
+                    },
+                    label = { Text("Balanced") },
+                )
+                FilterChip(
+                    selected = local.torNewCircuitPeriodSec == 15 &&
+                        local.torMaxCircuitDirtinessSec == 60,
+                    onClick = {
+                        commit(
+                            local.copy(
+                                torNewCircuitPeriodSec = 15,
+                                torMaxCircuitDirtinessSec = 60,
+                            ),
+                        )
+                    },
+                    label = { Text("Paranoid") },
+                )
+            }
         }
         Text(
             text = "Tor bridges",
             style = MaterialTheme.typography.titleMedium,
         )
         Text(
-            text = "Presets paste built-in Tor Browser PT lines (Lyrebird / Conjure). " +
-                "Request from Tor Project uses Moat (obfs4 / Snowflake / WebTunnel). " +
-                "WebTunnel gets utls=none so Lyrebird uses stdlib TLS. " +
-                "Apply & restart tunnel after changing.",
+            text = if (local.torEngine.capabilities.conjureBridges) {
+                "Presets paste built-in Tor Browser PT lines (Lyrebird / Conjure). " +
+                    "Request from Tor Project uses Moat (obfs4 / Snowflake / WebTunnel). " +
+                    "WebTunnel gets utls=none so Lyrebird uses stdlib TLS. " +
+                    "Apply & restart tunnel after changing."
+            } else {
+                "Arti supports Lyrebird-backed bridges (obfs4 / Snowflake / meek / WebTunnel). " +
+                    "Conjure requires C Tor. Apply & restart tunnel after changing."
+            },
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -737,43 +750,47 @@ fun SettingsScreen(
                 onDismiss = { pickingExclude = false },
             )
         }
-        OutlinedTextField(
-            value = local.torNewCircuitPeriodSec.toString(),
-            onValueChange = {
-                it.toIntOrNull()?.let { v ->
-                    local = local.copy(torNewCircuitPeriodSec = v.coerceIn(10, 86_400))
-                }
-            },
-            label = { Text("NewCircuitPeriod (sec)") },
-            modifier = Modifier.fillMaxWidth(),
-        )
-        Text(
-            text = "MaxCircuitDirtiness (sec) — unused-circuit expiry. " +
-                "App SocksPort uses KeepAliveIsolateSOCKSAuth with per-UID tokens (sticky).",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        OutlinedTextField(
-            value = local.torMaxCircuitDirtinessSec.toString(),
-            onValueChange = {
-                it.toIntOrNull()?.let { v ->
-                    local = local.copy(torMaxCircuitDirtinessSec = v.coerceIn(60, 86_400))
-                }
-            },
-            label = { Text("MaxCircuitDirtiness (sec)") },
-            modifier = Modifier.fillMaxWidth(),
-        )
-        FilledTonalButton(
-            onClick = {
-                scope.launch {
-                    torrcDraft = onLoadTorrc()
-                    editingTorrc = true
-                }
-            },
-            modifier = Modifier.fillMaxWidth(),
-            shape = MaterialTheme.shapes.large,
-        ) {
-            Text("Edit torrc")
+        if (local.torEngine.capabilities.liveSetConf || local.torEngine.capabilities.torrcConfig) {
+            OutlinedTextField(
+                value = local.torNewCircuitPeriodSec.toString(),
+                onValueChange = {
+                    it.toIntOrNull()?.let { v ->
+                        local = local.copy(torNewCircuitPeriodSec = v.coerceIn(10, 86_400))
+                    }
+                },
+                label = { Text("NewCircuitPeriod (sec)") },
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Text(
+                text = "MaxCircuitDirtiness (sec) — unused-circuit expiry. " +
+                    "App SocksPort uses KeepAliveIsolateSOCKSAuth with per-UID tokens (sticky).",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            OutlinedTextField(
+                value = local.torMaxCircuitDirtinessSec.toString(),
+                onValueChange = {
+                    it.toIntOrNull()?.let { v ->
+                        local = local.copy(torMaxCircuitDirtinessSec = v.coerceIn(60, 86_400))
+                    }
+                },
+                label = { Text("MaxCircuitDirtiness (sec)") },
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
+        if (local.torEngine.capabilities.torrcConfig) {
+            FilledTonalButton(
+                onClick = {
+                    scope.launch {
+                        torrcDraft = onLoadTorrc()
+                        editingTorrc = true
+                    }
+                },
+                modifier = Modifier.fillMaxWidth(),
+                shape = MaterialTheme.shapes.large,
+            ) {
+                Text("Edit torrc")
+            }
         }
 
         SectionHeader(
