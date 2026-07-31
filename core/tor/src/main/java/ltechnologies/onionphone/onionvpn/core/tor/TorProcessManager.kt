@@ -20,6 +20,7 @@ import ltechnologies.onionphone.onionvpn.core.tor.arti.ArtiRuntime
 import ltechnologies.onionphone.onionvpn.core.tor.config.TorBridgeConfig
 import ltechnologies.onionphone.onionvpn.core.tor.config.TorConfigWriter
 import ltechnologies.onionphone.onionvpn.core.tor.control.TorControlClient
+import ltechnologies.onionphone.onionvpn.core.tor.control.TorControlCompat
 import ltechnologies.onionphone.onionvpn.core.tor.control.catalog.TorControlCatalog
 import ltechnologies.onionphone.onionvpn.core.tor.control.model.TorControlStatus
 import ltechnologies.onionphone.onionvpn.core.tor.lifecycle.TorReadiness
@@ -49,8 +50,9 @@ import timber.log.Timber
  *
  * **Arti start pipeline:** stop → JNI start → wait SOCKS/DNS listeners → synthetic status.
  *
- * Control ops are exposed via [control] (single surface — no duplicated SIGNAL wrappers).
- * App conveniences kept: [newNym], [onNetworkChanged], [signalDormant].
+ * Control-plane ops go through Arti-aware wrappers ([newNym], [onNetworkChanged],
+ * [signalActive]/ [clearDnsCache], …) mapped by [TorControlCompat]. Prefer those
+ * over raw [control] from app code; [control.isConnected] stays false on Arti.
  *
  * Imported by: DI, TunnelForegroundService, MainViewModel, OnionVpnApplication.
  */
@@ -215,9 +217,25 @@ class TorProcessManager(
     fun currentProbeSocksPort(): Int? =
         runtimePorts?.torProbeSocksPort?.takeIf { isRunning() }
 
+    /** True when classic ControlSocket session is open (never true on Arti). */
+    fun isClassicControlConnected(): Boolean =
+        activeEngine == TorEngine.LITTLE_T && control.isConnected
+
+    private fun requireClassic(op: String): Result<Unit>? {
+        if (activeEngine == TorEngine.ARTI) {
+            return Result.failure(IOException(TorControlCompat.unsupportedMessage(op)))
+        }
+        if (!control.isConnected) {
+            return Result.failure(IOException("control not connected"))
+        }
+        return null
+    }
+
+    private var lastArtiNewNymMs: Long = 0L
+
     /**
-     * New identity: C Tor SIGNAL NEWNYM (+ CLEARDNSCACHE); Arti full runtime restart
-     * (drops circuits — VPN-equivalent of NEWNYM without control-spec).
+     * New identity: C Tor SIGNAL NEWNYM; Arti full runtime restart (rate-limited ~10s).
+     * @see TorControlCompat Op NEWNYM
      */
     suspend fun newNym(): Result<Unit> = withContext(Dispatchers.IO) {
         when (activeEngine) {
@@ -225,11 +243,19 @@ class TorProcessManager(
                 if (!arti.isRunning()) {
                     return@withContext Result.failure(IOException("Arti not running"))
                 }
+                val now = System.currentTimeMillis()
+                val wait = lastArtiNewNymMs + ARTI_NEWNYM_MIN_INTERVAL_MS - now
+                if (wait > 0) {
+                    return@withContext Result.failure(
+                        IOException("NEWNYM rate-limited — wait ${((wait + 999) / 1000)}s"),
+                    )
+                }
                 runCatching {
                     arti.restartForNewIdentity()
                     publishArtiReadyStatus()
                 }.fold(
                     onSuccess = {
+                        lastArtiNewNymMs = System.currentTimeMillis()
                         Timber.i("Arti new-identity restart complete")
                         Result.success(Unit)
                     },
@@ -251,10 +277,10 @@ class TorProcessManager(
         }
     }
 
-    /** SIGNAL ACTIVE — wake from DORMANT after Blocking / network recovery. */
+    /** SIGNAL ACTIVE — Arti: no-op OK (listeners stay up). */
     fun signalActive(): Result<Unit> {
         if (activeEngine == TorEngine.ARTI) {
-            // Arti has no SIGNAL ACTIVE; listeners stay up — treat as success.
+            publishArtiReadyStatus()
             return Result.success(Unit)
         }
         if (!control.isConnected) return Result.failure(IOException("control not connected"))
@@ -264,13 +290,72 @@ class TorProcessManager(
         }
     }
 
-    /** Live SETCONF MaxCircuitDirtiness / NewCircuitPeriod (no restart). */
+    /** SIGNAL DORMANT — Arti: no-op OK (keep runtime under Blocking TUN). */
+    fun signalDormant(): Result<Unit> {
+        if (activeEngine == TorEngine.ARTI) {
+            Timber.i("Arti DORMANT no-op (runtime kept under Blocking)")
+            return Result.success(Unit)
+        }
+        if (!control.isConnected) return Result.failure(IOException("control not connected"))
+        return control.setDormant()
+    }
+
+    /** SIGNAL CLEARDNSCACHE — Arti: soft listener re-probe. */
+    fun clearDnsCache(): Result<Unit> {
+        if (activeEngine == TorEngine.ARTI) return onNetworkChanged()
+        if (!control.isConnected) return Result.failure(IOException("control not connected"))
+        return control.clearDnsCache()
+    }
+
+    /** DROPTIMEOUTS — Arti: soft recovery. */
+    fun dropTimeouts(): Result<Unit> {
+        if (activeEngine == TorEngine.ARTI) return onNetworkChanged()
+        if (!control.isConnected) return Result.failure(IOException("control not connected"))
+        return control.dropTimeouts()
+    }
+
+    /** DROPGUARDS — Arti: hard restart (clears client state). */
+    suspend fun dropGuards(): Result<Unit> = withContext(Dispatchers.IO) {
+        if (activeEngine == TorEngine.ARTI) return@withContext recoverNetworkHard()
+        if (!control.isConnected) {
+            return@withContext Result.failure(IOException("control not connected"))
+        }
+        control.dropGuards()
+    }
+
+    /** SETCONF DisableNetwork — Arti: hard restart. */
+    suspend fun setDisableNetwork(disabled: Boolean): Result<Unit> = withContext(Dispatchers.IO) {
+        if (activeEngine == TorEngine.ARTI) {
+            return@withContext if (disabled) {
+                // Soft stop listeners by stopping Arti; caller should re-enable via hard recover.
+                arti.stop()
+                control.resetStatus()
+                Result.success(Unit)
+            } else {
+                recoverNetworkHard()
+            }
+        }
+        if (!control.isConnected) {
+            return@withContext Result.failure(IOException("control not connected"))
+        }
+        control.setDisableNetwork(disabled)
+    }
+
+    /**
+     * Live SETCONF MaxCircuitDirtiness / NewCircuitPeriod.
+     * Arti: no-op success (prefs already persisted; no live knobs in arti-mobile).
+     */
     fun applyCircuitTimingLive(
         maxCircuitDirtinessSec: Int,
         newCircuitPeriodSec: Int,
     ): Result<Unit> {
         if (activeEngine == TorEngine.ARTI) {
-            return Result.failure(IOException("Circuit timing SETCONF requires C Tor control port"))
+            Timber.i(
+                "Arti circuit timing no-op (persisted prefs dirt=%ds period=%ds)",
+                maxCircuitDirtinessSec,
+                newCircuitPeriodSec,
+            )
+            return Result.success(Unit)
         }
         if (!control.isConnected) return Result.failure(IOException("control not connected"))
         return control.setCircuitTiming(maxCircuitDirtinessSec, newCircuitPeriodSec).also {
@@ -285,56 +370,39 @@ class TorProcessManager(
     }
 
     fun closeCircuit(id: String, ifUnused: Boolean = true): Result<Unit> {
-        if (activeEngine == TorEngine.ARTI) {
-            return Result.failure(IOException("Circuit control requires C Tor"))
-        }
-        if (!control.isConnected) return Result.failure(IOException("control not connected"))
+        requireClassic("CLOSECIRCUIT")?.let { return it }
         return control.closeCircuit(id, ifUnused)
     }
 
     fun closeStream(id: String, reason: String = TorControlCatalog.StreamEndReason.DONE): Result<Unit> {
-        if (activeEngine == TorEngine.ARTI) {
-            return Result.failure(IOException("Stream control requires C Tor"))
-        }
-        if (!control.isConnected) return Result.failure(IOException("control not connected"))
+        requireClassic("CLOSESTREAM")?.let { return it }
         return control.closeStream(id, reason)
     }
 
     fun listCircuits(): List<ltechnologies.onionphone.onionvpn.core.tor.control.model.TorCircuitInfo> =
-        if (activeEngine == TorEngine.LITTLE_T && control.isConnected) control.listCircuits() else emptyList()
+        if (isClassicControlConnected()) control.listCircuits() else emptyList()
 
     fun listStreams(): List<ltechnologies.onionphone.onionvpn.core.tor.control.model.TorStreamInfo> =
-        if (activeEngine == TorEngine.LITTLE_T && control.isConnected) control.listStreams() else emptyList()
+        if (isClassicControlConnected()) control.listStreams() else emptyList()
 
     fun extendNewCircuit(): Result<String> {
-        if (activeEngine == TorEngine.ARTI) {
-            return Result.failure(IOException("Circuit control requires C Tor"))
-        }
-        if (!control.isConnected) return Result.failure(IOException("control not connected"))
+        requireClassic("EXTENDCIRCUIT")?.let { return Result.failure(it.exceptionOrNull()!!) }
         return control.extendNewCircuit()
     }
 
-    /** SIGNAL DORMANT (kill-switch Blocking while keeping Tor process). */
-    fun signalDormant(): Result<Unit> {
-        if (activeEngine == TorEngine.ARTI) {
-            // No classic DORMANT; keep Arti running under Blocking TUN.
-            return Result.success(Unit)
-        }
-        return control.setDormant()
+    fun closeBuiltCircuits(): Result<Int> {
+        requireClassic("CLOSECIRCUIT")?.let { return Result.failure(it.exceptionOrNull()!!) }
+        return control.closeBuiltCircuits()
     }
 
     /**
      * Underlying Android network changed (Wi‑Fi ↔ cell, loss, validated flip).
      *
-     * Soft recovery only: DROPTIMEOUTS → ACTIVE → CLEARDNSCACHE.
-     * A DisableNetwork bounce closes every Socks/DNS listener and DESTROYs all circuits
-     * (see connection_connect_sockaddr Bug warn + STREAM FAILED storm) — that caused
-     * app streams to sit at NEW without SENTCONNECT while Tor rebuilt isolation circuits.
-     * Hard bounce is reserved for [recoverNetworkHard] (captive / prolonged stall).
+     * C Tor soft: DROPTIMEOUTS → ACTIVE → CLEARDNSCACHE.
+     * Arti soft: re-probe SOCKS/DNS (no classic DROPTIMEOUTS).
      */
     fun onNetworkChanged(): Result<Unit> {
         if (activeEngine == TorEngine.ARTI) {
-            // Soft: re-probe listeners; Arti has no DROPTIMEOUTS/CLEARDNSCACHE.
             publishArtiReadyStatus()
             val ok = runtimePorts?.let { TorReadiness.areSocksPortsReady(it) } == true
             Timber.i("Arti network change soft recovery socksReady=%s", ok)
@@ -354,7 +422,6 @@ class TorProcessManager(
 
     /**
      * Hard recovery: C Tor DisableNetwork bounce; Arti full runtime restart.
-     * Tears down listeners/circuits — use only when soft recovery is insufficient.
      */
     suspend fun recoverNetworkHard(): Result<Unit> = withContext(Dispatchers.IO) {
         when (activeEngine) {
@@ -394,48 +461,84 @@ class TorProcessManager(
         }
     }
 
-    /** Convenience: refresh GETINFO into [controlStatus]. */
+    /** GETINFO refresh — Arti: synthetic SOCKS/DNS status. */
     fun refreshControlInfo() {
         if (activeEngine == TorEngine.ARTI) {
             publishArtiReadyStatus()
             return
         }
-        control.refreshInfo()
+        if (control.isConnected) control.refreshInfo()
     }
 
-    /** Circuit/stream dumps — rare UI ticks only. */
     fun refreshControlCircuits() {
-        if (activeEngine == TorEngine.ARTI) return
+        if (!isClassicControlConnected()) return
         control.refreshCircuits()
     }
 
-    /** Lightweight health poll (no circuit-status dump). */
     fun refreshControlHealthLite() {
         if (activeEngine == TorEngine.ARTI) {
             publishArtiReadyStatus()
             return
         }
-        control.refreshHealthLite()
+        if (control.isConnected) control.refreshHealthLite()
     }
 
-    /**
-     * Process-wide `traffic/read|written` only — for aggregate bandwidth across all circuits.
-     */
     fun refreshControlTraffic() {
-        if (activeEngine == TorEngine.ARTI) return
+        if (!isClassicControlConnected()) return
         control.refreshTraffic()
     }
 
-    /** Live SETCONF bridges from multiline preference text. */
+    /**
+     * Live SETCONF bridges. Arti: requires tunnel restart (document via failure).
+     */
     fun setBridgesLive(bridgeText: String): Result<Unit> {
         if (activeEngine == TorEngine.ARTI) {
-            return Result.failure(IOException("Arti bridges require tunnel restart"))
+            return Result.failure(
+                IOException("Arti bridges require tunnel restart (no live SETCONF)"),
+            )
         }
         if (!control.isConnected) return Result.failure(IOException("control not connected"))
         val lines = TorBridgeConfig.parseLines(bridgeText)
         return control.setBridges(lines).also {
             it.onSuccess { Timber.i("SETCONF bridges live count=%d", lines.size) }
         }
+    }
+
+    /** Live SETCONF Entry/Exit/ExcludeNodes — Arti: requires restart. */
+    fun setNodePrefsLive(entry: String, exit: String, exclude: String): Result<Unit> {
+        if (activeEngine == TorEngine.ARTI) {
+            return Result.failure(
+                IOException("Arti node prefs require tunnel restart (not in arti-mobile API)"),
+            )
+        }
+        if (!control.isConnected) return Result.failure(IOException("control not connected"))
+        return control.setNodePrefs(entry, exit, exclude)
+    }
+
+    /** SETCONF GeoIPFile — unsupported on Arti (no circuit country UI). */
+    fun setGeoIpFilesLive(geoIpPath: String, geoIp6Path: String): Result<Unit> {
+        requireClassic("SETCONF_geoip")?.let { return it }
+        return control.setGeoIpFiles(geoIpPath, geoIp6Path)
+    }
+
+    /** control-spec RESOLVE — unsupported on Arti; use SOCKS5A / DNSPort. */
+    suspend fun resolveHostname(hostname: String, timeoutMs: Long = 15_000): Result<String> {
+        requireClassic("RESOLVE")?.let { return Result.failure(it.exceptionOrNull()!!) }
+        return control.resolve(hostname, timeoutMs)
+    }
+
+    fun signalReload(): Result<Unit> {
+        if (activeEngine == TorEngine.ARTI) {
+            return Result.failure(IOException("Arti RELOAD requires tunnel restart"))
+        }
+        if (!control.isConnected) return Result.failure(IOException("control not connected"))
+        return control.reload()
+    }
+
+    fun signalHeartbeat(): Result<Unit> {
+        if (activeEngine == TorEngine.ARTI) return Result.success(Unit)
+        if (!control.isConnected) return Result.failure(IOException("control not connected"))
+        return control.heartbeat()
     }
 
     private fun publishArtiReadyStatus() {
@@ -812,6 +915,9 @@ class TorProcessManager(
 
     companion object {
         const val LOG_TAG = "tor"
+
+        /** Match C Tor [TorControlOperations.NEWNYM_MIN_INTERVAL_MS] (~10.5s). */
+        private const val ARTI_NEWNYM_MIN_INTERVAL_MS = 10_500L
 
         /**
          * SOCKS5h: unresolved host so Tor resolves the name (no local clearnet DNS).

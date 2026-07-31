@@ -199,6 +199,9 @@ class CircuitLifecycleManager(
     }
 
     fun closeCircuit(id: String, ifUnused: Boolean = true): Result<Unit> {
+        if (!control.isConnected) {
+            return Result.failure(IllegalStateException("ControlPort unavailable (Arti or disconnected)"))
+        }
         if (Looper.getMainLooper().isCurrentThread) {
             scope.launch {
                 runCatching {
@@ -216,6 +219,9 @@ class CircuitLifecycleManager(
     }
 
     fun extendNewCircuit(): Result<String> {
+        if (!control.isConnected) {
+            return Result.failure(IllegalStateException("ControlPort unavailable (Arti or disconnected)"))
+        }
         if (Looper.getMainLooper().isCurrentThread) {
             scope.launch {
                 runCatching {
@@ -293,7 +299,9 @@ class CircuitLifecycleManager(
                 circuits.remove(event.id)
                 pendingIdleClose.remove(event.id)
                 // Failed builds: ensure Tor frees resources (control-spec CLOSECIRCUIT).
-                runCatching { control.closeCircuit(event.id, ifUnused = false) }
+                if (control.isConnected) {
+                    runCatching { control.closeCircuit(event.id, ifUnused = false) }
+                }
             }
             else -> {
                 val prev = circuits[event.id]
@@ -401,8 +409,10 @@ class CircuitLifecycleManager(
         }
         // Only non-auth / ephemeral circuits get soft teardown.
         if (streamFailed) {
-            control.closeCircuit(circuitId, ifUnused = true)
-                .onSuccess { Timber.d("CLOSECIRCUIT IfUnused $circuitId (stream FAILED)") }
+            if (control.isConnected) {
+                control.closeCircuit(circuitId, ifUnused = true)
+                    .onSuccess { Timber.d("CLOSECIRCUIT IfUnused $circuitId (stream FAILED)") }
+            }
             circuits.remove(circuitId)
             pendingIdleClose.remove(circuitId)
         } else {
@@ -411,6 +421,10 @@ class CircuitLifecycleManager(
     }
 
     private fun flushIdleCloses() {
+        if (!control.isConnected) {
+            pendingIdleClose.clear()
+            return
+        }
         val now = System.currentTimeMillis()
         val due = pendingIdleClose.entries.filter { it.value <= now }.map { it.key }
         for (id in due) {
@@ -442,15 +456,17 @@ class CircuitLifecycleManager(
 
     private fun closeAuthDomain(socksUser: String) {
         Timber.i("App gone — closing circuits for socks auth $socksUser")
-        streams.values.filter { it.socksUsername == socksUser || it.info.socksUsername == socksUser }
-            .forEach { s ->
-                control.closeStream(s.info.id, TorControlCatalog.StreamEndReason.DONE)
-            }
-        circuits.values.filter { it.socksUsername == socksUser }
-            .forEach { c ->
-                pendingIdleClose.remove(c.info.id)
-                control.closeCircuit(c.info.id, ifUnused = true)
-            }
+        if (control.isConnected) {
+            streams.values.filter { it.socksUsername == socksUser || it.info.socksUsername == socksUser }
+                .forEach { s ->
+                    control.closeStream(s.info.id, TorControlCatalog.StreamEndReason.DONE)
+                }
+            circuits.values.filter { it.socksUsername == socksUser }
+                .forEach { c ->
+                    pendingIdleClose.remove(c.info.id)
+                    control.closeCircuit(c.info.id, ifUnused = true)
+                }
+        }
         streams.entries.removeIf { (_, v) ->
             v.socksUsername == socksUser || v.info.socksUsername == socksUser
         }
