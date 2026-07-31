@@ -16,7 +16,9 @@ import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.locks.LockSupport
 import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
 import ltechnologies.onionphone.onionvpn.core.vpn.dns.DnsHostnameCache
+import ltechnologies.onionphone.onionvpn.core.vpn.dns.DnsOnionAutomapReply
 import ltechnologies.onionphone.onionvpn.core.vpn.dns.DnsPacketParser
+import ltechnologies.onionphone.onionvpn.core.vpn.dns.OnionAutomapAllocator
 import ltechnologies.onionphone.onionvpn.core.vpn.firewall.ConnectionOwnerResolver
 import ltechnologies.onionphone.onionvpn.core.vpn.firewall.FirewallBridge
 import ltechnologies.onionphone.onionvpn.core.vpn.firewall.IpPacketParser
@@ -25,7 +27,8 @@ import timber.log.Timber
 /**
  * Splits VPN TUN traffic:
  * - When [divertDnsToDnsCrypt]: UDP/53 clearnet → DNSCrypt; `.onion`/`.exit` → Tor DNSPort
- *   (AutomapHostsOnResolve → virtual IPs in [TunnelEndpoints.VIRTUAL_ADDR_NETWORK]/10)
+ *   (AutomapHostsOnResolve → virtual IPs in [TunnelEndpoints.VIRTUAL_ADDR_NETWORK]/10),
+ *   or app-side Automap when [synthesizeOnionAutomap] (Arti has no native Automap).
  * - Non-DNS UDP / ICMP / multicast → blackhole (force apps onto TCP; Tor has no UDP)
  * - IPv4+IPv6 TCP → hev → Tor SOCKS
  * - IPv4 TCP → firewall check → hev engine (UID stamped into [TcpFlowUidIndex] for SocksUidBridge)
@@ -46,9 +49,14 @@ class TunDnsMux(
     private val dnsCryptPort: Int,
     private val vpnDnsAddress: String,
     private val divertDnsToDnsCrypt: Boolean = true,
-    /** Tor DNSPort for Automap; `<= 0` drops onion queries (fail-closed). */
+    /** Tor DNSPort for Automap; `<= 0` drops onion queries (fail-closed) unless synthesizing. */
     private val torDnsHost: String = TunnelEndpoints.LOOPBACK,
     private val torDnsPort: Int = 0,
+    /**
+     * When true (Arti), answer `.onion`/`.exit` locally with VirtualAddrNetwork IPs
+     * instead of querying Tor DNSPort (Arti DNS proxy has no AutomapHostsOnResolve).
+     */
+    private val synthesizeOnionAutomap: Boolean = false,
     private val onFatal: ((Throwable) -> Unit)? = null,
 ) {
     private val ownerResolver = ConnectionOwnerResolver(context)
@@ -141,6 +149,15 @@ class TunDnsMux(
                             val blackhole = LeakPacketFilter.blackholeBeforeTorTcp(buf, n)
                             if (blackhole != null) {
                                 LeakPacketFilter.noteBlackhole(blackhole)
+                                // Silent UDP drops stall Chromium QUIC→TCP fallback; ICMP
+                                // port-unreachable makes the stack fail over promptly.
+                                IcmpUnreachable.buildForBlackholedUdp(buf, n)?.let { icmp ->
+                                    synchronized(tunWriteLock) {
+                                        if (running.get()) {
+                                            localTunOut.write(icmp, 0, icmp.size)
+                                        }
+                                    }
+                                }
                             } else if (!FirewallBridge.engine.allowOutbound(buf, n)) {
                                 // Drop
                             } else {
@@ -202,7 +219,7 @@ class TunDnsMux(
         Timber.i(
             "TunDnsMux started dns=$vpnDnsAddress divertDns=$divertDnsToDnsCrypt " +
                 "clearnet→$dnsCryptHost:$dnsCryptPort " +
-                "onion→$torDnsHost:$torDnsPort " +
+                "onion→${if (synthesizeOnionAutomap) "synth-automap" else "$torDnsHost:$torDnsPort"} " +
                 "pool=$DNS_CORE_THREADS..$DNS_MAX_THREADS q=$DNS_QUEUE_CAP",
         )
     }
@@ -364,6 +381,32 @@ class TunDnsMux(
             val qname = parsedQuery?.qname
             val expectId = parsedQuery?.queryId ?: -1
             val useTorAutomap = TunnelEndpoints.isOnionLikeHostname(qname.orEmpty())
+            val scratch = checkNotNull(dnsScratch.get())
+
+            if (useTorAutomap && synthesizeOnionAutomap) {
+                val host = qname ?: return
+                val virtIp = OnionAutomapAllocator.ipv4ForHostname(host)
+                val dnsPayload = DnsOnionAutomapReply.buildAResponse(
+                    packet,
+                    dnsOffset,
+                    queryLen,
+                    virtIp,
+                ) ?: return
+                learnFromDnsPayload(dnsPayload, 0, dnsPayload.size)
+                val replyLen = buildDnsReplyInto(
+                    request = packet,
+                    requestLen = length,
+                    dnsPayload = dnsPayload,
+                    dnsLen = dnsPayload.size,
+                    out = scratch.replyBuf,
+                ) ?: return
+                synchronized(tunWriteLock) {
+                    if (!running.get()) return
+                    tunOut.write(scratch.replyBuf, 0, replyLen)
+                }
+                return
+            }
+
             if (useTorAutomap && torDnsPort <= 0) {
                 Timber.d("Onion DNS dropped — Tor DNSPort not configured q=$qname")
                 return
@@ -371,7 +414,6 @@ class TunDnsMux(
             val upstreamHost = if (useTorAutomap) torDnsAddress else dnsCryptAddress
             val upstreamPort = if (useTorAutomap) torDnsPort else dnsCryptPort
 
-            val scratch = checkNotNull(dnsScratch.get())
             val socket = scratch.socket()
             socket.soTimeout = DNS_TIMEOUT_MS
             socket.send(
@@ -405,6 +447,42 @@ class TunDnsMux(
                     break
                 }
                 Timber.d("TunDnsMux DNS id mismatch expect=$expectId got=$respId — skip stale")
+            }
+            if (!matched) {
+                // One retry on a fresh socket — shared ThreadLocal socket can be wedged
+                // after a prior Tor-slow timeout with stale datagrams.
+                Timber.d("DNS forward timeout/mismatch — retry once q=$qname")
+                scratch.resetSocket()
+                val retrySock = scratch.socket()
+                retrySock.soTimeout = DNS_TIMEOUT_MS
+                retrySock.send(
+                    DatagramPacket(
+                        packet,
+                        dnsOffset,
+                        queryLen,
+                        upstreamHost,
+                        upstreamPort,
+                    ),
+                )
+                val retryDeadline = System.nanoTime() + DNS_TIMEOUT_MS * 1_000_000L
+                while (System.nanoTime() < retryDeadline) {
+                    val remainingMs =
+                        ((retryDeadline - System.nanoTime()) / 1_000_000L).coerceAtLeast(1L)
+                    retrySock.soTimeout = remainingMs.toInt().coerceAtMost(DNS_TIMEOUT_MS)
+                    try {
+                        retrySock.receive(response)
+                    } catch (_: java.net.SocketTimeoutException) {
+                        break
+                    }
+                    if (expectId < 0 || response.length < 2) continue
+                    val respId =
+                        ((scratch.responseBuf[0].toInt() and 0xff) shl 8) or
+                            (scratch.responseBuf[1].toInt() and 0xff)
+                    if (respId == expectId) {
+                        matched = true
+                        break
+                    }
+                }
             }
             if (!matched) {
                 Timber.d("DNS forward timeout/mismatch — query dropped q=$qname")
@@ -501,18 +579,30 @@ class TunDnsMux(
         fun socket(): DatagramSocket {
             val existing = socket
             if (existing != null && !existing.isClosed) return existing
+            runCatching { existing?.close() }
+            socket = null
             // Bind loopback — never let the stub pick a clearnet interface.
             return DatagramSocket(0, InetAddress.getByName(TunnelEndpoints.LOOPBACK)).also {
                 it.soTimeout = DNS_TIMEOUT_MS
                 socket = it
             }
         }
+
+        fun resetSocket() {
+            runCatching { socket?.close() }
+            socket = null
+        }
     }
 
     companion object {
         private const val MTU = 1280
         private const val PROTO_UDP = 17
-        private const val DNS_TIMEOUT_MS = 8_000
+        /**
+         * Must exceed DNSCrypt's `timeout` (15s) — under Tor the stub often answers
+         * after 8–14s on a cold circuit; dropping earlier causes browser refresh timeouts
+         * while Arti bootstrap is already 100%.
+         */
+        private const val DNS_TIMEOUT_MS = 20_000
         private const val DNS_RESPONSE_CAP = 2048
         private const val EMPTY_READ_BASE_NS = 200_000L // 0.2ms base, exponential cap ~51ms
         private val DNS_CORE_THREADS =

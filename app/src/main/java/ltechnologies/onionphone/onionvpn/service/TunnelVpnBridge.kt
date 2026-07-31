@@ -3,11 +3,11 @@ package ltechnologies.onionphone.onionvpn.service
 import android.content.Context
 import android.content.Intent
 import kotlinx.coroutines.delay
-import ltechnologies.onionphone.onionvpn.core.model.DnsResolverMode
 import ltechnologies.onionphone.onionvpn.core.model.TunnelPreferences
 import ltechnologies.onionphone.onionvpn.core.model.TunnelRuntimePorts
 import ltechnologies.onionphone.onionvpn.core.model.VpnProfileMode
 import ltechnologies.onionphone.onionvpn.core.vpn.OnionVpnService
+import ltechnologies.onionphone.onionvpn.core.vpn.dns.OnionAutomapAllocator
 import timber.log.Timber
 
 /**
@@ -28,6 +28,10 @@ internal class TunnelVpnBridge(
                 putExtra(OnionVpnService.EXTRA_TOR_SOCKS_PORT, ports.torSocksPort)
                 putExtra(OnionVpnService.EXTRA_DNSCRYPT_PORT, ports.dnsCryptListenPort)
                 putExtra(OnionVpnService.EXTRA_TOR_DNS_PORT, ports.torDnsPort)
+                putExtra(
+                    OnionVpnService.EXTRA_SYNTHESIZE_ONION_AUTOMAP,
+                    preferences.torEngine.capabilities.synthesizeOnionAutomap,
+                )
                 putExtra(OnionVpnService.EXTRA_GENERATION, generation)
                 putExtra(OnionVpnService.EXTRA_DNS_MODE, preferences.dnsResolverMode.name)
             },
@@ -47,12 +51,14 @@ internal class TunnelVpnBridge(
     }
 
     fun destroy() {
+        OnionAutomapAllocator.clear()
         context.startService(
             Intent(context, OnionVpnService::class.java).setAction(OnionVpnService.ACTION_DESTROY),
         )
     }
 
     fun stop() {
+        OnionAutomapAllocator.clear()
         context.startService(
             Intent(context, OnionVpnService::class.java).setAction(OnionVpnService.ACTION_STOP),
         )

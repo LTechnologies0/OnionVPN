@@ -131,7 +131,7 @@ object DnsCryptConfigWriter {
 
             # Always TCP through Tor SOCKS — UDP ASSOCIATE is not a safe DNSCrypt-over-Tor path.
             force_tcp = true
-            timeout = 15000
+            timeout = 18000
             keepalive = 30
             cert_refresh_delay = 240
 
@@ -144,11 +144,11 @@ object DnsCryptConfigWriter {
             netprobe_address = '$bootstrap'
             netprobe_timeout = 500
 
-            # Short local cache; negative answers expire fast (captive / MITM churn).
+            # Local cache cuts repeat lookups over Tor (double-hop DNSCrypt path).
             cache = true
-            cache_size = 256
-            cache_min_ttl = 60
-            cache_max_ttl = 600
+            cache_size = 512
+            cache_min_ttl = 120
+            cache_max_ttl = 1800
             cache_neg_min_ttl = 10
             cache_neg_max_ttl = 60
 

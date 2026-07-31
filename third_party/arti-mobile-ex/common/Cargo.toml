@@ -1,0 +1,48 @@
+[package]
+name = "arti-mobile"
+version = "1.7.0"
+edition = "2018"
+
+
+[dependencies]
+arti = { version = "= 1.7.0", default-features = false, features = ["async-std", "dns-proxy", "static-sqlite", "rustls", "pt-client", "experimental-api", "geoip"]}
+arti-client = { version = "= 0.36.0", default-features = false, features = ["static-sqlite", "rustls", "pt-client", "experimental-api", "geoip"]}
+tor-config = { version = "= 0.36.0" }
+tor-rtcompat = { version = "= 0.36.0", default-features = false, features = ["rustls", "async-std"]}
+tor-linkspec = { version = "= 0.36.0"}
+
+async-std = "1.13.2"
+
+# helpers
+anyhow = "1.0.100"
+futures = "0.3.31"
+lazy_static = "1.5.0"
+
+
+# used to forward logs to system logger
+tracing-subscriber = "0.3.20"
+tracing = "0.1.41"
+
+
+# dependancies specific to iOS
+[target.'cfg(any(target_os = "ios", target_os = "macos"))'.dependencies]
+tracing-oslog = "0.3.0"
+
+# dependancies specific to Android
+[target.'cfg(target_os = "android")'.dependencies]
+# the java native interface
+jni = { version = "0.21", default-features = false }
+
+# dependancy to help implementing lockf, for android < 7.0
+libc = "0.2.112"
+
+
+[lib]
+# Must match Maven AAR System.loadLibrary("arti_mobile_ex") / libarti_mobile_ex.so
+name = "arti_mobile_ex"
+# cdylib is for Android, staticlib is for iOS/macOS
+crate-type = ["cdylib", "staticlib"]
+
+# OnionVPN: patched arti SOCKS applies StreamPrefs::exit_country from Ext JNI.
+[patch.crates-io]
+arti = { path = "../../arti-1.7.0-onionvpn" }

@@ -14,8 +14,8 @@ android {
         applicationId = "ltechnologies.onionphone.onionvpn"
         minSdk = libs.versions.minSdk.get().toInt()
         targetSdk = libs.versions.targetSdk.get().toInt()
-        versionCode = 40
-        versionName = "0.3.33"
+        versionCode = 41
+        versionName = "0.3.34"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
@@ -45,6 +45,8 @@ android {
     packaging {
         jniLibs {
             useLegacyPackaging = true
+            // Prefer OnionVPN-patched libarti_mobile_ex.so from app/jniLibs over Maven AAR.
+            pickFirsts += "**/libarti_mobile_ex.so"
         }
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"

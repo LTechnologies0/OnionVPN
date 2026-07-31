@@ -47,6 +47,10 @@ class TorConfigWriterTest {
             "Apps SocksPort must omit IsolateDestPort (circuit storm / Whonix #3455)",
             appLine.contains("IsolateDestPort"),
         )
+        assertFalse(
+            "Apps SocksPort must omit IsolateDestAddr (per-host circuit storm on mobile)",
+            appLine.contains("IsolateDestAddr"),
+        )
         val dnsCryptLine = torrc.lineSequence().first {
             it.startsWith("SOCKSPort ") &&
                 it.contains("SessionGroup=${TunnelEndpoints.SESSION_GROUP_DNSCRYPT}")

@@ -40,11 +40,17 @@ import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import ltechnologies.onionphone.onionvpn.OnionVpnApplication
 import ltechnologies.onionphone.onionvpn.firewall.InteractiveFirewallEngine
 import ltechnologies.onionphone.onionvpn.security.AppLockAuthenticator
 import ltechnologies.onionphone.onionvpn.security.AppLockManager
 import ltechnologies.onionphone.onionvpn.threat.repo.DomainReputationRepository
+import ltechnologies.onionphone.onionvpn.core.model.observability.DiagnosticsGate
 import ltechnologies.onionphone.onionvpn.core.tor.control.lifecycle.CircuitLifecycleManager
+import ltechnologies.onionphone.onionvpn.diagnostics.ResourceSnapshot
 import ltechnologies.onionphone.onionvpn.ui.FirewallScreen
 import ltechnologies.onionphone.onionvpn.ui.LogsScreen
 import ltechnologies.onionphone.onionvpn.ui.SettingsScreen
@@ -103,6 +109,16 @@ class MainActivity : FragmentActivity() {
                         }
                     }
 
+                    LaunchedEffect(preferences.noLogsEnabled) {
+                        DiagnosticsGate.setNoLogsEnabled(preferences.noLogsEnabled)
+                    }
+                    val profilerFlow = remember {
+                        OnionVpnApplication.profiler(application)
+                            ?.snapshot
+                            ?: MutableStateFlow(ResourceSnapshot()).asStateFlow()
+                    }
+                    val diagnosticsOn by DiagnosticsGate.diagnosticsEnabled.collectAsStateWithLifecycle()
+
                     AppLockGate(
                         appLockManager = appLockManager,
                         authenticator = appLockAuthenticator,
@@ -113,6 +129,8 @@ class MainActivity : FragmentActivity() {
                             firewallEngine = firewallEngine,
                             domainReputation = domainReputation,
                             circuitLifecycle = circuitLifecycle,
+                            resourceSnapshot = profilerFlow,
+                            diagnosticsEnabled = diagnosticsOn,
                             onStart = ::requestNotificationsThenStart,
                             onStop = viewModel::stopTunnel,
                             onNewNym = viewModel::newNym,
@@ -168,6 +186,8 @@ private fun OnionVpnApp(
     firewallEngine: InteractiveFirewallEngine,
     domainReputation: DomainReputationRepository,
     circuitLifecycle: CircuitLifecycleManager,
+    resourceSnapshot: StateFlow<ResourceSnapshot>,
+    diagnosticsEnabled: Boolean,
     onStart: () -> Unit,
     onStop: () -> Unit,
     onNewNym: () -> Unit,
@@ -227,6 +247,8 @@ private fun OnionVpnApp(
                     onStop = onStop,
                     onNewNym = onNewNym,
                     circuitLifecycle = circuitLifecycle,
+                    resourceSnapshot = resourceSnapshot,
+                    diagnosticsEnabled = diagnosticsEnabled,
                 )
                 1 -> FirewallScreen(engine = firewallEngine, preferences = preferences)
                 2 -> LogsScreen()

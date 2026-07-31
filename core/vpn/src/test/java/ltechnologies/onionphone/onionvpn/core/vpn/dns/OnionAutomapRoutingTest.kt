@@ -34,4 +34,28 @@ class OnionAutomapRoutingTest {
         assertTrue(TunnelEndpoints.isOnionLikeHostname(DnsHostnameCache.lookup("10.192.0.42")!!))
         DnsHostnameCache.clear()
     }
+
+    @Test
+    fun artiAutomapAllocator_stableVirtualIpInTorPool() {
+        OnionAutomapAllocator.clear()
+        DnsHostnameCache.clear()
+        val a = OnionAutomapAllocator.ipv4ForHostname("abc.onion")
+        val b = OnionAutomapAllocator.ipv4ForHostname("abc.onion")
+        assertTrue(a == b)
+        assertTrue(TunnelEndpoints.isAutomapVirtualIpv4(a))
+        assertTrue(DnsHostnameCache.lookup(a) == "abc.onion")
+        val dns = byteArrayOf(
+            0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x03, 'a'.code.toByte(), 'b'.code.toByte(), 'c'.code.toByte(),
+            0x05, 'o'.code.toByte(), 'n'.code.toByte(), 'i'.code.toByte(),
+            'o'.code.toByte(), 'n'.code.toByte(), 0x00,
+            0x00, 0x01, 0x00, 0x01,
+        )
+        val resp = DnsOnionAutomapReply.buildAResponse(dns, 0, dns.size, a)
+        assertTrue(resp != null && resp!!.size > dns.size)
+        val parsed = DnsPacketParser.parse(resp!!, 0, resp.size)
+        assertTrue(parsed != null && parsed!!.aRecords.contains(a))
+        OnionAutomapAllocator.clear()
+        DnsHostnameCache.clear()
+    }
 }

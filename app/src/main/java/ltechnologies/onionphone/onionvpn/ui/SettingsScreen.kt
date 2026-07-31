@@ -48,6 +48,7 @@ import ltechnologies.onionphone.onionvpn.bridges.MoatCircumventionClient
 import ltechnologies.onionphone.onionvpn.core.dnscrypt.config.DnsCryptPublicResolvers
 import ltechnologies.onionphone.onionvpn.core.model.DnsResolverMode
 import ltechnologies.onionphone.onionvpn.core.model.FirewallDefaultAction
+import ltechnologies.onionphone.onionvpn.core.model.TorEngine
 import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
 import ltechnologies.onionphone.onionvpn.core.model.TunnelPreferences
 import ltechnologies.onionphone.onionvpn.core.tor.config.TorBridgeConfig
@@ -156,6 +157,18 @@ fun SettingsScreen(
             Text(
                 text = "Off (recommended): FLAG_SECURE blocks screenshots, screen recording, " +
                     "and recents thumbnails of firewall/rules/logs.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            PrefSwitch(
+                label = "No logs (privacy)",
+                checked = local.noLogsEnabled,
+                onChecked = { commit(local.copy(noLogsEnabled = it)) },
+            )
+            Text(
+                text = "On (release default): disables Logs buffer, pipeline TRACE→ERROR, " +
+                    "Tor/Arti/DNSCrypt UI logs, and the resource profiler. " +
+                    "Debug builds default Off so diagnostics stay available.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -408,63 +421,108 @@ fun SettingsScreen(
 
         SectionHeader(
             title = "Tor",
-            subtitle = "Circuit rotation (path-spec / prop. 368). Per-UID KeepAliveIsolateSOCKSAuth " +
-                "circuits stay sticky; dirtiness mainly affects non-auth streams. " +
-                "Default Stable=600s. Live SETCONF when connected (no Tor restart).",
+            subtitle = when (local.torEngine) {
+                TorEngine.LITTLE_T ->
+                    "Circuit rotation (path-spec / prop. 368). Per-UID KeepAliveIsolateSOCKSAuth " +
+                        "circuits stay sticky; dirtiness mainly affects non-auth streams. " +
+                        "Default Stable=600s. Live SETCONF when connected (no Tor restart)."
+                TorEngine.ARTI ->
+                    "Arti (arti-client ${ltechnologies.onionphone.onionvpn.core.tor.control.TorControlCompat.ARTI_CLIENT_DOCS_VERSION}): " +
+                        "SOCKS+DNS, Automap synth, SOCKS-auth isolation, NEWNYM/bridges/RELOAD = restart. " +
+                        "DORMANT/ACTIVE + MaxCircuitDirtiness via Ext JNI when patched SO present. " +
+                        "No circuits UI / Entry·Exit / Conjure / NewCircuitPeriod (no Arti field)."
+            },
+        )
+        Text(
+            text = "Tor engine",
+            style = MaterialTheme.typography.titleMedium,
+        )
+        Text(
+            text = "Choose which Tor client the tunnel launches. C Tor (libtor) is the full " +
+                "feature set. Arti is production-usable for SOCKS/DNS routing with known gaps " +
+                "(no circuits UI, no Conjure, shared SocksPort). Changing engine restarts the tunnel.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         Row(
             modifier = Modifier.horizontalScroll(rememberScrollState()),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             FilterChip(
-                selected = local.torNewCircuitPeriodSec == 30 &&
-                    local.torMaxCircuitDirtinessSec == 600,
+                selected = local.torEngine == TorEngine.LITTLE_T,
                 onClick = {
-                    commit(
-                        local.copy(
-                            torNewCircuitPeriodSec = 30,
-                            torMaxCircuitDirtinessSec = 600,
-                        ),
-                    )
+                    commit(local.copy(torEngine = TorEngine.LITTLE_T), restart = true)
                 },
-                label = { Text("Stable") },
+                label = { Text("C Tor") },
             )
             FilterChip(
-                selected = local.torNewCircuitPeriodSec == 30 &&
-                    local.torMaxCircuitDirtinessSec == 180,
+                selected = local.torEngine == TorEngine.ARTI,
                 onClick = {
-                    commit(
-                        local.copy(
-                            torNewCircuitPeriodSec = 30,
-                            torMaxCircuitDirtinessSec = 180,
-                        ),
-                    )
+                    commit(local.copy(torEngine = TorEngine.ARTI), restart = true)
                 },
-                label = { Text("Balanced") },
+                label = { Text("Arti") },
             )
-            FilterChip(
-                selected = local.torNewCircuitPeriodSec == 15 &&
-                    local.torMaxCircuitDirtinessSec == 60,
-                onClick = {
-                    commit(
-                        local.copy(
-                            torNewCircuitPeriodSec = 15,
-                            torMaxCircuitDirtinessSec = 60,
-                        ),
-                    )
-                },
-                label = { Text("Paranoid") },
-            )
+        }
+        if (local.torEngine.capabilities.liveSetConf) {
+            Row(
+                modifier = Modifier.horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                FilterChip(
+                    selected = local.torNewCircuitPeriodSec == 30 &&
+                        local.torMaxCircuitDirtinessSec == 600,
+                    onClick = {
+                        commit(
+                            local.copy(
+                                torNewCircuitPeriodSec = 30,
+                                torMaxCircuitDirtinessSec = 600,
+                            ),
+                        )
+                    },
+                    label = { Text("Stable") },
+                )
+                FilterChip(
+                    selected = local.torNewCircuitPeriodSec == 30 &&
+                        local.torMaxCircuitDirtinessSec == 180,
+                    onClick = {
+                        commit(
+                            local.copy(
+                                torNewCircuitPeriodSec = 30,
+                                torMaxCircuitDirtinessSec = 180,
+                            ),
+                        )
+                    },
+                    label = { Text("Balanced") },
+                )
+                FilterChip(
+                    selected = local.torNewCircuitPeriodSec == 15 &&
+                        local.torMaxCircuitDirtinessSec == 60,
+                    onClick = {
+                        commit(
+                            local.copy(
+                                torNewCircuitPeriodSec = 15,
+                                torMaxCircuitDirtinessSec = 60,
+                            ),
+                        )
+                    },
+                    label = { Text("Paranoid") },
+                )
+            }
         }
         Text(
             text = "Tor bridges",
             style = MaterialTheme.typography.titleMedium,
         )
         Text(
-            text = "Presets paste built-in Tor Browser PT lines (Lyrebird / Conjure). " +
-                "Request from Tor Project uses Moat (obfs4 / Snowflake / WebTunnel). " +
-                "WebTunnel gets utls=none so Lyrebird uses stdlib TLS. " +
-                "Apply & restart tunnel after changing.",
+            text = if (local.torEngine.capabilities.conjureBridges) {
+                "Presets paste built-in Tor Browser PT lines (Lyrebird / Conjure). " +
+                    "Request from Tor Project uses Moat (obfs4 / Snowflake / WebTunnel). " +
+                    "WebTunnel gets utls=none so Lyrebird uses stdlib TLS. " +
+                    "Apply & restart tunnel after changing."
+            } else {
+                "Arti supports Lyrebird-backed bridges (obfs4 / Snowflake / meek / WebTunnel). " +
+                    "Conjure requires C Tor. Apply & restart tunnel after changing."
+            },
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -646,17 +704,40 @@ fun SettingsScreen(
             text = "Node countries (StrictNodes)",
             style = MaterialTheme.typography.titleMedium,
         )
-        Text(
-            text = "Pick countries / federations. Tor syntax: {cc},{cc}",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
+        val caps = local.torEngine.capabilities
+        when {
+            caps.nodePrefs -> {
+                Text(
+                    text = "Pick countries / federations. Tor syntax: {cc},{cc}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            caps.exitCountryPrefs -> {
+                Text(
+                    text = "Arti ExitNodes: pick a single country ({cc}). " +
+                        "EntryNodes / ExcludeNodes need C Tor.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            else -> {
+                Text(
+                    text = "Entry/Exit/ExcludeNodes are unavailable on this engine.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+        if (caps.nodePrefs || caps.exitCountryPrefs) {
+        if (caps.nodePrefs) {
         OutlinedButton(
             onClick = { pickingEntry = true },
             modifier = Modifier.fillMaxWidth(),
             shape = MaterialTheme.shapes.large,
         ) {
             Text("EntryNodes — ${TorCountryCatalog.summarize(local.torEntryNodes)}")
+        }
         }
         OutlinedButton(
             onClick = { pickingExit = true },
@@ -665,6 +746,7 @@ fun SettingsScreen(
         ) {
             Text("ExitNodes — ${TorCountryCatalog.summarize(local.torExitNodes)}")
         }
+        if (caps.nodePrefs) {
         OutlinedButton(
             onClick = { pickingExclude = true },
             modifier = Modifier.fillMaxWidth(),
@@ -672,7 +754,8 @@ fun SettingsScreen(
         ) {
             Text("ExcludeNodes — ${TorCountryCatalog.summarize(local.torExcludeNodes)}")
         }
-        if (pickingEntry) {
+        }
+        if (pickingEntry && caps.nodePrefs) {
             TorNodePickerDialog(
                 title = "EntryNodes",
                 initialRaw = local.torEntryNodes,
@@ -685,16 +768,28 @@ fun SettingsScreen(
         }
         if (pickingExit) {
             TorNodePickerDialog(
-                title = "ExitNodes",
+                title = if (caps.nodePrefs) "ExitNodes" else "ExitNodes (single country)",
                 initialRaw = local.torExitNodes,
                 onConfirm = {
-                    commit(local.copy(torExitNodes = it), restart = false)
+                    val next = if (!caps.nodePrefs) {
+                        val codes = TorCountryCatalog.parseNodeCodes(it)
+                        when {
+                            codes.isEmpty() -> ""
+                            codes.size == 1 -> TorCountryCatalog.encodeNodeCodes(codes)
+                            else -> TorCountryCatalog.encodeNodeCodes(setOf(codes.first())).also {
+                                // Keep first only for Arti StreamPrefs::exit_country
+                            }
+                        }
+                    } else {
+                        it
+                    }
+                    commit(local.copy(torExitNodes = next), restart = false)
                     pickingExit = false
                 },
                 onDismiss = { pickingExit = false },
             )
         }
-        if (pickingExclude) {
+        if (pickingExclude && caps.nodePrefs) {
             TorNodePickerDialog(
                 title = "ExcludeNodes",
                 initialRaw = local.torExcludeNodes,
@@ -705,43 +800,61 @@ fun SettingsScreen(
                 onDismiss = { pickingExclude = false },
             )
         }
-        OutlinedTextField(
-            value = local.torNewCircuitPeriodSec.toString(),
-            onValueChange = {
-                it.toIntOrNull()?.let { v ->
-                    local = local.copy(torNewCircuitPeriodSec = v.coerceIn(10, 86_400))
-                }
-            },
-            label = { Text("NewCircuitPeriod (sec)") },
-            modifier = Modifier.fillMaxWidth(),
-        )
-        Text(
-            text = "MaxCircuitDirtiness (sec) — unused-circuit expiry. " +
-                "App SocksPort uses KeepAliveIsolateSOCKSAuth with per-UID tokens (sticky).",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        OutlinedTextField(
-            value = local.torMaxCircuitDirtinessSec.toString(),
-            onValueChange = {
-                it.toIntOrNull()?.let { v ->
-                    local = local.copy(torMaxCircuitDirtinessSec = v.coerceIn(60, 86_400))
-                }
-            },
-            label = { Text("MaxCircuitDirtiness (sec)") },
-            modifier = Modifier.fillMaxWidth(),
-        )
-        FilledTonalButton(
-            onClick = {
-                scope.launch {
-                    torrcDraft = onLoadTorrc()
-                    editingTorrc = true
-                }
-            },
-            modifier = Modifier.fillMaxWidth(),
-            shape = MaterialTheme.shapes.large,
+        }
+        if (local.torEngine.capabilities.liveSetConf ||
+            local.torEngine.capabilities.torrcConfig ||
+            local.torEngine.capabilities.liveCircuitTiming
         ) {
-            Text("Edit torrc")
+            OutlinedTextField(
+                value = local.torNewCircuitPeriodSec.toString(),
+                onValueChange = {
+                    it.toIntOrNull()?.let { v ->
+                        local = local.copy(torNewCircuitPeriodSec = v.coerceIn(10, 86_400))
+                    }
+                },
+                label = {
+                    Text(
+                        if (local.torEngine.capabilities.liveCircuitTiming &&
+                            !local.torEngine.capabilities.torrcConfig
+                        ) {
+                            "NewCircuitPeriod (C Tor); Arti uses ≥3600s prediction_lifetime"
+                        } else {
+                            "NewCircuitPeriod (sec)"
+                        },
+                    )
+                },
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Text(
+                text = "MaxCircuitDirtiness (sec) — unused-circuit expiry. " +
+                    "App SocksPort uses KeepAliveIsolateSOCKSAuth with per-UID tokens (sticky).",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            OutlinedTextField(
+                value = local.torMaxCircuitDirtinessSec.toString(),
+                onValueChange = {
+                    it.toIntOrNull()?.let { v ->
+                        local = local.copy(torMaxCircuitDirtinessSec = v.coerceIn(60, 86_400))
+                    }
+                },
+                label = { Text("MaxCircuitDirtiness (sec)") },
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
+        if (local.torEngine.capabilities.torrcConfig) {
+            FilledTonalButton(
+                onClick = {
+                    scope.launch {
+                        torrcDraft = onLoadTorrc()
+                        editingTorrc = true
+                    }
+                },
+                modifier = Modifier.fillMaxWidth(),
+                shape = MaterialTheme.shapes.large,
+            ) {
+                Text("Edit torrc")
+            }
         }
 
         SectionHeader(

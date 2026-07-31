@@ -42,6 +42,44 @@ object TorPathValidator {
         socksPort: Int = TunnelEndpoints.TOR_SOCKS_PORT,
     ): ValidationCheck = checkRemoteDns(socksHost, socksPort)
 
+    /**
+     * Validates Arti runtime status file written by
+     * [ltechnologies.onionphone.onionvpn.core.tor.arti.ArtiRuntime].
+     */
+    fun validateArtiStatusContent(
+        config: String,
+        source: String,
+        socksPort: Int? = null,
+        dnsPort: Int? = null,
+    ): ValidationCheck {
+        val engineOk = config.contains("engine=arti")
+        val readyOk = config.contains("ready=1")
+        val socksOk = if (socksPort != null) {
+            config.contains("socks=$socksPort")
+        } else {
+            Regex("""socks=\d+""").containsMatchIn(config)
+        }
+        val dnsOk = if (dnsPort != null) {
+            config.contains("dns=$dnsPort")
+        } else {
+            Regex("""dns=\d+""").containsMatchIn(config)
+        }
+        val sharedOk = config.contains("shared_socks=1")
+        val automapOk = config.contains("synthesize_onion_automap=1")
+        val authIsoOk = config.contains("socks_auth_isolation=1") ||
+            !config.contains("socks_auth_isolation=") // older status files
+        val ok = engineOk && readyOk && socksOk && dnsOk && sharedOk && automapOk && authIsoOk
+        return ValidationCheck(
+            id = "tor.arti.status",
+            label = "Arti runtime status",
+            status = if (ok) ValidationStatus.Pass else ValidationStatus.Fail,
+            detail = "$source: engine=$engineOk ready=$readyOk socks=$socksOk dns=$dnsOk " +
+                "shared=$sharedOk synthAutomap=$automapOk authIso=$authIsoOk" +
+                (if (socksPort != null) " ports=$socksPort/$dnsPort" else ""),
+            tripsKillSwitch = !readyOk,
+        )
+    }
+
     fun validateTorrcContent(
         config: String,
         source: String,

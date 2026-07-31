@@ -244,7 +244,7 @@ class SocksUidBridge(
         b.tcpNoDelay = true
         val t = Thread({
             try {
-                a.getInputStream().copyTo(b.getOutputStream())
+                copyStream(a.getInputStream(), b.getOutputStream())
             } catch (_: Exception) {
             } finally {
                 runCatching { b.shutdownOutput() }
@@ -255,7 +255,7 @@ class SocksUidBridge(
         t.isDaemon = true
         t.start()
         try {
-            b.getInputStream().copyTo(a.getOutputStream())
+            copyStream(b.getInputStream(), a.getOutputStream())
         } catch (_: Exception) {
         } finally {
             runCatching { a.shutdownOutput() }
@@ -263,6 +263,18 @@ class SocksUidBridge(
             runCatching { a.close() }
         }
         t.join(5_000)
+    }
+
+    /** Larger than InputStream.copyTo's 8 KiB default — less syscall churn under Tor cell rates. */
+    private fun copyStream(input: java.io.InputStream, output: java.io.OutputStream) {
+        val buf = ByteArray(PIPE_BUF)
+        while (true) {
+            val n = input.read(buf)
+            if (n < 0) break
+            if (n == 0) continue
+            output.write(buf, 0, n)
+        }
+        output.flush()
     }
 
     private fun newClientExecutor(): ThreadPoolExecutor =
@@ -278,10 +290,11 @@ class SocksUidBridge(
         ).apply { allowCoreThreadTimeOut(true) }
 
     companion object {
-        private const val UID_RETRY = 10
-        private const val UID_PARK_NS = 5_000_000L // 5ms × 10 ≈ 50ms race window
-        private const val AUTOMAP_RETRY = 20
-        private const val AUTOMAP_PARK_NS = 5_000_000L // 5ms × 20 ≈ 100ms DNS→cache race
+        private const val UID_RETRY = 40
+        private const val UID_PARK_NS = 5_000_000L // 5ms × 40 ≈ 200ms race window under refresh bursts
+        private const val AUTOMAP_RETRY = 40
+        private const val AUTOMAP_PARK_NS = 5_000_000L // 5ms × 40 ≈ 200ms DNS→cache race
+        private const val PIPE_BUF = 64 * 1024
         private val ipv4Scratch = ThreadLocal.withInitial { ByteArray(4) }
         private val replyAddrScratch = ThreadLocal.withInitial { ByteArray(4) }
     }

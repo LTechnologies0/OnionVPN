@@ -5,10 +5,13 @@ import java.io.File
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import ltechnologies.onionphone.onionvpn.core.model.DnsResolverMode
+import ltechnologies.onionphone.onionvpn.core.model.TorEngine
 import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
 import ltechnologies.onionphone.onionvpn.core.model.TunnelRuntimePorts
 import ltechnologies.onionphone.onionvpn.core.model.ValidationCheck
 import ltechnologies.onionphone.onionvpn.core.model.ValidationStatus
+import ltechnologies.onionphone.onionvpn.core.model.observability.OpTrace
+import ltechnologies.onionphone.onionvpn.core.model.stability.ProcessLogLevel
 import ltechnologies.onionphone.onionvpn.core.validation.android.AndroidVpnInspector
 import ltechnologies.onionphone.onionvpn.core.validation.leak.SystemLeakInspector
 import ltechnologies.onionphone.onionvpn.core.validation.path.DnsCryptPathValidator
@@ -34,58 +37,73 @@ object TunnelValidator {
         runtimePorts: TunnelRuntimePorts? = null,
         dnsResolverMode: DnsResolverMode = DnsResolverMode.DNSCRYPT_MUX,
         includeExitIp: Boolean = true,
+        torEngine: TorEngine = TorEngine.LITTLE_T,
     ): List<ValidationCheck> = withContext(Dispatchers.Default) {
-        val hevConfigFile = File(context.applicationContext.filesDir, "hev-socks5-tunnel.yaml")
-        buildList {
-            addAll(validateRuntimeConfigs(torConfigFile, dnsCryptConfigFile, runtimePorts))
-            if (runtimePorts != null) {
+        OpTrace.stepSuspending("validate", "validateAll", ProcessLogLevel.DEBUG) {
+            val hevConfigFile = File(context.applicationContext.filesDir, "hev-socks5-tunnel.yaml")
+            buildList {
+                OpTrace.trace("validate", "runtime_configs")
                 addAll(
-                    TorPathValidator.validate(
-                        socksPort = runtimePorts.torProbeSocksPort,
-                        dnsPort = runtimePorts.torDnsPort,
+                    validateRuntimeConfigs(
+                        torConfigFile,
+                        dnsCryptConfigFile,
+                        runtimePorts,
+                        torEngine,
                     ),
                 )
-                if (includeExitIp) {
+                if (runtimePorts != null) {
+                    OpTrace.trace("validate", "tor_path")
                     addAll(
-                        ExitIpValidator.validate(
-                            context = context.applicationContext,
+                        TorPathValidator.validate(
                             socksPort = runtimePorts.torProbeSocksPort,
+                            dnsPort = runtimePorts.torDnsPort,
+                        ),
+                    )
+                    if (includeExitIp) {
+                        OpTrace.trace("validate", "exit_ip")
+                        addAll(
+                            ExitIpValidator.validate(
+                                context = context.applicationContext,
+                                socksPort = runtimePorts.torProbeSocksPort,
+                            ),
+                        )
+                    }
+                    OpTrace.trace("validate", "dnscrypt_path")
+                    addAll(DnsCryptPathValidator.validate(listenPort = runtimePorts.dnsCryptListenPort))
+                    add(validateUidForwarderWiring(runtimePorts))
+                    add(validateDnsCryptTorWiring(dnsCryptConfigFile, runtimePorts, torEngine))
+                    add(validateDnsModeLeakProperties(dnsResolverMode, hevConfigFile))
+                    add(validateUdpBlackholePolicy())
+                } else {
+                    addAll(TorPathValidator.validate())
+                    addAll(DnsCryptPathValidator.validate())
+                }
+                if (vpnEstablished) {
+                    OpTrace.trace("validate", "android_vpn")
+                    addAll(
+                        AndroidVpnInspector.inspect(
+                            context = context.applicationContext,
+                            killSwitchExpected = killSwitchEnabled,
+                        ),
+                    )
+                } else {
+                    add(
+                        ValidationCheck(
+                            id = "vpn.not.established",
+                            label = "VPN interface established",
+                            status = ValidationStatus.Fail,
+                            detail = "Skipped Android routing probes",
                         ),
                     )
                 }
-                addAll(DnsCryptPathValidator.validate(listenPort = runtimePorts.dnsCryptListenPort))
-                add(validateUidForwarderWiring(runtimePorts))
-                add(validateDnsCryptTorWiring(dnsCryptConfigFile, runtimePorts))
-                add(validateDnsModeLeakProperties(dnsResolverMode, hevConfigFile))
-                add(validateUdpBlackholePolicy())
-            } else {
-                addAll(TorPathValidator.validate())
-                addAll(DnsCryptPathValidator.validate())
-            }
-            if (vpnEstablished) {
                 addAll(
-                    AndroidVpnInspector.inspect(
+                    SystemLeakInspector.inspect(
                         context = context.applicationContext,
                         killSwitchExpected = killSwitchEnabled,
                     ),
                 )
-            } else {
-                add(
-                    ValidationCheck(
-                        id = "vpn.not.established",
-                        label = "VPN interface established",
-                        status = ValidationStatus.Fail,
-                        detail = "Skipped Android routing probes",
-                    ),
-                )
+                add(blockedDnsRoutesConfigured())
             }
-            addAll(
-                SystemLeakInspector.inspect(
-                    context = context.applicationContext,
-                    killSwitchExpected = killSwitchEnabled,
-                ),
-            )
-            add(blockedDnsRoutesConfigured())
         }
     }
 
@@ -98,6 +116,7 @@ object TunnelValidator {
         killSwitchEnabled: Boolean = true,
         runtimePorts: TunnelRuntimePorts? = null,
         dnsResolverMode: DnsResolverMode = DnsResolverMode.DNSCRYPT_MUX,
+        torEngine: TorEngine = TorEngine.LITTLE_T,
     ): List<ValidationCheck> = validateAll(
         context = context,
         torConfigFile = torConfigFile,
@@ -107,6 +126,7 @@ object TunnelValidator {
         runtimePorts = runtimePorts,
         dnsResolverMode = dnsResolverMode,
         includeExitIp = false,
+        torEngine = torEngine,
     )
 
     /**
@@ -268,6 +288,7 @@ object TunnelValidator {
     private fun validateDnsCryptTorWiring(
         dnsCryptConfigFile: File?,
         ports: TunnelRuntimePorts,
+        torEngine: TorEngine = TorEngine.LITTLE_T,
     ): ValidationCheck {
         val config = dnsCryptConfigFile?.takeIf { it.exists() }?.readText()
             ?: return ValidationCheck(
@@ -290,14 +311,19 @@ object TunnelValidator {
         val ignoreSystem = config.contains("ignore_system_dns = true")
         val forceTcp = config.contains("force_tcp = true")
         val ok = proxyOk && bootstrapOk && netprobeOk && listenOk && ignoreSystem && forceTcp
+        val socksLabel = if (torEngine.capabilities.multiSocksSessionGroups) {
+            "dedicated Tor SocksPort"
+        } else {
+            "Tor SOCKS (shared on Arti)"
+        }
 
         return ValidationCheck(
             id = "dnscrypt.tor.wiring",
-            label = "DNSCrypt uses dedicated Tor SocksPort",
+            label = "DNSCrypt uses $socksLabel",
             status = if (ok) ValidationStatus.Pass else ValidationStatus.Fail,
             detail = "listen=$listenOk proxy=$proxyOk bootstrap=$bootstrapOk " +
                 "netprobe=$netprobeOk ignore_system_dns=$ignoreSystem force_tcp=$forceTcp " +
-                "socks=${ports.torDnsCryptSocksPort}",
+                "socks=${ports.torDnsCryptSocksPort} engine=$torEngine",
             tripsKillSwitch = true,
         )
     }
@@ -306,6 +332,7 @@ object TunnelValidator {
         torConfigFile: File?,
         dnsCryptConfigFile: File?,
         runtimePorts: TunnelRuntimePorts?,
+        torEngine: TorEngine = TorEngine.LITTLE_T,
     ): List<ValidationCheck> {
         val dnsCryptConfig = dnsCryptConfigFile?.takeIf { it.exists() }?.readText()
         val torConfig = torConfigFile?.takeIf { it.exists() }?.readText()
@@ -327,20 +354,39 @@ object TunnelValidator {
                     detail = "Config file not found",
                 )
             },
-            if (torConfig != null) {
-                TorPathValidator.validateTorrcContent(
-                    torConfig,
-                    source = torConfigFile.name,
-                    socksPort = runtimePorts?.torSocksPort,
-                    dnsPort = runtimePorts?.torDnsPort,
-                )
-            } else {
-                ValidationCheck(
-                    id = "tor.config.missing",
-                    label = "Tor runtime config",
-                    status = ValidationStatus.Fail,
-                    detail = "torrc not found",
-                )
+            when {
+                torEngine == TorEngine.ARTI && torConfig != null -> {
+                    TorPathValidator.validateArtiStatusContent(
+                        torConfig,
+                        source = torConfigFile.name,
+                        socksPort = runtimePorts?.torSocksPort,
+                        dnsPort = runtimePorts?.torDnsPort,
+                    )
+                }
+                torEngine == TorEngine.ARTI -> {
+                    ValidationCheck(
+                        id = "tor.config.missing",
+                        label = "Arti runtime status",
+                        status = ValidationStatus.Fail,
+                        detail = "arti.status not found",
+                    )
+                }
+                torConfig != null -> {
+                    TorPathValidator.validateTorrcContent(
+                        torConfig,
+                        source = torConfigFile.name,
+                        socksPort = runtimePorts?.torSocksPort,
+                        dnsPort = runtimePorts?.torDnsPort,
+                    )
+                }
+                else -> {
+                    ValidationCheck(
+                        id = "tor.config.missing",
+                        label = "Tor runtime config",
+                        status = ValidationStatus.Fail,
+                        detail = "torrc not found",
+                    )
+                }
             },
         )
     }

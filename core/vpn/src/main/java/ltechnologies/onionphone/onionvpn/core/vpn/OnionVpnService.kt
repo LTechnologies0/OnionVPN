@@ -15,6 +15,8 @@ import ltechnologies.onionphone.onionvpn.core.model.TunnelFailure
 import ltechnologies.onionphone.onionvpn.core.model.TunnelPreferences
 import ltechnologies.onionphone.onionvpn.core.model.VpnEstablishResult
 import ltechnologies.onionphone.onionvpn.core.model.VpnProfileMode
+import ltechnologies.onionphone.onionvpn.core.model.observability.OpTrace
+import ltechnologies.onionphone.onionvpn.core.model.stability.ProcessLogLevel
 import ltechnologies.onionphone.onionvpn.core.vpn.forwarder.HevSocks5TunForwarder
 import ltechnologies.onionphone.onionvpn.core.vpn.net.UnderlyingNetworkTracker
 import ltechnologies.onionphone.onionvpn.core.vpn.profile.TunForwarder
@@ -100,6 +102,7 @@ class OnionVpnService : VpnService() {
         val torSocksPort = intent.getIntExtra(EXTRA_TOR_SOCKS_PORT, TunnelEndpoints.DEFAULT_TOR_SOCKS_PORT)
         val dnsCryptPort = intent.getIntExtra(EXTRA_DNSCRYPT_PORT, TunnelEndpoints.DEFAULT_DNSCRYPT_LISTEN_PORT)
         val torDnsPort = intent.getIntExtra(EXTRA_TOR_DNS_PORT, TunnelEndpoints.DEFAULT_TOR_DNS_PORT)
+        val synthesizeOnionAutomap = intent.getBooleanExtra(EXTRA_SYNTHESIZE_ONION_AUTOMAP, false)
         val generation = intent.getIntExtra(EXTRA_GENERATION, -1)
         val dnsMode = intent.getStringExtra(EXTRA_DNS_MODE)
             ?.let { runCatching { DnsResolverMode.valueOf(it) }.getOrNull() }
@@ -126,7 +129,13 @@ class OnionVpnService : VpnService() {
                     previousTun.close()
                 }
                 if (startForwarder && mode == VpnProfileMode.Connected) {
-                    startForwarder(torSocksPort, dnsCryptPort, torDnsPort, dnsMode)
+                    startForwarder(
+                        torSocksPort,
+                        dnsCryptPort,
+                        torDnsPort,
+                        dnsMode,
+                        synthesizeOnionAutomap,
+                    )
                     startUnderlyingTracking()
                 } else {
                     stopUnderlyingTracking()
@@ -145,8 +154,14 @@ class OnionVpnService : VpnService() {
                         "socks=$torSocksPort dnscrypt=$dnsCryptPort torDns=$torDnsPort gen=$generation " +
                         "alwaysOn=${alwaysOnActive.value} lockdown=${lockdownActive.value}",
                 )
+                OpTrace.info(
+                    "vpn",
+                    "established mode=$mode socks=$torSocksPort dnscrypt=$dnsCryptPort " +
+                        "torDns=$torDnsPort gen=$generation",
+                )
             }
             is VpnEstablishResult.Failure -> {
+                OpTrace.error("vpn", "establish failed: ${result.reason}")
                 Timber.e("VPN establish failed: ${result.reason}")
                 // Keep previous TUN if still open so we do not open a clearnet window.
                 if (previousTun != null && tunInterface == null) {
@@ -156,7 +171,13 @@ class OnionVpnService : VpnService() {
                     // Forwarder was stopped before establish — restart so apps are not stuck
                     // on a live TUN with no Tor drain path.
                     if (startForwarder && mode == VpnProfileMode.Connected) {
-                        startForwarder(torSocksPort, dnsCryptPort, torDnsPort, dnsMode)
+                        startForwarder(
+                            torSocksPort,
+                            dnsCryptPort,
+                            torDnsPort,
+                            dnsMode,
+                            synthesizeOnionAutomap,
+                        )
                         startUnderlyingTracking()
                         Timber.w("Restarted TUN forwarder on restored TUN after failed rebind")
                     }
@@ -202,33 +223,38 @@ class OnionVpnService : VpnService() {
         preferences: TunnelPreferences,
         mode: VpnProfileMode,
     ): VpnEstablishResult {
-        return try {
-            val builder = VpnProfileBuilder.configure(this, preferences, mode)
-            val tun = builder.establish()
-                ?: return VpnEstablishResult.Failure(
+        return OpTrace.step("vpn", "establish mode=$mode", ProcessLogLevel.INFO) {
+            try {
+                val builder = VpnProfileBuilder.configure(this, preferences, mode)
+                val tun = builder.establish()
+                    ?: return@step VpnEstablishResult.Failure(
+                        TunnelFailure.VpnEstablish(
+                            "VpnService.Builder.establish() returned null " +
+                                "(permission revoked or always-on conflict)",
+                        ).userMessage,
+                    )
+                tunInterface = tun
+                VpnEstablishResult.Success(mode)
+            } catch (error: SecurityException) {
+                OpTrace.error("vpn", "establish SecurityException", error)
+                Timber.e(error, "VPN establish SecurityException")
+                VpnEstablishResult.Failure(
+                    TunnelFailure.VpnEstablish("VPN security permission denied", error).userMessage,
+                )
+            } catch (error: IllegalStateException) {
+                OpTrace.error("vpn", "establish IllegalStateException", error)
+                Timber.e(error, "VPN establish IllegalStateException")
+                VpnEstablishResult.Failure(
                     TunnelFailure.VpnEstablish(
-                        "VpnService.Builder.establish() returned null " +
-                            "(permission revoked or always-on conflict)",
+                        "VPN establish illegal state (self-exclusion / builder): ${error.message}",
+                        error,
                     ).userMessage,
                 )
-            tunInterface = tun
-            VpnEstablishResult.Success(mode)
-        } catch (error: SecurityException) {
-            Timber.e(error, "VPN establish SecurityException")
-            VpnEstablishResult.Failure(
-                TunnelFailure.VpnEstablish("VPN security permission denied", error).userMessage,
-            )
-        } catch (error: IllegalStateException) {
-            Timber.e(error, "VPN establish IllegalStateException")
-            VpnEstablishResult.Failure(
-                TunnelFailure.VpnEstablish(
-                    "VPN establish illegal state (self-exclusion / builder): ${error.message}",
-                    error,
-                ).userMessage,
-            )
-        } catch (error: Exception) {
-            Timber.e(error, "VPN establish threw")
-            VpnEstablishResult.Failure(TunnelFailure.fromThrowable(error, "vpn.establish").userMessage)
+            } catch (error: Exception) {
+                OpTrace.error("vpn", "establish threw", error)
+                Timber.e(error, "VPN establish threw")
+                VpnEstablishResult.Failure(TunnelFailure.fromThrowable(error, "vpn.establish").userMessage)
+            }
         }
     }
 
@@ -237,7 +263,12 @@ class OnionVpnService : VpnService() {
         dnsCryptPort: Int,
         torDnsPort: Int,
         dnsMode: DnsResolverMode,
+        synthesizeOnionAutomap: Boolean = false,
     ) {
+        OpTrace.debug(
+            "vpn",
+            "startForwarder socks=$torSocksPort dnscrypt=$dnsCryptPort torDns=$torDnsPort",
+        )
         val tun = tunInterface ?: return
         // hev → SocksUidBridge → Tor with per-UID IsolateSOCKSAuth (native TCP + circuit UX).
         val forwarder = HevSocks5TunForwarder(
@@ -259,6 +290,7 @@ class OnionVpnService : VpnService() {
             socksPort = torSocksPort,
             dnsCryptPort = dnsCryptPort,
             torDnsPort = torDnsPort,
+            synthesizeOnionAutomap = synthesizeOnionAutomap,
         )
     }
 
@@ -336,6 +368,8 @@ class OnionVpnService : VpnService() {
         const val EXTRA_TOR_SOCKS_PORT = "tor_socks_port"
         const val EXTRA_DNSCRYPT_PORT = "dnscrypt_port"
         const val EXTRA_TOR_DNS_PORT = "tor_dns_port"
+        /** App-side `.onion` Automap when using Arti (no native AutomapHostsOnResolve). */
+        const val EXTRA_SYNTHESIZE_ONION_AUTOMAP = "synthesize_onion_automap"
         const val EXTRA_GENERATION = "vpn_generation"
         const val EXTRA_DNS_MODE = "dns_mode"
 

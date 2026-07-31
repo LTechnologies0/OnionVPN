@@ -50,11 +50,12 @@ object TorConfigWriter {
 
     /**
      * Apps SocksPort: UID tokens ([KeepAliveIsolateSOCKSAuth]) are the primary
-     * isolation axis. Keep IsolateDestAddr for same-UID host separation without
-     * per-port circuit fan-out.
+     * isolation axis (Tor Browser model). Do **not** add IsolateDestAddr here —
+     * same-UID multi-host pages (CDNs, Obtainium→api.github.com, …) would open
+     * one circuit per destination and feel bandwidth-capped on mobile.
      */
     const val SOCKS_ISOLATION_APPS =
-        "IsolateClientAddr IsolateClientProtocol IsolateDestAddr IsolateSOCKSAuth"
+        "IsolateClientAddr IsolateClientProtocol IsolateSOCKSAuth"
 
     /**
      * @param dataDirectory absolute Tor DataDirectory path

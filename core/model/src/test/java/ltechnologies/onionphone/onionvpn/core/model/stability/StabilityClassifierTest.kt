@@ -69,6 +69,37 @@ class StabilityClassifierTest {
     }
 
     @Test
+    fun torLog_artiTracingLevels() {
+        val warn = StabilityClassifier.forTorLogLine(
+            "2026-07-31T15:33:29Z  WARN arti::reload_cfg: Couldn't reload configuration",
+        )
+        assertEquals(StabilitySeverity.WARN, warn.severity)
+
+        val err = StabilityClassifier.forTorLogLine(
+            "AMEx: _configure_and_run_arti_proxy called from wrong state: Stopping",
+        )
+        assertEquals(StabilitySeverity.ERROR, err.severity)
+
+        val info = StabilityClassifier.forTorLogLine(
+            "2026-07-31T15:33:30Z  INFO arti_mobile_ex: Sufficiently bootstrapped; proxy now functional.",
+        )
+        assertEquals(StabilitySeverity.INFO, info.severity)
+
+        val debug = StabilityClassifier.forTorLogLine(
+            "2026-07-31T15:33:30Z  DEBUG tor_circmgr: launching circuit",
+        )
+        assertEquals(StabilitySeverity.DEBUG, debug.severity)
+
+        val trace = StabilityClassifier.forTorLogLine(
+            "2026-07-31T15:33:30Z  TRACE tor_chanmgr: idle",
+        )
+        assertEquals(StabilitySeverity.TRACE, trace.severity)
+
+        val cTor = StabilityClassifier.forTorLogLine("[notice] Bootstrapped 100% (done)")
+        assertEquals(StabilitySeverity.INFO, cTor.severity)
+    }
+
+    @Test
     fun mergeAction_prefersStopTor() {
         assertEquals(
             StabilityAction.STOP_TOR,

@@ -96,21 +96,21 @@ class UnderlyingNetworkTracker(
                 best?.hashCode()?.toLong()
             }
         try {
-            if (netId != lastPublishedNetId) {
-                vpnService.setUnderlyingNetworks(best?.let { arrayOf(it) })
-            }
-            if (best != null) {
-                val caps = cm.getNetworkCapabilities(best)
-                Timber.d(
-                    "setUnderlyingNetworks net=$best wifi=%s cell=%s validated=%s",
-                    caps?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI),
-                    caps?.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR),
-                    caps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED),
-                )
-            } else {
-                Timber.w("No underlying non-VPN network — setUnderlyingNetworks(null)")
-            }
             val changed = netId != lastPublishedNetId
+            if (changed) {
+                vpnService.setUnderlyingNetworks(best?.let { arrayOf(it) })
+                if (best != null) {
+                    val caps = cm.getNetworkCapabilities(best)
+                    Timber.i(
+                        "setUnderlyingNetworks net=$best wifi=%s cell=%s validated=%s",
+                        caps?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI),
+                        caps?.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR),
+                        caps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED),
+                    )
+                } else {
+                    Timber.w("No underlying non-VPN network — setUnderlyingNetworks(null)")
+                }
+            }
             lastPublishedNetId = netId
             if (notifyTor && changed) {
                 onUnderlyingChanged?.invoke()

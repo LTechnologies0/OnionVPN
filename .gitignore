@@ -18,3 +18,14 @@ keystore.properties
 dist/
 app/src/main/assets/bin/**
 !app/src/main/assets/bin/.gitkeep
+
+# arti-mobile-ex build artifacts (patched sources are tracked)
+third_party/arti-mobile-ex/common/target/
+third_party/arti-mobile-ex/common/cache/
+third_party/arti-mobile-ex/android/**/build/
+third_party/arti-mobile-ex/android/**/jniLibs/
+third_party/arti-mobile-ex/android/
+third_party/arti-mobile-ex/ios/
+third_party/arti-mobile-ex/docs/
+third_party/arti-mobile-ex/Vagrantfile
+third_party/arti-mobile-ex/README.md

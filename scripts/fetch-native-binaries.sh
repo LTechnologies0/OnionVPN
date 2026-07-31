@@ -2,9 +2,11 @@
 # Fetches Tor, DNSCrypt, hev-socks5-tunnel, and Tor pluggable transports into jniLibs.
 # Supported ABIs (matching release splits): arm64-v8a, x86_64
 #
-# Tor + PTs: LTechnologies0/Tor-Android-build-script GitHub Releases
+# Tor (C / little-t, default engine) + PTs:
+#   LTechnologies0/Tor-Android-build-script GitHub Releases
 #   https://github.com/LTechnologies0/Tor-Android-build-script
 #   PTs built with -Wl,-z,max-page-size=16384 (Android 16 KB pages)
+# Arti (Rust, optional engine): org.torproject:arti-mobile Maven AAR (Gradle), not this script
 # DNSCrypt + hev: InviZible Lite / sockstun APKs
 # Bridge presets JSON: Tor Browser Android pt_config.json (builtin lines only)
 set -euo pipefail

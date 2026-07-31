@@ -11,22 +11,34 @@ object DnsCryptStabilityCodes {
 
     enum class LogLevel(
         val tag: String,
-        val severity: StabilitySeverity,
+        val processLevel: ProcessLogLevel,
     ) {
-        DEBUG("DEBUG", StabilitySeverity.IGNORE),
-        INFO("INFO", StabilitySeverity.INFO),
-        NOTICE("NOTICE", StabilitySeverity.INFO),
-        WARNING("WARNING", StabilitySeverity.WARN),
-        WARN("WARN", StabilitySeverity.WARN),
-        ERROR("ERROR", StabilitySeverity.ERROR),
-        CRITICAL("CRITICAL", StabilitySeverity.CRITICAL),
-        FATAL("FATAL", StabilitySeverity.CRITICAL),
+        TRACE("TRACE", ProcessLogLevel.TRACE),
+        DEBUG("DEBUG", ProcessLogLevel.DEBUG),
+        INFO("INFO", ProcessLogLevel.INFO),
+        NOTICE("NOTICE", ProcessLogLevel.INFO),
+        WARNING("WARNING", ProcessLogLevel.WARN),
+        WARN("WARN", ProcessLogLevel.WARN),
+        ERROR("ERROR", ProcessLogLevel.ERROR),
+        CRITICAL("CRITICAL", ProcessLogLevel.CRITICAL),
+        FATAL("FATAL", ProcessLogLevel.CRITICAL),
         ;
+
+        val severity: StabilitySeverity get() = processLevel.severity
 
         companion object {
             fun fromLine(line: String): LogLevel? {
-                val upper = line.uppercase()
-                return entries.firstOrNull { upper.contains("[${it.tag}]") }
+                // Prefer ProcessLogLevel (handles [DEBUG] and word tokens), then map back.
+                val parsed = ProcessLogLevel.parse(line) ?: return null
+                return entries.firstOrNull { it.processLevel == parsed }
+                    ?: when (parsed) {
+                        ProcessLogLevel.TRACE -> TRACE
+                        ProcessLogLevel.DEBUG -> DEBUG
+                        ProcessLogLevel.INFO -> INFO
+                        ProcessLogLevel.WARN -> WARN
+                        ProcessLogLevel.ERROR -> ERROR
+                        ProcessLogLevel.CRITICAL -> CRITICAL
+                    }
             }
         }
     }
@@ -70,7 +82,7 @@ object DnsCryptStabilityCodes {
             }
             return StabilitySignal(
                 level?.tag ?: "DNSCRYPT",
-                level?.severity ?: StabilitySeverity.IGNORE,
+                level?.severity ?: StabilitySeverity.DEBUG,
             )
         }
         if (level.severity == StabilitySeverity.WARN) {

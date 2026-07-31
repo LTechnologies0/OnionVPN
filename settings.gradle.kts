@@ -11,6 +11,10 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
+        // Guardian Project Maven — org.torproject:arti-mobile (Arti for Android)
+        maven {
+            url = uri("https://raw.githubusercontent.com/guardianproject/gpmaven/master")
+        }
     }
 }
 

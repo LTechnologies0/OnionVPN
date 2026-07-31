@@ -27,6 +27,7 @@ class TunnelOrchestrator @Inject constructor(
                 putExtra(TunnelForegroundService.EXTRA_KILL_SWITCH, true)
                 putExtra(TunnelForegroundService.EXTRA_DNSCRYPT_SERVER, preferences.dnsCryptServerName)
                 putExtra(TunnelForegroundService.EXTRA_DNS_MODE, preferences.dnsResolverMode.name)
+                putExtra(TunnelForegroundService.EXTRA_TOR_ENGINE, preferences.torEngine.name)
                 putExtra(TunnelForegroundService.EXTRA_TOR_BRIDGES, preferences.torBridges)
                 putExtra(TunnelForegroundService.EXTRA_TOR_ENTRY, preferences.torEntryNodes)
                 putExtra(TunnelForegroundService.EXTRA_TOR_EXIT, preferences.torExitNodes)
@@ -37,6 +38,7 @@ class TunnelOrchestrator @Inject constructor(
                 putExtra(TunnelForegroundService.EXTRA_DNS_NOFILTER, preferences.dnsCryptRequireNoFilter)
                 putExtra(TunnelForegroundService.EXTRA_DNS_FORCE_TCP, preferences.dnsCryptForceTcp)
                 putExtra(TunnelForegroundService.EXTRA_DNS_DNSSEC, preferences.dnsCryptRequireDnssec)
+                putExtra(TunnelForegroundService.EXTRA_NO_LOGS, preferences.noLogsEnabled)
             },
         )
     }

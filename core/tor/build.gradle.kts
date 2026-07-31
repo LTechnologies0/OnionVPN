@@ -23,6 +23,8 @@ dependencies {
     implementation(libs.timber)
     implementation(libs.androidx.core.ktx)
     implementation(libs.okhttp)
+    // Tor Project / Guardian Project Arti mobile (Rust Tor) — dual-engine with libtor.so
+    implementation(libs.arti.mobile)
 
     testImplementation(libs.junit)
 }

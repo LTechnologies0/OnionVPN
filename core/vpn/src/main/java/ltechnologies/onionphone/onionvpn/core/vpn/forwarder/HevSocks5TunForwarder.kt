@@ -18,6 +18,8 @@ import kotlinx.coroutines.launch
 import ltechnologies.onionphone.onionvpn.core.model.DnsResolverMode
 import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
 import ltechnologies.onionphone.onionvpn.core.model.TunnelFailure
+import ltechnologies.onionphone.onionvpn.core.model.observability.OpTrace
+import ltechnologies.onionphone.onionvpn.core.model.stability.ProcessLogLevel
 import ltechnologies.onionphone.onionvpn.core.vpn.profile.TunForwarder
 import timber.log.Timber
 
@@ -46,21 +48,24 @@ class HevSocks5TunForwarder(
         socksPort: Int,
         dnsCryptPort: Int,
         torDnsPort: Int,
+        synthesizeOnionAutomap: Boolean,
     ) {
-        stop()
-        // Always divert UDP/53 via TunDnsMux. hev mapdns FakeDNS conflicts with Tor Automap
-        // + DNSCrypt and is retired from the data plane (preference key kept for migration).
-        if (dnsMode != DnsResolverMode.DNSCRYPT_MUX) {
-            Timber.i("dnsMode=$dnsMode coerced to DNSCRYPT_MUX divert (FakeDNS disabled)")
+        OpTrace.step("hev", "start socks=$socksPort dnsCrypt=$dnsCryptPort", ProcessLogLevel.INFO) {
+            stop()
+            if (dnsMode != DnsResolverMode.DNSCRYPT_MUX) {
+                OpTrace.info("hev", "dnsMode=$dnsMode coerced to DNSCRYPT_MUX divert")
+                Timber.i("dnsMode=$dnsMode coerced to DNSCRYPT_MUX divert (FakeDNS disabled)")
+            }
+            startWithMux(
+                tunFd = tunFd,
+                torSocksPort = socksPort,
+                dnsCryptPort = dnsCryptPort,
+                torDnsPort = torDnsPort,
+                useMapDns = false,
+                divertDns = true,
+                synthesizeOnionAutomap = synthesizeOnionAutomap,
+            )
         }
-        startWithMux(
-            tunFd = tunFd,
-            torSocksPort = socksPort,
-            dnsCryptPort = dnsCryptPort,
-            torDnsPort = torDnsPort,
-            useMapDns = false,
-            divertDns = true,
-        )
     }
 
     private fun startWithMux(
@@ -70,6 +75,7 @@ class HevSocks5TunForwarder(
         torDnsPort: Int,
         useMapDns: Boolean,
         divertDns: Boolean,
+        synthesizeOnionAutomap: Boolean = false,
     ) {
         // Bridge before hev so the first SOCKS CONNECT never hits a closed port.
         val bridge = SocksUidBridge(
@@ -119,6 +125,7 @@ class HevSocks5TunForwarder(
             divertDnsToDnsCrypt = divertDns,
             torDnsHost = TunnelEndpoints.LOOPBACK,
             torDnsPort = torDnsPort,
+            synthesizeOnionAutomap = synthesizeOnionAutomap,
             onFatal = { error ->
                 Timber.e(error, "TunDnsMux died")
                 onFatal?.invoke(error)
@@ -129,11 +136,13 @@ class HevSocks5TunForwarder(
     }
 
     override fun stop() {
+        OpTrace.debug("hev", "stop")
         dnsMux?.stop()
         dnsMux = null
         try {
             hev.sockstun.TProxyService.TProxyStopService()
         } catch (error: Exception) {
+            OpTrace.warn("hev", "Failed to stop hev-socks5-tunnel", error)
             Timber.w(error, "Failed to stop hev-socks5-tunnel")
         }
         worker.getAndSet(null)?.cancel()

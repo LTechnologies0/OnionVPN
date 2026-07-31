@@ -21,17 +21,22 @@ object TunnelPortAllocator {
     private const val MAX_PORT = 65535
     private const val MAX_ATTEMPTS = 64
 
-    fun allocate(): TunnelRuntimePorts {
+    fun allocate(engine: TorEngine = TorEngine.LITTLE_T): TunnelRuntimePorts {
         val used = mutableSetOf(
             TunnelEndpoints.PAC_LISTEN_PORT,
             TunnelEndpoints.PAC_BRIDGE_SOCKS_PORT,
             TunnelEndpoints.SOCKS_UID_BRIDGE_PORT,
             TunnelEndpoints.DNSCRYPT_LISTEN_PORT,
         )
+        val socks = allocateTcpPort(used)
+        // Arti-mobile exposes a single SOCKS listener — apps / DNSCrypt / probes share it.
+        // SOCKS username/password isolation still separates streams inside Arti.
+        val dnsCryptSocks = if (engine == TorEngine.ARTI) socks else allocateTcpPort(used)
+        val probeSocks = if (engine == TorEngine.ARTI) socks else allocateTcpPort(used)
         return TunnelRuntimePorts(
-            torSocksPort = allocateTcpPort(used),
-            torDnsCryptSocksPort = allocateTcpPort(used),
-            torProbeSocksPort = allocateTcpPort(used),
+            torSocksPort = socks,
+            torDnsCryptSocksPort = dnsCryptSocks,
+            torProbeSocksPort = probeSocks,
             torHttpTunnelPort = allocateTcpPort(used),
             torDnsPort = allocateUdpPort(used),
             dnsCryptListenPort = allocateTcpUdpPort(used),
