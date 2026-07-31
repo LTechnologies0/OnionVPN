@@ -15,12 +15,14 @@ Privacy-focused Android VPN that routes **all device traffic through Tor**, with
 | Domain threat lists | HaGeZi lists colour destinations on prompts: 🟢 safe (unlisted), 🟠 ads/tracking/telemetry, 🔴 malware/C2 — updates prefer Tor when the tunnel is up |
 | App lock | Lock the UI without stopping the tunnel or kill switch |
 | Tor tuning | Circuit rotation presets, stream isolation modes, editable `torrc` / `dnscrypt-proxy.toml` |
+| Tor engine | Dual backend: **C Tor** (`libtor.so`, default) or experimental **Arti** (Rust, `arti-mobile`) |
 
 ## Architecture
 
 | Layer | Role |
 |-------|------|
 | Tor | SOCKS + DNSPort (ephemeral ports), SafeSocks depending on DNS mode |
+| Arti (opt-in) | In-process Rust Tor via `org.torproject:arti-mobile`; one shared SOCKS + DNS; no classic ControlSocket |
 | DNSCrypt | App DNS via TunDnsMux; upstream via Tor SOCKS; bootstrap via Tor DNSPort |
 | VPN | `OnionVpnService` + hev-socks5-tunnel; client `10.8.0.2`, DNS `10.8.0.1` |
 | Firewall | `InteractiveFirewallEngine` on the TUN; DNS hostname cache + local reputation DB (HaGeZi / URLhaus / Yoyo / uAssets) for prompt UI |
@@ -78,12 +80,25 @@ Locally: copy `keystore.properties.example` → `keystore.properties` (gitignore
 Prebuilt Tor / DNSCrypt and hev-socks5-tunnel live under `app/src/main/jniLibs/{arm64-v8a,x86_64}/`.
 Refresh with `scripts/fetch-native-binaries.sh`:
 
-- **Tor** — [LTechnologies0/Tor-Android-build-script](https://github.com/LTechnologies0/Tor-Android-build-script)
-  (our fork of Gedsh’s Android Tor build; GitHub Release `libtor-*.so`)
+- **Tor (C / little-t)** — [LTechnologies0/Tor-Android-build-script](https://github.com/LTechnologies0/Tor-Android-build-script)
+  (our fork of Gedsh’s Android Tor build; GitHub Release `libtor-*.so`) — default engine
+- **Arti (Rust)** — [arti-mobile](https://gitlab.com/guardianproject/tormobile/arti-mobile) Maven AAR
+  (`org.torproject:arti-mobile`) ships `libarti_mobile_ex.so`; select **Arti** under Settings → Tor
 - **DNSCrypt** — InviZible Lite **v7.5.0** APK extract
 - **hev-socks5-tunnel** — sockstun APK extract
 
-There is **no** runtime Tor binary OTA; ship updates by refreshing jniLibs and releasing a new OnionVPN APK.
+There is **no** runtime Tor binary OTA; ship updates by refreshing jniLibs / AAR and releasing a new OnionVPN APK.
+
+### Arti migration status
+
+| Capability | C Tor | Arti |
+|------------|-------|------|
+| SOCKS proxy | Multi-port SessionGroups | Single shared SOCKS |
+| DNSPort | Automap / VirtualAddr | DNS proxy port |
+| Classic ControlSocket | Yes | No (synthetic bootstrap status) |
+| Circuits UI / NEWNYM / live SETCONF | Yes | Not yet |
+| Bridges + Lyrebird managed PT | Yes | Experimental (path-based) |
+| Conjure | Yes | Not yet |
 
 ## License
 

@@ -20,6 +20,12 @@ data class TunnelPreferences(
     val killSwitchEnabled: Boolean = true,
     val dnsCryptServerName: String = "cloudflare",
     val dnsResolverMode: DnsResolverMode = DnsResolverMode.DNSCRYPT_MUX,
+    /**
+     * Tor client engine. Default remains [TorEngine.LITTLE_T] until Arti reaches
+     * feature parity (multi-SocksPort SessionGroups, classic control plane, PTs).
+     * Changing this requires a tunnel restart.
+     */
+    val torEngine: TorEngine = TorEngine.LITTLE_T,
     val torBridges: String = "",
     val torEntryNodes: String = "",
     val torExitNodes: String = "",

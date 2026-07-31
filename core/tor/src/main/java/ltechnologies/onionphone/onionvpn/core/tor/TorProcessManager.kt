@@ -11,10 +11,12 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.withContext
+import ltechnologies.onionphone.onionvpn.core.model.TorEngine
 import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
 import ltechnologies.onionphone.onionvpn.core.model.TunnelFailure
 import ltechnologies.onionphone.onionvpn.core.model.TunnelPreferences
 import ltechnologies.onionphone.onionvpn.core.model.TunnelRuntimePorts
+import ltechnologies.onionphone.onionvpn.core.tor.arti.ArtiRuntime
 import ltechnologies.onionphone.onionvpn.core.tor.config.TorBridgeConfig
 import ltechnologies.onionphone.onionvpn.core.tor.config.TorConfigWriter
 import ltechnologies.onionphone.onionvpn.core.tor.control.TorControlClient
@@ -27,12 +29,16 @@ import okhttp3.Request
 import timber.log.Timber
 
 /**
- * Owns the Tor native process and orchestrates the sequential start/stop pipeline.
+ * Owns the Tor client runtime and orchestrates the sequential start/stop pipeline.
+ *
+ * Supports two engines via [TunnelPreferences.torEngine]:
+ * - [TorEngine.LITTLE_T] — `libtor.so` process + torrc + ControlSocket (default)
+ * - [TorEngine.ARTI] — in-process Arti (`arti-mobile`) SOCKS+DNS; synthetic control status
  *
  * Lives in the root `core.tor` package (public DI entry) while control/config/lifecycle
  * internals stay in subpackages — keeps Hilt/KSP resolution stable.
  *
- * **Start pipeline (ordered):**
+ * **Little-t start pipeline (ordered):**
  * 1. [stopInternal] + kill orphans + delete stale ControlSocket/cookie
  * 2. [writeTorrc] via [TorConfigWriter]
  * 3. [spawnTorProcess]
@@ -41,7 +47,7 @@ import timber.log.Timber
  * 6. [waitForBootstrap] (GETINFO + [TorReadiness] listeners)
  * 7. SIGNAL ACTIVE
  *
- * **Network recovery sub-pipeline:** DROPTIMEOUTS → ACTIVE → CLEARDNSCACHE → refresh.
+ * **Arti start pipeline:** stop → JNI start → wait SOCKS/DNS listeners → synthetic status.
  *
  * Control ops are exposed via [control] (single surface — no duplicated SIGNAL wrappers).
  * App conveniences kept: [newNym], [onNetworkChanged], [signalDormant].
@@ -55,9 +61,13 @@ class TorProcessManager(
     private var logThread: Thread? = null
     private var runtimePorts: TunnelRuntimePorts? = null
     private var preferences: TunnelPreferences = TunnelPreferences()
+    private var activeEngine: TorEngine = TorEngine.LITTLE_T
+    private val arti = ArtiRuntime(context)
 
     /**
      * Public control session — prefer this over adding more manager wrappers.
+     * On Arti, [control.isConnected] stays false; status is synthetic via
+     * [TorControlClient.publishSyntheticStatus].
      */
     val control = TorControlClient()
 
@@ -82,8 +92,16 @@ class TorProcessManager(
     val nativeLibraryDir: File
         get() = File(context.applicationInfo.nativeLibraryDir)
 
-    /** Optional sink for stderr/stdout lines from the Tor process. */
+    /** Engine used by the last successful [start] (or preference while starting). */
+    val engine: TorEngine
+        get() = activeEngine
+
+    /** Optional sink for stderr/stdout / Arti log lines. */
     var onLogLine: ((String) -> Unit)? = null
+        set(value) {
+            field = value
+            arti.onLogLine = value
+        }
 
     /**
      * Runs the full start pipeline on [Dispatchers.IO].
@@ -95,13 +113,47 @@ class TorProcessManager(
         preferences: TunnelPreferences = TunnelPreferences(),
     ): Result<Unit> = withContext(Dispatchers.IO) {
         this@TorProcessManager.preferences = preferences
+        activeEngine = preferences.torEngine
+        when (activeEngine) {
+            TorEngine.ARTI -> startArti(ports, preferences)
+            TorEngine.LITTLE_T -> startLittleT(ports, preferences)
+        }
+    }
+
+    private suspend fun startArti(
+        ports: TunnelRuntimePorts,
+        preferences: TunnelPreferences,
+    ): Result<Unit> {
+        stopInternal()
+        runtimePorts = ports
+        return try {
+            arti.start(ports, preferences)
+            publishArtiReadyStatus()
+            Timber.i(
+                "Arti ready socks=%d dns=%d (shared SOCKS for apps/dnscrypt/probe)",
+                ports.torSocksPort,
+                ports.torDnsPort,
+            )
+            Result.success(Unit)
+        } catch (error: Exception) {
+            Timber.e(error, "Arti failed to start")
+            stopInternal()
+            runtimePorts = null
+            Result.failure(TunnelFailure.fromThrowable(error, context = "arti.start"))
+        }
+    }
+
+    private suspend fun startLittleT(
+        ports: TunnelRuntimePorts,
+        preferences: TunnelPreferences,
+    ): Result<Unit> {
         // Step 1 — stopInternal clears runtimePorts; re-bind after teardown.
         stopInternal()
         killOrphanedProcesses()
         runCatching { controlSocketFile.delete() }
         runCatching { cookieFile.delete() }
         runtimePorts = ports
-        try {
+        return try {
             ensureExecutable(binaryFile)
             ensurePluggableTransportBinaries(preferences.torBridges)
             ensureGeoIpFiles()
@@ -143,7 +195,10 @@ class TorProcessManager(
         stopInternal()
     }
 
-    fun isRunning(): Boolean = process?.isAlive == true
+    fun isRunning(): Boolean = when (activeEngine) {
+        TorEngine.ARTI -> arti.isRunning()
+        TorEngine.LITTLE_T -> process?.isAlive == true
+    }
 
     /** Probe SocksPort while Tor is up; used for reputation list downloads. */
     fun currentProbeSocksPort(): Int? =
@@ -151,6 +206,11 @@ class TorProcessManager(
 
     /** SIGNAL NEWNYM + CLEARDNSCACHE (user “new identity”), rate-limited ~10s. */
     fun newNym(): Result<Unit> {
+        if (activeEngine == TorEngine.ARTI) {
+            return Result.failure(
+                IOException("New identity is not available on Arti yet (no classic control port)"),
+            )
+        }
         if (!control.isConnected) return Result.failure(IOException("control not connected"))
         return control.newNym().also {
             it.onSuccess { Timber.i("SIGNAL NEWNYM accepted") }
@@ -160,6 +220,10 @@ class TorProcessManager(
 
     /** SIGNAL ACTIVE — wake from DORMANT after Blocking / network recovery. */
     fun signalActive(): Result<Unit> {
+        if (activeEngine == TorEngine.ARTI) {
+            // Arti has no SIGNAL ACTIVE; listeners stay up — treat as success.
+            return Result.success(Unit)
+        }
         if (!control.isConnected) return Result.failure(IOException("control not connected"))
         return control.setActive().also {
             it.onSuccess { Timber.i("SIGNAL ACTIVE") }
@@ -172,6 +236,9 @@ class TorProcessManager(
         maxCircuitDirtinessSec: Int,
         newCircuitPeriodSec: Int,
     ): Result<Unit> {
+        if (activeEngine == TorEngine.ARTI) {
+            return Result.failure(IOException("Circuit timing SETCONF requires C Tor control port"))
+        }
         if (!control.isConnected) return Result.failure(IOException("control not connected"))
         return control.setCircuitTiming(maxCircuitDirtinessSec, newCircuitPeriodSec).also {
             it.onSuccess {
@@ -185,28 +252,43 @@ class TorProcessManager(
     }
 
     fun closeCircuit(id: String, ifUnused: Boolean = true): Result<Unit> {
+        if (activeEngine == TorEngine.ARTI) {
+            return Result.failure(IOException("Circuit control requires C Tor"))
+        }
         if (!control.isConnected) return Result.failure(IOException("control not connected"))
         return control.closeCircuit(id, ifUnused)
     }
 
     fun closeStream(id: String, reason: String = TorControlCatalog.StreamEndReason.DONE): Result<Unit> {
+        if (activeEngine == TorEngine.ARTI) {
+            return Result.failure(IOException("Stream control requires C Tor"))
+        }
         if (!control.isConnected) return Result.failure(IOException("control not connected"))
         return control.closeStream(id, reason)
     }
 
     fun listCircuits(): List<ltechnologies.onionphone.onionvpn.core.tor.control.model.TorCircuitInfo> =
-        if (control.isConnected) control.listCircuits() else emptyList()
+        if (activeEngine == TorEngine.LITTLE_T && control.isConnected) control.listCircuits() else emptyList()
 
     fun listStreams(): List<ltechnologies.onionphone.onionvpn.core.tor.control.model.TorStreamInfo> =
-        if (control.isConnected) control.listStreams() else emptyList()
+        if (activeEngine == TorEngine.LITTLE_T && control.isConnected) control.listStreams() else emptyList()
 
     fun extendNewCircuit(): Result<String> {
+        if (activeEngine == TorEngine.ARTI) {
+            return Result.failure(IOException("Circuit control requires C Tor"))
+        }
         if (!control.isConnected) return Result.failure(IOException("control not connected"))
         return control.extendNewCircuit()
     }
 
     /** SIGNAL DORMANT (kill-switch Blocking while keeping Tor process). */
-    fun signalDormant(): Result<Unit> = control.setDormant()
+    fun signalDormant(): Result<Unit> {
+        if (activeEngine == TorEngine.ARTI) {
+            // No classic DORMANT; keep Arti running under Blocking TUN.
+            return Result.success(Unit)
+        }
+        return control.setDormant()
+    }
 
     /**
      * Underlying Android network changed (Wi‑Fi ↔ cell, loss, validated flip).
@@ -218,6 +300,11 @@ class TorProcessManager(
      * Hard bounce is reserved for [recoverNetworkHard] (captive / prolonged stall).
      */
     fun onNetworkChanged(): Result<Unit> {
+        if (activeEngine == TorEngine.ARTI) {
+            publishArtiReadyStatus()
+            Timber.i("Arti network change noted (no control-port recovery)")
+            return Result.success(Unit)
+        }
         if (!control.isConnected) return Result.failure(IOException("control not connected"))
         control.dropTimeouts().onFailure { Timber.w(it, "DROPTIMEOUTS failed") }
         val active = control.setActive()
@@ -235,6 +322,9 @@ class TorProcessManager(
      * Tears down listeners/circuits — use only when soft recovery is insufficient.
      */
     fun recoverNetworkHard(): Result<Unit> {
+        if (activeEngine == TorEngine.ARTI) {
+            return onNetworkChanged()
+        }
         if (!control.isConnected) return Result.failure(IOException("control not connected"))
         control.dropTimeouts().onFailure { Timber.w(it, "DROPTIMEOUTS failed") }
         control.setDisableNetwork(true).onFailure { Timber.w(it, "DisableNetwork=1 failed") }
@@ -250,26 +340,71 @@ class TorProcessManager(
     }
 
     /** Convenience: refresh GETINFO into [controlStatus]. */
-    fun refreshControlInfo() = control.refreshInfo()
+    fun refreshControlInfo() {
+        if (activeEngine == TorEngine.ARTI) {
+            publishArtiReadyStatus()
+            return
+        }
+        control.refreshInfo()
+    }
 
     /** Circuit/stream dumps — rare UI ticks only. */
-    fun refreshControlCircuits() = control.refreshCircuits()
+    fun refreshControlCircuits() {
+        if (activeEngine == TorEngine.ARTI) return
+        control.refreshCircuits()
+    }
 
     /** Lightweight health poll (no circuit-status dump). */
-    fun refreshControlHealthLite() = control.refreshHealthLite()
+    fun refreshControlHealthLite() {
+        if (activeEngine == TorEngine.ARTI) {
+            publishArtiReadyStatus()
+            return
+        }
+        control.refreshHealthLite()
+    }
 
     /**
      * Process-wide `traffic/read|written` only — for aggregate bandwidth across all circuits.
      */
-    fun refreshControlTraffic() = control.refreshTraffic()
+    fun refreshControlTraffic() {
+        if (activeEngine == TorEngine.ARTI) return
+        control.refreshTraffic()
+    }
 
     /** Live SETCONF bridges from multiline preference text. */
     fun setBridgesLive(bridgeText: String): Result<Unit> {
+        if (activeEngine == TorEngine.ARTI) {
+            return Result.failure(IOException("Arti bridges require tunnel restart"))
+        }
         if (!control.isConnected) return Result.failure(IOException("control not connected"))
         val lines = TorBridgeConfig.parseLines(bridgeText)
         return control.setBridges(lines).also {
             it.onSuccess { Timber.i("SETCONF bridges live count=%d", lines.size) }
         }
+    }
+
+    private fun publishArtiReadyStatus() {
+        val socksUp = runtimePorts?.let { TorReadiness.areSocksPortsReady(it) } == true
+        val ready = socksUp && arti.isRunning()
+        // connected=true means "runtime plane healthy" for UI/snapshot — not a ControlSocket.
+        control.publishSyntheticStatus(
+            TorControlStatus(
+                connected = ready,
+                torVersion = ArtiRuntime.VERSION_LABEL,
+                bootstrapProgress = if (ready) 100 else 0,
+                bootstrapTag = if (ready) "done" else "starting",
+                bootstrapSummary = if (ready) {
+                    "Arti SOCKS/DNS listeners ready"
+                } else {
+                    "Waiting for Arti listeners"
+                },
+                circuitEstablished = ready,
+                enoughDirInfo = ready,
+                networkLive = ready,
+                dormant = false,
+                builtCircuits = if (ready) 1 else 0,
+            ),
+        )
     }
 
     // --- private pipeline steps ---
@@ -596,7 +731,12 @@ class TorProcessManager(
     }.getOrDefault(false)
 
     private fun stopInternal() {
-        runCatching { control.disconnect(sendShutdown = true) }
+        if (activeEngine == TorEngine.ARTI || arti.isRunning()) {
+            arti.stop()
+            control.resetStatus()
+        } else {
+            runCatching { control.disconnect(sendShutdown = true) }
+        }
         process?.destroyForcibly()
         runCatching { process?.waitFor() }
         process = null

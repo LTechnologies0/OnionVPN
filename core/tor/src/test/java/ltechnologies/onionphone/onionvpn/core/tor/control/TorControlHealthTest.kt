@@ -30,6 +30,37 @@ class TorControlHealthTest {
         assertEquals(ValidationStatus.Pass, check.status)
         assertTrue(check.detail.contains("boot=100%"))
     }
+
+    @Test
+    fun artiSynthetic_passesWithoutControlSocketSemantics() {
+        val check = TorControlHealth.validate(
+            TorControlStatus(
+                connected = true,
+                bootstrapProgress = 100,
+                circuitEstablished = true,
+                enoughDirInfo = true,
+                torVersion = "arti-mobile",
+                bootstrapSummary = "Arti SOCKS/DNS listeners ready",
+            ),
+            requireConnected = true,
+        )
+        assertEquals(ValidationStatus.Pass, check.status)
+        assertEquals("tor.arti.health", check.id)
+        assertTrue(check.detail.contains("engine=arti"))
+    }
+
+    @Test
+    fun artiSynthetic_failsWhenNotBootstrapped() {
+        val check = TorControlHealth.validate(
+            TorControlStatus(
+                connected = false,
+                bootstrapProgress = 0,
+                torVersion = "arti-mobile",
+            ),
+        )
+        assertEquals(ValidationStatus.Fail, check.status)
+        assertTrue(check.tripsKillSwitch)
+    }
 }
 
 class TorControlEventFormatterTest {

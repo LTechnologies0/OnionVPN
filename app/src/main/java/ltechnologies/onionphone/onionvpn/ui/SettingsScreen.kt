@@ -48,6 +48,7 @@ import ltechnologies.onionphone.onionvpn.bridges.MoatCircumventionClient
 import ltechnologies.onionphone.onionvpn.core.dnscrypt.config.DnsCryptPublicResolvers
 import ltechnologies.onionphone.onionvpn.core.model.DnsResolverMode
 import ltechnologies.onionphone.onionvpn.core.model.FirewallDefaultAction
+import ltechnologies.onionphone.onionvpn.core.model.TorEngine
 import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
 import ltechnologies.onionphone.onionvpn.core.model.TunnelPreferences
 import ltechnologies.onionphone.onionvpn.core.tor.config.TorBridgeConfig
@@ -412,6 +413,37 @@ fun SettingsScreen(
                 "circuits stay sticky; dirtiness mainly affects non-auth streams. " +
                 "Default Stable=600s. Live SETCONF when connected (no Tor restart).",
         )
+        Text(
+            text = "Tor engine",
+            style = MaterialTheme.typography.titleMedium,
+        )
+        Text(
+            text = "C Tor (libtor) is the production default (multi-SocksPort, ControlSocket, " +
+                "full PT surface). Arti (Rust) is experimental: one shared SOCKS + DNS, " +
+                "no classic control port (circuits UI / NEWNYM / live SETCONF limited). " +
+                "Changing engine restarts the tunnel.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Row(
+            modifier = Modifier.horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            FilterChip(
+                selected = local.torEngine == TorEngine.LITTLE_T,
+                onClick = {
+                    commit(local.copy(torEngine = TorEngine.LITTLE_T), restart = true)
+                },
+                label = { Text("C Tor") },
+            )
+            FilterChip(
+                selected = local.torEngine == TorEngine.ARTI,
+                onClick = {
+                    commit(local.copy(torEngine = TorEngine.ARTI), restart = true)
+                },
+                label = { Text("Arti") },
+            )
+        }
         Row(
             modifier = Modifier.horizontalScroll(rememberScrollState()),
             horizontalArrangement = Arrangement.spacedBy(8.dp),

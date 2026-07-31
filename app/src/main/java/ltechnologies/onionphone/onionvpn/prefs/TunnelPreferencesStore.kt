@@ -15,6 +15,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import ltechnologies.onionphone.onionvpn.core.model.DnsResolverMode
 import ltechnologies.onionphone.onionvpn.core.model.FirewallDefaultAction
+import ltechnologies.onionphone.onionvpn.core.model.TorEngine
 import ltechnologies.onionphone.onionvpn.core.model.TunnelPreferences
 
 private val Context.tunnelDataStore: DataStore<Preferences> by preferencesDataStore(name = "tunnel_prefs")
@@ -28,6 +29,7 @@ class TunnelPreferencesStore @Inject constructor(
         val killSwitch = booleanPreferencesKey("kill_switch")
         val dnsServer = stringPreferencesKey("dns_server")
         val dnsMode = stringPreferencesKey("dns_mode")
+        val torEngine = stringPreferencesKey("tor_engine")
         val torBridges = stringPreferencesKey("tor_bridges")
         val torEntry = stringPreferencesKey("tor_entry")
         val torExit = stringPreferencesKey("tor_exit")
@@ -59,6 +61,7 @@ class TunnelPreferencesStore @Inject constructor(
             prefs[Keys.killSwitch] = true // constant — never persist off
             prefs[Keys.dnsServer] = next.dnsCryptServerName
             prefs[Keys.dnsMode] = next.dnsResolverMode.name
+            prefs[Keys.torEngine] = next.torEngine.name
             prefs[Keys.torBridges] = next.torBridges
             prefs[Keys.torEntry] = next.torEntryNodes
             prefs[Keys.torExit] = next.torExitNodes
@@ -87,6 +90,7 @@ class TunnelPreferencesStore @Inject constructor(
         dnsResolverMode = this[Keys.dnsMode]
             ?.let { runCatching { DnsResolverMode.valueOf(it) }.getOrNull() }
             ?: DnsResolverMode.DNSCRYPT_MUX,
+        torEngine = TorEngine.fromPreference(this[Keys.torEngine]),
         torBridges = this[Keys.torBridges].orEmpty(),
         torEntryNodes = this[Keys.torEntry].orEmpty(),
         torExitNodes = this[Keys.torExit].orEmpty(),

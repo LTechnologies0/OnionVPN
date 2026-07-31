@@ -147,6 +147,21 @@ class TorControlClient {
         _status.value = TorControlStatus()
     }
 
+    /**
+     * Publish a synthetic control-plane snapshot for runtimes without a classic
+     * ControlSocket (Arti). Clears any live control transport first.
+     */
+    fun publishSyntheticStatus(status: TorControlStatus) {
+        transport.closeQuietly()
+        _status.value = status
+    }
+
+    /** Clear synthetic / live status without SIGNAL SHUTDOWN (used on Arti stop). */
+    fun resetStatus() {
+        transport.closeQuietly()
+        _status.value = TorControlStatus()
+    }
+
     // --- ops passthrough (single surface for ProcessManager / future callers) ---
 
     fun signal(name: String): Result<Unit> = ops.signal(name)

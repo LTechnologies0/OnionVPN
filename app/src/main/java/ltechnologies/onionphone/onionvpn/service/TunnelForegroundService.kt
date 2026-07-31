@@ -27,6 +27,7 @@ import kotlinx.coroutines.withTimeout
 import ltechnologies.onionphone.onionvpn.BuildConfig
 import ltechnologies.onionphone.onionvpn.core.dnscrypt.DnsCryptProcessManager
 import ltechnologies.onionphone.onionvpn.core.model.DnsResolverMode
+import ltechnologies.onionphone.onionvpn.core.model.TorEngine
 import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
 import ltechnologies.onionphone.onionvpn.core.model.TunnelFailure
 import ltechnologies.onionphone.onionvpn.core.model.TunnelPhase
@@ -243,10 +244,10 @@ class TunnelForegroundService : Service() {
 
         updateSnapshot(TunnelPhase.StartingTor)
 
-        val ports = TunnelPortAllocator.allocate()
+        val ports = TunnelPortAllocator.allocate(preferences.torEngine)
         runtimePorts = ports
         Timber.i(
-            "Allocated tunnel ports socks=${ports.torSocksPort} " +
+            "Allocated tunnel ports engine=${preferences.torEngine} socks=${ports.torSocksPort} " +
                 "dnscryptSocks=${ports.torDnsCryptSocksPort} " +
                 "probeSocks=${ports.torProbeSocksPort} " +
                 "httpTunnel=${ports.torHttpTunnelPort} dns=${ports.torDnsPort} " +
@@ -759,6 +760,7 @@ class TunnelForegroundService : Service() {
         const val EXTRA_KILL_SWITCH = "kill_switch"
         const val EXTRA_DNSCRYPT_SERVER = "dnscrypt_server"
         const val EXTRA_DNS_MODE = "dns_mode"
+        const val EXTRA_TOR_ENGINE = "tor_engine"
         const val EXTRA_TOR_BRIDGES = "tor_bridges"
         const val EXTRA_TOR_ENTRY = "tor_entry"
         const val EXTRA_TOR_EXIT = "tor_exit"
@@ -796,6 +798,7 @@ class TunnelForegroundService : Service() {
             dnsResolverMode = intent.getStringExtra(EXTRA_DNS_MODE)
                 ?.let { runCatching { DnsResolverMode.valueOf(it) }.getOrNull() }
                 ?: DnsResolverMode.DNSCRYPT_MUX,
+            torEngine = TorEngine.fromPreference(intent.getStringExtra(EXTRA_TOR_ENGINE)),
             torBridges = intent.getStringExtra(EXTRA_TOR_BRIDGES).orEmpty(),
             torEntryNodes = intent.getStringExtra(EXTRA_TOR_ENTRY).orEmpty(),
             torExitNodes = intent.getStringExtra(EXTRA_TOR_EXIT).orEmpty(),
