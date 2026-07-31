@@ -415,10 +415,10 @@ fun SettingsScreen(
                         "circuits stay sticky; dirtiness mainly affects non-auth streams. " +
                         "Default Stable=600s. Live SETCONF when connected (no Tor restart)."
                 TorEngine.ARTI ->
-                    "Arti (Rust) via arti-mobile: SOCKS+DNS, app-side .onion Automap, " +
-                        "NEWNYM/DROPGUARDS/RELOAD/bridges = runtime restart (doc 1:1). " +
-                        "No ControlSocket — circuits UI / Entry·Exit·Exclude / Conjure / " +
-                        "live circuit timing are C Tor only (arti-mobile JNI limitation)."
+                    "Arti (arti-client ${ltechnologies.onionphone.onionvpn.core.tor.control.TorControlCompat.ARTI_CLIENT_DOCS_VERSION}): " +
+                        "SOCKS+DNS, Automap synth, SOCKS-auth isolation, NEWNYM/bridges/RELOAD = restart. " +
+                        "DORMANT/ACTIVE = synthetic status (set_dormant not in JNI). " +
+                        "No circuits UI / Entry·Exit / Conjure / live max_dirtiness (JNI gap)."
             },
         )
         Text(

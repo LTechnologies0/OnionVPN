@@ -171,16 +171,24 @@ internal class ArtiRuntime(
         val pt = runCatching {
             resolveManagedPtPath(preferences.torBridges)?.name
         }.getOrNull().orEmpty()
+        val dirt = preferences.torMaxCircuitDirtinessSec.coerceIn(60, 7_200)
         val text = buildString {
             appendLine("engine=arti")
             appendLine("version=$VERSION_LABEL")
+            // Embedded crate (libarti_mobile_ex.so) — docs: docs.rs/arti-client/0.36.0
+            appendLine("arti_client=$ARTI_CLIENT_VERSION")
             appendLine("ready=${if (ready) 1 else 0}")
             appendLine("socks=${ports.torSocksPort}")
             appendLine("dns=${ports.torDnsPort}")
             appendLine("shared_socks=1")
+            appendLine("socks_auth_isolation=1")
             appendLine("bridges=$bridges")
             appendLine("pt=$pt")
             appendLine("synthesize_onion_automap=1")
+            // Recorded preference only — CircuitTimingBuilder::max_dirtiness not set via JNI.
+            appendLine("max_dirtiness_sec=$dirt")
+            appendLine("new_circuit_period_sec=${preferences.torNewCircuitPeriodSec}")
+            appendLine("max_dirtiness_applied=0")
             if (error != null) appendLine("error=${error.replace('\n', ' ')}")
         }
         runCatching { statusFile.writeText(text) }
@@ -240,6 +248,8 @@ internal class ArtiRuntime(
     companion object {
         const val LOG_TAG = "arti"
         const val VERSION_LABEL = "arti-mobile"
+        /** Matches arti-client crate embedded in arti-mobile 1.7.0.1. */
+        const val ARTI_CLIENT_VERSION = "0.36.0"
         const val STATUS_FILE_NAME = "arti.status"
     }
 }

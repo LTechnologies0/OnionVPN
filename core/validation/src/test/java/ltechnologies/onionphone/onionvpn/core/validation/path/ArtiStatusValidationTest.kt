@@ -27,6 +27,7 @@ class ArtiStatusValidationTest {
         )
         assertEquals(ValidationStatus.Pass, check.status)
         assertEquals("tor.arti.status", check.id)
+        assertTrue(check.detail.contains("authIso"))
     }
 
     @Test
@@ -42,5 +43,29 @@ class ArtiStatusValidationTest {
         val check = TorPathValidator.validateArtiStatusContent(status, "arti.status")
         assertEquals(ValidationStatus.Fail, check.status)
         assertTrue(check.tripsKillSwitch)
+    }
+
+    @Test
+    fun statusWithAuthIsolationAndDirtiness_passes() {
+        val status = """
+            engine=arti
+            version=arti-mobile
+            arti_client=0.36.0
+            ready=1
+            socks=9050
+            dns=9053
+            shared_socks=1
+            socks_auth_isolation=1
+            synthesize_onion_automap=1
+            max_dirtiness_sec=600
+            max_dirtiness_applied=0
+        """.trimIndent()
+        val check = TorPathValidator.validateArtiStatusContent(
+            status,
+            "arti.status",
+            socksPort = 9050,
+            dnsPort = 9053,
+        )
+        assertEquals(ValidationStatus.Pass, check.status)
     }
 }

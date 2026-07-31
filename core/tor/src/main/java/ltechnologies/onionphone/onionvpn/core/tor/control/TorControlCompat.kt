@@ -6,24 +6,39 @@ import ltechnologies.onionphone.onionvpn.core.model.TorEngine
  * Doc-backed little-t Tor ↔ Arti parity matrix for every ControlPort / Tor op
  * OnionVPN uses.
  *
- * Sources compared:
- * - Tor control-spec SIGNAL / SETCONF / GETINFO / CIRCUIT / RESOLVE
- *   (https://spec.torproject.org/control-spec/commands.html)
- * - Tor Project: Arti RPC replaces ControlPort but only supports connect /
- *   bootstrap / open streams today (Arti 1.4.0 blog)
- * - Guardian Project `arti-mobile` 1.7.0.1 JNI surface:
+ * ## Sources (read in full)
+ * - Tor control-spec: https://spec.torproject.org/control-spec/commands.html
+ * - **arti-client 0.36.0** (all 122 pages): https://docs.rs/arti-client/0.36.0/arti_client/
+ *   — this is the crate version embedded in Guardian `arti-mobile` 1.7.0.1
+ *   (`libarti_mobile_ex.so` strings: `arti-client-0.36.0` / `arti-1.7.0`)
+ * - arti-mobile-ex JNI (`common/src/android.rs` + `lib.rs`): only
  *   `startArtiProxyJNI(cache, state, obfs4, snowflake, ptPath, bridges, socks, dns)`
- *   + `stopArtiProxyJNI()` — no ControlSocket, no RPC port, no SETCONF
- * - Arti `TorClientConfig` has `circuit_timing.max_dirtiness` and bridges config
- *   in-process, but arti-mobile does not expose reconfigure / TOML knobs for
- *   ExitNodes / MaxCircuitDirtiness / CIRC events
+ *   + `stopArtiProxyJNI()` — `ConfigurationSources::default()` (no TOML load)
  *
- * **1:1 policy:** every little-t op maps to the closest Arti-capable behaviour
- * that preserves VPN semantics. Ops that cannot be implemented with the
- * published arti-mobile API are [Parity.ENGINE_LIMITATION] and must be UI-gated
- * via [ltechnologies.onionphone.onionvpn.core.model.TorEngineCapabilities].
+ * ## arti-client 0.36.0 APIs that map to little-t (Rust / RPC)
+ * | little-t | arti-client 0.36.0 |
+ * |---|---|
+ * | SIGNAL NEWNYM (per-app isolation) | `TorClient::isolated_client` / `StreamPrefs::new_isolation_group` |
+ * | SIGNAL NEWNYM (VPN-wide) | full runtime restart (stronger; invalidates all streams) |
+ * | SIGNAL DORMANT / ACTIVE | `TorClient::set_dormant(DormantMode::Soft\|Normal)` |
+ * | RESOLVE | `TorClient::resolve` / `resolve_with_prefs` |
+ * | bootstrap GETINFO | `bootstrap_status()` → `as_frac` / `ready_for_traffic` / `blocked` |
+ * | MaxCircuitDirtiness | `CircuitTimingBuilder::max_dirtiness` (live via `reconfigure`) |
+ * | NewCircuitPeriod | **no Arti equivalent** (use preemptive_circuits prediction_lifetime) |
+ * | ExitNodes country | `StreamPrefs::exit_country` (geoip feature; connect API only) |
+ * | Bridges / PT | `config::BridgesConfig` + `pt::TransportConfig` |
+ * | IsolateSOCKSAuth | SOCKS username → `StreamIsolation` / IsolationToken |
+ *
+ * ## JNI gap
+ * Those Rust APIs exist inside the `.so` but are **not** exposed by arti-mobile JNI.
+ * OnionVPN therefore implements the closest semantic / app-layer 1:1 behaviour
+ * available through start/stop + SOCKS/DNS + app caches.
  */
 object TorControlCompat {
+
+    /** arti-client crate version embedded in our arti-mobile AAR. */
+    const val ARTI_CLIENT_DOCS_VERSION = "0.36.0"
+    const val ARTI_CLIENT_DOCS_URL = "https://docs.rs/arti-client/0.36.0/arti_client/"
 
     /**
      * How close the Arti path is to little-t for the same user-facing intent.
@@ -33,7 +48,7 @@ object TorControlCompat {
         SEMANTIC_1_1,
         /** Outcome achieved at the app layer (DNSPort resolve, Automap synth, UID TrafficStats). */
         APP_LAYER_1_1,
-        /** Safe no-op that preserves VPN semantics under Blocking TUN / shared SOCKS. */
+        /** Safe no-op / status-only that preserves VPN semantics under Blocking TUN. */
         NOOP_OK,
         /** Soft recovery (listener re-probe / app DNS cache clear). */
         SOFT_RECOVER,
@@ -41,7 +56,7 @@ object TorControlCompat {
         HARD_RECOVER,
         /** Applied only by restarting the tunnel/runtime with new prefs. */
         REQUIRES_RESTART,
-        /** Not available in arti-mobile / Arti RPC yet — must fail closed + UI gate. */
+        /** Not available via arti-mobile JNI — fail closed + UI gate. */
         ENGINE_LIMITATION,
     }
 
@@ -78,7 +93,8 @@ object TorControlCompat {
             arti = ArtiBehavior.EQUIVALENT,
             parity = Parity.SEMANTIC_1_1,
             artiImpl = "ArtiRuntime.restartForNewIdentity() + clear app DNS/Automap caches",
-            docs = "control-spec SIGNAL NEWNYM; Arti has no NEWNYM — isolated client / restart is the VPN equivalent",
+            docs = "arti-client $ARTI_CLIENT_DOCS_VERSION TorClient::isolated_client is the per-handle " +
+                "NEWNYM analogue; VPN-wide identity requires restart (stronger than isolated_client)",
         ),
         Op(
             name = "CLEARDNSCACHE",
@@ -87,25 +103,27 @@ object TorControlCompat {
             arti = ArtiBehavior.SOFT_RECOVER,
             parity = Parity.APP_LAYER_1_1,
             artiImpl = "Clear DnsHostnameCache + OnionAutomapAllocator; re-probe SOCKS/DNS",
-            docs = "control-spec CLEARDNSCACHE; arti-mobile has no SIGNAL — app-layer cache is the Automap store",
+            docs = "No TorClient::clear_dns_cache in 0.36.0; app Automap store is the client DNS cache on Arti",
         ),
         Op(
             name = "ACTIVE",
             wire = "SIGNAL ACTIVE",
             littleT = "Leave dormant mode; resume activity",
-            arti = ArtiBehavior.NOOP_OK,
-            parity = Parity.NOOP_OK,
-            artiImpl = "No-op: arti-mobile has no dormant mode; listeners stay up under Blocking TUN",
-            docs = "control-spec ACTIVE; Arti client stays running while process lives",
+            arti = ArtiBehavior.EQUIVALENT,
+            parity = Parity.APP_LAYER_1_1,
+            artiImpl = "Clear synthetic dormant flag + republish ready status " +
+                "(Rust: TorClient::set_dormant(DormantMode::Normal) — not in JNI)",
+            docs = "arti-client 0.36.0 DormantMode::Normal; JNI gap → app-layer status + keep listeners up",
         ),
         Op(
             name = "DORMANT",
             wire = "SIGNAL DORMANT",
             littleT = "Become dormant (reduce background network use)",
-            arti = ArtiBehavior.NOOP_OK,
-            parity = Parity.NOOP_OK,
-            artiImpl = "No-op: keep Arti running so kill-switch recovery can reattach without cold bootstrap",
-            docs = "control-spec DORMANT; arti-mobile JNI has no dormant API",
+            arti = ArtiBehavior.EQUIVALENT,
+            parity = Parity.APP_LAYER_1_1,
+            artiImpl = "Set synthetic dormant=true in TorControlStatus; keep Arti runtime running " +
+                "under Blocking TUN (Soft dormant would wake on next use per docs anyway)",
+            docs = "arti-client 0.36.0 set_dormant(DormantMode::Soft); JNI missing — status parity only",
         ),
         Op(
             name = "RELOAD",
@@ -114,7 +132,8 @@ object TorControlCompat {
             arti = ArtiBehavior.HARD_RECOVER,
             parity = Parity.SEMANTIC_1_1,
             artiImpl = "ArtiRuntime.restartHard() with last ports/prefs (bridges re-applied via JNI)",
-            docs = "control-spec RELOAD; Arti reload_cfg exists in-tree but arti-mobile exposes only stop/start",
+            docs = "arti-client 0.36.0 TorClient::reconfigure + config::Reconfigure; " +
+                "arti-mobile uses ConfigurationSources::default() (empty) so restart is the apply path",
         ),
         Op(
             name = "SHUTDOWN",
@@ -122,8 +141,8 @@ object TorControlCompat {
             littleT = "Clean shutdown of Tor process",
             arti = ArtiBehavior.EQUIVALENT,
             parity = Parity.SEMANTIC_1_1,
-            artiImpl = "ArtiMobileNative.stop() / ArtiRuntime.stop()",
-            docs = "control-spec SHUTDOWN; arti-mobile stopArtiProxyJNI",
+            artiImpl = "ArtiMobileNative.stop() / ArtiRuntime.stop() (TorClient::wait_for_stop analogue)",
+            docs = "arti-client 0.36.0 wait_for_stop; arti-mobile stopArtiProxyJNI",
         ),
         Op(
             name = "HEARTBEAT",
@@ -131,8 +150,8 @@ object TorControlCompat {
             littleT = "Force a heartbeat log line",
             arti = ArtiBehavior.NOOP_OK,
             parity = Parity.NOOP_OK,
-            artiImpl = "No-op success (no control log channel)",
-            docs = "control-spec HEARTBEAT; informational only",
+            artiImpl = "No-op success (no control log channel / no TorClient heartbeat API)",
+            docs = "control-spec HEARTBEAT; not present in arti-client 0.36.0 public API",
         ),
         Op(
             name = "DROPTIMEOUTS",
@@ -141,7 +160,7 @@ object TorControlCompat {
             arti = ArtiBehavior.SOFT_RECOVER,
             parity = Parity.SEMANTIC_1_1,
             artiImpl = "Re-probe SOCKS/DNS listeners (soft network recovery)",
-            docs = "control-spec DROPTIMEOUTS; Arti has no circuit-timeout command — soft recover is VPN equivalent",
+            docs = "No DROPTIMEOUTS in arti-client 0.36.0; soft listener recover is VPN equivalent",
         ),
         Op(
             name = "DROPGUARDS",
@@ -149,8 +168,8 @@ object TorControlCompat {
             littleT = "Forget entry guards; rebuild guard set",
             arti = ArtiBehavior.HARD_RECOVER,
             parity = Parity.SEMANTIC_1_1,
-            artiImpl = "Full Arti restart (clears in-memory client / circuit state)",
-            docs = "control-spec DROPGUARDS; arti-mobile has no DROPGUARDS — hard restart is closest",
+            artiImpl = "Full Arti restart (clears in-memory client / circuit / guard state)",
+            docs = "No DROPGUARDS in arti-client 0.36.0 public API; hard restart clears client state",
         ),
         Op(
             name = "DisableNetwork",
@@ -159,7 +178,7 @@ object TorControlCompat {
             arti = ArtiBehavior.HARD_RECOVER,
             parity = Parity.SEMANTIC_1_1,
             artiImpl = "disabled→stop(); enabled→restartHard()",
-            docs = "torrc DisableNetwork; arti-mobile has no DisableNetwork — stop/start mirrors it",
+            docs = "No DisableNetwork in arti-client 0.36.0; stop/start mirrors network pause",
         ),
         Op(
             name = "SETCONF_circuit_timing",
@@ -167,8 +186,11 @@ object TorControlCompat {
             littleT = "Live circuit dirtiness / new-circuit period",
             arti = ArtiBehavior.NOOP_OK,
             parity = Parity.ENGINE_LIMITATION,
-            artiImpl = "Prefs persisted; arti-mobile JNI does not expose circuit_timing.max_dirtiness",
-            docs = "Arti TorClientConfig.circuit_timing.max_dirtiness exists, but not via arti-mobile start API",
+            artiImpl = "Prefs + arti.status max_dirtiness recorded; JNI cannot call " +
+                "CircuitTimingBuilder::max_dirtiness / TorClient::reconfigure. " +
+                "NewCircuitPeriod has no Arti field.",
+            docs = "arti-client 0.36.0 CircuitTimingBuilder::max_dirtiness (= MaxCircuitDirtiness); " +
+                "live via reconfigure — not exposed by arti-mobile start API",
         ),
         Op(
             name = "SETCONF_bridges",
@@ -177,7 +199,8 @@ object TorControlCompat {
             arti = ArtiBehavior.REQUIRES_RESTART,
             parity = Parity.SEMANTIC_1_1,
             artiImpl = "Restart Arti with new bridgeLines (+ managed Lyrebird path) via JNI",
-            docs = "arti-mobile startArtiProxyJNI(bridgeLines); live SETCONF unsupported — restart is 1:1 apply",
+            docs = "arti-client 0.36.0 config::BridgesConfig + pt::TransportConfig; " +
+                "arti-mobile passes bridge_lines into TorClientConfigBuilder at start",
         ),
         Op(
             name = "SETCONF_nodes",
@@ -185,8 +208,9 @@ object TorControlCompat {
             littleT = "Live path constraints (StrictNodes)",
             arti = ArtiBehavior.UNSUPPORTED,
             parity = Parity.ENGINE_LIMITATION,
-            artiImpl = "Not in arti-mobile API (StreamPrefs.exit_country is Rust-only / geoip feature)",
-            docs = "Arti StreamPrefs.exit_country requires geoip + embedding API; JNI has no node prefs",
+            artiImpl = "Not in arti-mobile JNI / SOCKS path",
+            docs = "arti-client 0.36.0 StreamPrefs::exit_country (geoip) applies to connect_with_prefs " +
+                "only — not to SOCKS proxy streams; Entry/ExcludeNodes have no SOCKS mapping",
         ),
         Op(
             name = "SETCONF_geoip",
@@ -195,7 +219,7 @@ object TorControlCompat {
             arti = ArtiBehavior.UNSUPPORTED,
             parity = Parity.ENGINE_LIMITATION,
             artiImpl = "No circuit country UI / GETINFO ip-to-country on Arti path",
-            docs = "GeoIP circuit UI needs classic control plane",
+            docs = "CountryCode / exit_country need geoip feature + embedding API; not in arti-mobile JNI",
         ),
         Op(
             name = "GETINFO_bootstrap",
@@ -203,8 +227,10 @@ object TorControlCompat {
             littleT = "Bootstrap progress / tags",
             arti = ArtiBehavior.EQUIVALENT,
             parity = Parity.APP_LAYER_1_1,
-            artiImpl = "Synthetic TorControlStatus from SOCKS+DNS listener readiness",
-            docs = "Arti RPC get_client_status is the desktop equivalent; mobile uses listener probe",
+            artiImpl = "Synthetic TorControlStatus from SOCKS+DNS readiness " +
+                "(maps ready_for_traffic → boot=100 / circuitEstablished)",
+            docs = "arti-client 0.36.0 BootstrapStatus::as_frac / ready_for_traffic / blocked — " +
+                "JNI has no bootstrap_status export; listener probe is the mobile stand-in",
         ),
         Op(
             name = "GETINFO_circuits",
@@ -213,7 +239,7 @@ object TorControlCompat {
             arti = ArtiBehavior.UNSUPPORTED,
             parity = Parity.ENGINE_LIMITATION,
             artiImpl = "Empty list / UI gated (circuitInspection=false)",
-            docs = "Arti RPC does not yet expose circuit-status (Tor Project forum / RPC roadmap)",
+            docs = "circmgr() is experimental-api only; no circuit-status in arti-client RPC surface yet",
         ),
         Op(
             name = "GETINFO_streams",
@@ -222,7 +248,7 @@ object TorControlCompat {
             arti = ArtiBehavior.UNSUPPORTED,
             parity = Parity.ENGINE_LIMITATION,
             artiImpl = "Empty list / UI gated",
-            docs = "Same as circuits — not in Arti RPC mobile surface",
+            docs = "No stream-status API in arti-client 0.36.0 public surface",
         ),
         Op(
             name = "GETINFO_traffic",
@@ -231,7 +257,7 @@ object TorControlCompat {
             arti = ArtiBehavior.EQUIVALENT,
             parity = Parity.APP_LAYER_1_1,
             artiImpl = "UID TrafficStats via TorBandwidthSampler (TunnelThroughputTracker)",
-            docs = "No traffic GETINFO without control plane; Android TrafficStats is the VPN equivalent",
+            docs = "No traffic counters on TorClient in 0.36.0; Android TrafficStats is VPN equivalent",
         ),
         Op(
             name = "EXTENDCIRCUIT",
@@ -239,8 +265,8 @@ object TorControlCompat {
             littleT = "Build a new circuit on demand",
             arti = ArtiBehavior.UNSUPPORTED,
             parity = Parity.ENGINE_LIMITATION,
-            artiImpl = "UI gated; Arti builds circuits on demand for SOCKS streams",
-            docs = "Arti intentionally avoids controller-driven circuit management (forum API sketch)",
+            artiImpl = "UI gated; Arti builds circuits on demand for SOCKS / connect()",
+            docs = "Arti builds circuits internally; no controller EXTENDCIRCUIT in 0.36.0",
         ),
         Op(
             name = "CLOSECIRCUIT",
@@ -249,7 +275,7 @@ object TorControlCompat {
             arti = ArtiBehavior.UNSUPPORTED,
             parity = Parity.ENGINE_LIMITATION,
             artiImpl = "UI gated; use NEWNYM to drop all circuits",
-            docs = "No circuit handles in arti-mobile",
+            docs = "No circuit handles in arti-client public API / arti-mobile JNI",
         ),
         Op(
             name = "CLOSESTREAM",
@@ -258,7 +284,7 @@ object TorControlCompat {
             arti = ArtiBehavior.UNSUPPORTED,
             parity = Parity.ENGINE_LIMITATION,
             artiImpl = "UI gated",
-            docs = "No stream handles in arti-mobile",
+            docs = "No stream-id controller API in arti-client 0.36.0",
         ),
         Op(
             name = "RESOLVE",
@@ -266,8 +292,9 @@ object TorControlCompat {
             littleT = "Ask Tor to resolve a hostname over the network",
             arti = ArtiBehavior.EQUIVALENT,
             parity = Parity.APP_LAYER_1_1,
-            artiImpl = "UDP DNS A query to Arti DNSPort (same network resolve path)",
-            docs = "control-spec RESOLVE; Arti DNSPort performs resolve_with_prefs equivalent",
+            artiImpl = "UDP DNS A query to Arti DNSPort (TorDnsResolve)",
+            docs = "arti-client 0.36.0 TorClient::resolve / resolve_with_prefs; " +
+                "DNSPort is the proxy-facing equivalent used by arti SOCKS/DNS listeners",
         ),
         Op(
             name = "SETEVENTS",
@@ -276,7 +303,7 @@ object TorControlCompat {
             arti = ArtiBehavior.UNSUPPORTED,
             parity = Parity.ENGINE_LIMITATION,
             artiImpl = "No event channel",
-            docs = "Arti RPC watch_client_status is desktop-only; not in arti-mobile",
+            docs = "bootstrap_events exists in 0.36.0 but is not exported by arti-mobile JNI",
         ),
         Op(
             name = "AUTHENTICATE",
@@ -285,7 +312,7 @@ object TorControlCompat {
             arti = ArtiBehavior.UNSUPPORTED,
             parity = Parity.ENGINE_LIMITATION,
             artiImpl = "No ControlSocket",
-            docs = "In-process JNI; no control auth surface",
+            docs = "In-process JNI; TorClient has no control-spec AUTHENTICATE",
         ),
         Op(
             name = "CLOSE_BUILT_CIRCUITS",
@@ -294,7 +321,17 @@ object TorControlCompat {
             arti = ArtiBehavior.EQUIVALENT,
             parity = Parity.SEMANTIC_1_1,
             artiImpl = "Same as NEWNYM — restartForNewIdentity()",
-            docs = "Closing all built circuits ≈ clean circuit set; Arti restart is the available tool",
+            docs = "Closing all built circuits ≈ clean circuit set; restart is the available tool",
+        ),
+        Op(
+            name = "SOCKS_AUTH_ISOLATION",
+            wire = "IsolateSOCKSAuth / SessionGroup",
+            littleT = "Per-UID SOCKS username → separate circuits (KeepAliveIsolateSOCKSAuth)",
+            arti = ArtiBehavior.EQUIVALENT,
+            parity = Parity.SEMANTIC_1_1,
+            artiImpl = "UidIsolatingTunForwarder sends u{uid} SOCKS auth on shared Arti SocksPort",
+            docs = "arti-client 0.36.0 isolation::StreamIsolation / IsolationToken; " +
+                "Arti SOCKS proxy maps username/password to stream isolation",
         ),
     )
 
@@ -333,5 +370,7 @@ object TorControlCompat {
         }
 
     fun unsupportedMessage(opName: String): String =
-        "ControlPort op '$opName' is not available on Arti (arti-mobile has no ControlSocket/RPC) — use C Tor or NEWNYM/restart"
+        "ControlPort op '$opName' is not available on Arti " +
+            "(arti-client $ARTI_CLIENT_DOCS_VERSION API not exposed by arti-mobile JNI) — " +
+            "use C Tor or NEWNYM/restart"
 }

@@ -5,7 +5,7 @@ package ltechnologies.onionphone.onionvpn.core.model
  *
  * - [LITTLE_T]: classic C Tor (`libtor.so` + torrc + ControlSocket).
  * - [ARTI]: Rust Arti via Guardian Project / Tor Project `arti-mobile`
- *   (in-process SOCKS + DNS proxy; no classic control port).
+ *   (in-process SOCKS + DNS proxy; embeds arti-client 0.36.0; no classic control port).
  */
 enum class TorEngine {
     LITTLE_T,
@@ -34,12 +34,20 @@ enum class TorEngine {
 /**
  * What each Tor engine can do. Call sites must branch on these flags instead of
  * sniffing version strings or assuming ControlSocket semantics.
+ *
+ * Arti capability notes map to arti-client 0.36.0
+ * (https://docs.rs/arti-client/0.36.0/arti_client/) vs what arti-mobile JNI exposes.
  */
 data class TorEngineCapabilities(
     /** Classic Tor control-spec (ControlSocket + cookie + SIGNAL/SETCONF/GETINFO). */
     val classicControlPlane: Boolean,
     /** Distinct SocksPorts with SessionGroup isolation (apps / DNSCrypt / probe). */
     val multiSocksSessionGroups: Boolean,
+    /**
+     * Per-stream isolation via SOCKS username/password
+     * (C Tor IsolateSOCKSAuth / Arti IsolationToken via SOCKS auth).
+     */
+    val socksAuthIsolation: Boolean,
     /** Native DNSPort AutomapHostsOnResolve → VirtualAddrNetwork. */
     val nativeAutomapDnsPort: Boolean,
     /**
@@ -53,7 +61,11 @@ data class TorEngineCapabilities(
     val circuitInspection: Boolean,
     /** Live SETCONF (circuit timing, bridges, GeoIP, nodes). */
     val liveSetConf: Boolean,
-    /** SIGNAL DORMANT / ACTIVE for kill-switch Blocking. */
+    /**
+     * DORMANT / ACTIVE semantics.
+     * C Tor: real SIGNAL. Arti: app-layer status flag
+     * ([TorClient::set_dormant] exists in 0.36.0 but is not in arti-mobile JNI).
+     */
     val dormantSignals: Boolean,
     /** Runtime torrc file is authoritative config. */
     val torrcConfig: Boolean,
@@ -61,7 +73,7 @@ data class TorEngineCapabilities(
     val conjureBridges: Boolean,
     /**
      * EntryNodes / ExitNodes / ExcludeNodes honored by the engine.
-     * Arti: false — StreamPrefs.exit_country not exposed by arti-mobile JNI.
+     * Arti: false — StreamPrefs.exit_country is Rust connect-only, not SOCKS/JNI.
      */
     val nodePrefs: Boolean,
     /**
@@ -74,6 +86,7 @@ data class TorEngineCapabilities(
         val LITTLE_T = TorEngineCapabilities(
             classicControlPlane = true,
             multiSocksSessionGroups = true,
+            socksAuthIsolation = true,
             nativeAutomapDnsPort = true,
             synthesizeOnionAutomap = false,
             newIdentity = true,
@@ -89,12 +102,14 @@ data class TorEngineCapabilities(
         val ARTI = TorEngineCapabilities(
             classicControlPlane = false,
             multiSocksSessionGroups = false,
+            socksAuthIsolation = true,
             nativeAutomapDnsPort = false,
             synthesizeOnionAutomap = true,
             newIdentity = true,
             circuitInspection = false,
             liveSetConf = false,
-            dormantSignals = false,
+            // App-layer synthetic dormant flag (Rust set_dormant not in JNI).
+            dormantSignals = true,
             torrcConfig = false,
             conjureBridges = false,
             nodePrefs = false,

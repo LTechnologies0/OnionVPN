@@ -46,7 +46,11 @@ class TorEnginePortAllocatorTest {
         assertFalse(a.conjureBridges)
         assertFalse(a.nodePrefs)
         assertTrue(a.bridgesAtStart)
+        assertTrue(a.socksAuthIsolation)
+        assertTrue(a.dormantSignals) // app-layer synthetic (set_dormant not in JNI)
         assertTrue(c.nodePrefs)
         assertTrue(c.bridgesAtStart)
+        assertTrue(c.socksAuthIsolation)
+        assertTrue(c.dormantSignals)
     }
 }

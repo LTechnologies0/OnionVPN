@@ -66,13 +66,15 @@ object TorPathValidator {
         }
         val sharedOk = config.contains("shared_socks=1")
         val automapOk = config.contains("synthesize_onion_automap=1")
-        val ok = engineOk && readyOk && socksOk && dnsOk && sharedOk && automapOk
+        val authIsoOk = config.contains("socks_auth_isolation=1") ||
+            !config.contains("socks_auth_isolation=") // older status files
+        val ok = engineOk && readyOk && socksOk && dnsOk && sharedOk && automapOk && authIsoOk
         return ValidationCheck(
             id = "tor.arti.status",
             label = "Arti runtime status",
             status = if (ok) ValidationStatus.Pass else ValidationStatus.Fail,
             detail = "$source: engine=$engineOk ready=$readyOk socks=$socksOk dns=$dnsOk " +
-                "shared=$sharedOk synthAutomap=$automapOk" +
+                "shared=$sharedOk synthAutomap=$automapOk authIso=$authIsoOk" +
                 (if (socksPort != null) " ports=$socksPort/$dnsPort" else ""),
             tripsKillSwitch = !readyOk,
         )

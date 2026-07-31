@@ -781,7 +781,11 @@ class TunnelForegroundService : Service() {
     private fun maybeSignalActive() {
         if (!preferences.torEngine.capabilities.dormantSignals) return
         val st = tor.controlStatus.value
-        if (!tor.control.isConnected) return
+        val controlLive = preferences.torEngine.capabilities.classicControlPlane &&
+            tor.control.isConnected
+        val artiLive = preferences.torEngine == TorEngine.ARTI &&
+            (st.connected || tor.isRunning())
+        if (!controlLive && !artiLive) return
         if (st.dormant || st.lastStabilityAction.isNotBlank()) {
             tor.signalActive()
         }
