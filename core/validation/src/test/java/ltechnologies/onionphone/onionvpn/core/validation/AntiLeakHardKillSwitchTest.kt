@@ -132,12 +132,24 @@ class AntiLeakDnsCryptConfigValidatorTest {
     }
 
     @Test
-    fun missingAlwaysOnLockdownIsSoft() {
+    fun alwaysOnWithoutLockdownIsHard() {
         val check = ValidationCheck(
             id = "android.vpn.always_on",
             label = "Android Always-on VPN lockdown",
             status = ValidationStatus.Fail,
             detail = "Always-on ON but Lockdown OFF",
+            tripsKillSwitch = true,
+        )
+        assertTrue(TunnelValidator.isHardKillSwitchFailure(check))
+    }
+
+    @Test
+    fun missingAlwaysOnStillSoftWhenNotTripping() {
+        val check = ValidationCheck(
+            id = "android.vpn.always_on",
+            label = "Android Always-on VPN lockdown",
+            status = ValidationStatus.Fail,
+            detail = "Settings → enable Always-on + Lockdown",
             tripsKillSwitch = false,
         )
         assertFalse(TunnelValidator.isHardKillSwitchFailure(check))

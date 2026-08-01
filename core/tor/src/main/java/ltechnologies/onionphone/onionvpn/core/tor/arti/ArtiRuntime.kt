@@ -500,7 +500,7 @@ internal class ArtiRuntime(
         const val TIMING_FILE_NAME = "onionvpn_circuit_timing"
         const val PATH_PREFS_FILE_NAME = "onionvpn_path_prefs"
         const val PT_PLUGINS_FILE_NAME = "onionvpn_pt_plugins"
-        private const val STOP_AWAIT_TIMEOUT_MS = 20_000L
+        private const val STOP_AWAIT_TIMEOUT_MS = 45_000L
 
         /** Map UI/C-Tor NewCircuitPeriod → Arti prediction_lifetime (floored). */
         fun artiPredictionLifetimeSec(uiNewCircuitPeriodSec: Int): Int =

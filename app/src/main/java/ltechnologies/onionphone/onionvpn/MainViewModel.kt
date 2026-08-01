@@ -9,12 +9,16 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import java.io.File
 import javax.inject.Inject
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import ltechnologies.onionphone.onionvpn.core.dnscrypt.DnsCryptProcessManager
 import ltechnologies.onionphone.onionvpn.core.model.TunnelPhase
 import ltechnologies.onionphone.onionvpn.core.model.TunnelPreferences
@@ -22,6 +26,7 @@ import ltechnologies.onionphone.onionvpn.core.model.TunnelSnapshot
 import ltechnologies.onionphone.onionvpn.core.tor.TorProcessManager
 import ltechnologies.onionphone.onionvpn.prefs.TunnelPreferencesStore
 import ltechnologies.onionphone.onionvpn.tunnel.TunnelOrchestrator
+import timber.log.Timber
 
 @HiltViewModel
 class MainViewModel @Inject constructor(
@@ -42,6 +47,10 @@ class MainViewModel @Inject constructor(
         initialValue = TunnelPreferences(),
     )
 
+    /** Serializes start/stop/restart/nym so toddler button-mashing cannot interleave. */
+    private val actionMutex = Mutex()
+    private var restartJob: Job? = null
+
     /** First DataStore emission (not the Compose initialValue). */
     suspend fun awaitStoredPreferences(): TunnelPreferences = preferencesStore.preferences.first()
 
@@ -50,7 +59,16 @@ class MainViewModel @Inject constructor(
     fun prepareVpnPermission(activity: Activity): Intent? = VpnService.prepare(activity)
 
     fun startTunnel() {
-        orchestrator.start(preferences.value)
+        viewModelScope.launch {
+            actionMutex.withLock {
+                val snap = snapshot.value
+                if (!snap.canStart) {
+                    Timber.w("startTunnel ignored — phase=%s", snap.phase)
+                    return@withLock
+                }
+                orchestrator.start(preferences.value)
+            }
+        }
     }
 
     /** Idle / Error only — do not interrupt Connected, Blocking, or in-flight start. */
@@ -63,25 +81,50 @@ class MainViewModel @Inject constructor(
     }
 
     fun stopTunnel() {
-        orchestrator.stop()
+        viewModelScope.launch {
+            actionMutex.withLock {
+                val snap = snapshot.value
+                if (!snap.canStop) {
+                    Timber.w("stopTunnel ignored — phase=%s", snap.phase)
+                    return@withLock
+                }
+                restartJob?.cancel()
+                restartJob = null
+                orchestrator.stop()
+            }
+        }
     }
 
     fun newNym() {
-        orchestrator.newNym()
+        viewModelScope.launch {
+            actionMutex.withLock {
+                val snap = snapshot.value
+                if (!snap.canNewNym) {
+                    Timber.w(
+                        "newNym ignored — phase=%s refreshing=%s",
+                        snap.phase,
+                        snap.identityRefreshing,
+                    )
+                    return@withLock
+                }
+                orchestrator.newNym()
+            }
+        }
     }
 
     fun savePreferences(prefs: TunnelPreferences, restartIfConnected: Boolean = true) {
         viewModelScope.launch {
-            preferencesStore.update { prefs }
-            when {
-                restartIfConnected && snapshot.value.phase == TunnelPhase.Connected -> {
-                    orchestrator.stop()
-                    kotlinx.coroutines.delay(750)
-                    orchestrator.start(prefs)
-                }
-                snapshot.value.phase == TunnelPhase.Connected -> {
-                    // Dirtiness / NewCircuitPeriod apply live via ControlPort SETCONF.
-                    orchestrator.applyCircuitTiming(prefs)
+            actionMutex.withLock {
+                preferencesStore.update { prefs }
+                val phase = snapshot.value.phase
+                when {
+                    restartIfConnected &&
+                        (phase == TunnelPhase.Connected || phase == TunnelPhase.Blocking) -> {
+                        enqueueRestartLocked(prefs)
+                    }
+                    phase == TunnelPhase.Connected -> {
+                        orchestrator.applyCircuitTiming(prefs)
+                    }
                 }
             }
         }
@@ -97,22 +140,58 @@ class MainViewModel @Inject constructor(
 
     fun saveTorrc(content: String) {
         viewModelScope.launch {
-            withContext(Dispatchers.IO) { writeConfigFile(tor.torrcFile, content) }
-            if (snapshot.value.phase == TunnelPhase.Connected) {
-                orchestrator.stop()
-                kotlinx.coroutines.delay(750)
-                orchestrator.start(preferences.value)
+            actionMutex.withLock {
+                withContext(Dispatchers.IO) { writeConfigFile(tor.torrcFile, content) }
+                if (snapshot.value.phase == TunnelPhase.Connected ||
+                    snapshot.value.phase == TunnelPhase.Blocking
+                ) {
+                    enqueueRestartLocked(preferences.value)
+                }
             }
         }
     }
 
     fun saveDnsCryptToml(content: String) {
         viewModelScope.launch {
-            withContext(Dispatchers.IO) { writeConfigFile(dnsCrypt.configFile, content) }
-            if (snapshot.value.phase == TunnelPhase.Connected) {
+            actionMutex.withLock {
+                withContext(Dispatchers.IO) { writeConfigFile(dnsCrypt.configFile, content) }
+                if (snapshot.value.phase == TunnelPhase.Connected ||
+                    snapshot.value.phase == TunnelPhase.Blocking
+                ) {
+                    enqueueRestartLocked(preferences.value)
+                }
+            }
+        }
+    }
+
+    /**
+     * Coalesce stop→start: cancel any pending restart wait, stop once, wait for Idle, then start.
+     * Must be called under [actionMutex].
+     */
+    private fun enqueueRestartLocked(prefs: TunnelPreferences) {
+        restartJob?.cancel()
+        restartJob = viewModelScope.launch {
+            try {
+                Timber.i("Coalesced tunnel restart begin")
                 orchestrator.stop()
-                kotlinx.coroutines.delay(750)
-                orchestrator.start(preferences.value)
+                val idle = withTimeoutOrNull(20_000L) {
+                    snapshot.first {
+                        it.phase == TunnelPhase.Idle || it.phase == TunnelPhase.Error
+                    }
+                }
+                if (idle == null) {
+                    Timber.w("Restart wait timed out — starting anyway")
+                }
+                kotlinx.coroutines.delay(400)
+                actionMutex.withLock {
+                    if (snapshot.value.canStart) {
+                        orchestrator.start(prefs)
+                    } else {
+                        Timber.w("Restart aborted — phase=%s", snapshot.value.phase)
+                    }
+                }
+            } catch (e: Exception) {
+                Timber.w(e, "Coalesced restart cancelled or failed")
             }
         }
     }

@@ -29,11 +29,12 @@ class TorConfigWriterTest {
         assertTrue(torrc.contains("IsolateClientProtocol"))
         assertTrue(torrc.contains("IsolateDestAddr"))
         assertTrue(torrc.contains("IsolateSOCKSAuth"))
-        assertTrue(torrc.contains("MaxClientCircuitsPending 48"))
+        assertTrue(torrc.contains("MaxClientCircuitsPending 96"))
         assertTrue(torrc.contains("MaxCircuitDirtiness 600"))
         assertTrue(torrc.contains("NumEntryGuards 2"))
         assertTrue(torrc.contains("NumPrimaryGuards 2"))
         assertTrue(torrc.contains("DormantClientTimeout 30 minutes"))
+        assertTrue(torrc.contains("KeepalivePeriod 150"))
 
         val appLine = torrc.lineSequence().first {
             it.startsWith("SOCKSPort ") &&
@@ -42,6 +43,10 @@ class TorConfigWriterTest {
         assertTrue(
             "KeepAliveIsolateSOCKSAuth required for per-UID strong isolation tokens",
             appLine.contains("KeepAliveIsolateSOCKSAuth"),
+        )
+        assertTrue(
+            "IPv6Traffic required for onion/IPv6; PreferIPv6 must stay off (exit AAAA SSL stalls)",
+            appLine.contains("IPv6Traffic") && !appLine.contains("PreferIPv6"),
         )
         assertFalse(
             "Apps SocksPort must omit IsolateDestPort (circuit storm / Whonix #3455)",

@@ -71,14 +71,14 @@ class MoatCircumventionClientTest {
                 MoatCircumventionClient.BridgeSetting(
                     type = "obfs4",
                     source = "bridgedb",
-                    bridgeStrings = listOf("obfs4 1.2.3.4:443 FPR cert=x iat-mode=0"),
+                    bridgeStrings = listOf("obfs4 192.0.2.1:443 FPR cert=x iat-mode=0"),
                 ),
             ),
             country = null,
             fromDefaults = true,
         )
         assertEquals(
-            listOf("obfs4 1.2.3.4:443 FPR cert=x iat-mode=0"),
+            listOf("obfs4 192.0.2.1:443 FPR cert=x iat-mode=0"),
             MoatCircumventionClient.pickLines(result, null),
         )
     }

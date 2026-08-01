@@ -1,11 +1,14 @@
 package ltechnologies.onionphone.onionvpn.core.vpn.dns
 
 import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class OnionAutomapRoutingTest {
+    private val ddgOnion = TunnelEndpoints.WELL_KNOWN_ONION_DDG
+
     @Test
     fun automapVirtualPool_matchesTorVirtualAddrNetworkSlash10() {
         assertTrue(TunnelEndpoints.isAutomapVirtualIpv4("10.192.0.1"))
@@ -18,44 +21,58 @@ class OnionAutomapRoutingTest {
     }
 
     @Test
-    fun onionLikeHostnames_neverGoToDnsCrypt() {
-        assertTrue(TunnelEndpoints.isOnionLikeHostname("duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion"))
-        assertTrue(TunnelEndpoints.isOnionLikeHostname("example.onion."))
-        assertTrue(TunnelEndpoints.isOnionLikeHostname("www.example.com.exit"))
+    fun realOnion_routesToAutomap_fakeOnionRejectedByValidator() {
+        assertTrue(TunnelEndpoints.isValidOnionHostname(ddgOnion))
+        assertTrue(TunnelEndpoints.isOnionLikeHostname(ddgOnion))
+        assertTrue(TunnelEndpoints.isOnionLikeHostname("$ddgOnion."))
+        assertFalse(TunnelEndpoints.isValidOnionHostname("example.onion"))
+        assertFalse(TunnelEndpoints.isValidOnionHostname("adb.onion"))
         assertFalse(TunnelEndpoints.isOnionLikeHostname("example.com"))
         assertFalse(TunnelEndpoints.isOnionLikeHostname("onion.com"))
         assertFalse(TunnelEndpoints.isOnionLikeHostname(""))
     }
 
     @Test
-    fun hostnameCache_mapsAutomapIpToOnionForSocks5a() {
+    fun hostnameCache_mapsAutomapIpToRealOnionForSocks5a() {
         DnsHostnameCache.clear()
-        DnsHostnameCache.put("10.192.0.42", "abc.onion")
-        assertTrue(TunnelEndpoints.isOnionLikeHostname(DnsHostnameCache.lookup("10.192.0.42")!!))
+        DnsHostnameCache.put("10.192.0.42", ddgOnion)
+        val cached = DnsHostnameCache.lookup("10.192.0.42")!!
+        assertTrue(TunnelEndpoints.isValidOnionHostname(cached))
+        assertTrue(TunnelEndpoints.isOnionLikeHostname(cached))
         DnsHostnameCache.clear()
     }
 
     @Test
-    fun artiAutomapAllocator_stableVirtualIpInTorPool() {
+    fun artiAutomapAllocator_stableVirtualIpForRealOnion() {
         OnionAutomapAllocator.clear()
         DnsHostnameCache.clear()
-        val a = OnionAutomapAllocator.ipv4ForHostname("abc.onion")
-        val b = OnionAutomapAllocator.ipv4ForHostname("abc.onion")
-        assertTrue(a == b)
+        val a = OnionAutomapAllocator.ipv4ForHostname(ddgOnion)
+        val b = OnionAutomapAllocator.ipv4ForHostname(ddgOnion)
+        assertEquals(a, b)
         assertTrue(TunnelEndpoints.isAutomapVirtualIpv4(a))
-        assertTrue(DnsHostnameCache.lookup(a) == "abc.onion")
+        assertEquals(ddgOnion, DnsHostnameCache.lookup(a))
+
+        val qname = encodeDnsName(ddgOnion)
         val dns = byteArrayOf(
             0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x03, 'a'.code.toByte(), 'b'.code.toByte(), 'c'.code.toByte(),
-            0x05, 'o'.code.toByte(), 'n'.code.toByte(), 'i'.code.toByte(),
-            'o'.code.toByte(), 'n'.code.toByte(), 0x00,
-            0x00, 0x01, 0x00, 0x01,
-        )
+        ) + qname + byteArrayOf(0x00, 0x01, 0x00, 0x01)
         val resp = DnsOnionAutomapReply.buildAResponse(dns, 0, dns.size, a)
         assertTrue(resp != null && resp!!.size > dns.size)
         val parsed = DnsPacketParser.parse(resp!!, 0, resp.size)
         assertTrue(parsed != null && parsed!!.aRecords.contains(a))
         OnionAutomapAllocator.clear()
         DnsHostnameCache.clear()
+    }
+
+    private fun encodeDnsName(hostname: String): ByteArray {
+        val labels = hostname.trimEnd('.').lowercase().split('.')
+        val out = ArrayList<Byte>()
+        for (label in labels) {
+            require(label.length in 1..63)
+            out.add(label.length.toByte())
+            for (c in label) out.add(c.code.toByte())
+        }
+        out.add(0)
+        return out.toByteArray()
     }
 }

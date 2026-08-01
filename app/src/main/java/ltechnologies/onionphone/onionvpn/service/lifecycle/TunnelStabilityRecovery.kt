@@ -24,24 +24,30 @@ internal class TunnelStabilityRecovery(
     fun maybeApply(st: TorControlStatus) {
         // Classic control-plane events only exist on C Tor.
         if (tor.engine == TorEngine.ARTI) return
+        // DisableNetwork bounce / overlapping recover must not stack with NEWNYM.
+        if (tor.isInMaintenance) return
         val actionName = st.lastStabilityAction
         if (actionName.isBlank()) return
         val action = runCatching { StabilityAction.valueOf(actionName) }.getOrNull() ?: return
         if (action != StabilityAction.SOFT_RECOVER && action != StabilityAction.HARD_RECOVER) return
         val code = st.lastStabilityCode
         val now = System.currentTimeMillis()
-        val codeChanged = code != lastHandledStabilityCode
-        if (!codeChanged && now - lastStabilityRecoverMs < cooldownMs) {
-            return
-        }
+        // Edge-trigger only: sticky lastStabilityAction must not re-fire every cooldown.
+        if (code.isBlank() || code == lastHandledStabilityCode) return
         if (now - lastStabilityRecoverMs < cooldownMs) return
-        lastStabilityRecoverMs = now
         lastHandledStabilityCode = code
         when (action) {
             StabilityAction.HARD_RECOVER -> {
                 OpTrace.warn("stability", "HARD_RECOVER code=$code")
                 Timber.w("Stability HARD_RECOVER code=%s", code)
                 scope.launch {
+                    if (tor.isInMaintenance) {
+                        Timber.i("Stability HARD_RECOVER deferred — Tor maintenance")
+                        // Allow re-arm after maintenance (same code, fresh edge).
+                        lastHandledStabilityCode = ""
+                        return@launch
+                    }
+                    lastStabilityRecoverMs = System.currentTimeMillis()
                     tor.recoverNetworkHard().onFailure {
                         OpTrace.warn("stability", "HARD_RECOVER failed — soft fallback", it)
                         Timber.w(it, "Stability HARD_RECOVER failed — falling back to soft")
@@ -52,7 +58,10 @@ internal class TunnelStabilityRecovery(
             StabilityAction.SOFT_RECOVER -> {
                 OpTrace.info("stability", "SOFT_RECOVER code=$code")
                 Timber.i("Stability SOFT_RECOVER code=%s", code)
-                tor.onNetworkChanged()
+                lastStabilityRecoverMs = now
+                scope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                    tor.onNetworkChanged()
+                }
             }
             else -> Unit
         }

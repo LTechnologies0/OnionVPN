@@ -57,7 +57,7 @@ class AntiLeakTorrcTest(private val requiredSubstring: String) {
             "SessionGroup=${TunnelEndpoints.SESSION_GROUP_DNSCRYPT}",
             "SessionGroup=${TunnelEndpoints.SESSION_GROUP_PROBE}",
             "SessionGroup=${TunnelEndpoints.SESSION_GROUP_DNS}",
-            "MaxClientCircuitsPending 48",
+            "MaxClientCircuitsPending 96",
             "VanguardsLiteEnabled 1",
             "WarnPlaintextPorts 23,109,110,143",
             "RejectPlaintextPorts 23,109",
@@ -65,13 +65,14 @@ class AntiLeakTorrcTest(private val requiredSubstring: String) {
             "DownloadExtraInfo 0",
             "ClientPreferIPv6ORPort 0",
             "ClientUseIPv6 1",
-            "VirtualAddrNetworkIPv6 [FC00::]/7",
+            "VirtualAddrNetworkIPv6 [fd12:4e4b:6f6e::]/48",
             "EnforceDistinctSubnets 1",
             "NumEntryGuards 2",
             "NumPrimaryGuards 2",
             "NumDirectoryGuards 3",
             "CircuitPadding 1",
             "ConnectionPadding auto",
+            "KeepalivePeriod 150",
         ).map { arrayOf(it) }
     }
 }
@@ -86,6 +87,8 @@ class AntiLeakTorrcIsolationTest {
         assertFalse(apps.contains("IsolateDestPort"))
         assertFalse(apps.contains("IsolateDestAddr"))
         assertTrue(apps.contains("KeepAliveIsolateSOCKSAuth"))
+        assertTrue(apps.contains("IPv6Traffic"))
+        assertFalse(apps.contains("PreferIPv6"))
     }
 
     @Test

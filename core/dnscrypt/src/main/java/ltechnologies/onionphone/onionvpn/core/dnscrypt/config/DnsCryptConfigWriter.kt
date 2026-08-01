@@ -27,7 +27,11 @@ object DnsCryptConfigWriter {
         get() = DnsCryptPublicResolvers.knownServers
 
     /**
-     * Hostnames blocked to reduce DoH/DoT/captive/OEM side-channels over tunnel DNS.
+     * Hostnames blocked to reduce DoH/DoT/captive side-channels over tunnel DNS.
+     *
+     * Do **not** block Google Play / FCM API hosts (`android.googleapis.com`,
+     * `play.googleapis.com`, `mtalk.google.com`, …) — Signal, Twitter/X, and most
+     * Android apps need them for push and API. Captive-portal probes only.
      */
     fun blockedNamesFileContent(): String = """
         ####################
@@ -54,23 +58,14 @@ object DnsCryptConfigWriter {
         # Captive portals  #
         ####################
         connectivitycheck.gstatic.com
-        www.gstatic.com
-        clients3.google.com
-        clients1.google.com
+        connectivitycheck.android.com
         captive.apple.com
-        www.apple.com
         www.msftconnecttest.com
         msftncsi.com
         www.msftncsi.com
         detectportal.firefox.com
         network-test.debian.org
         neverssl.com
-        ####################
-        # OEM / Android    #
-        ####################
-        connectivitycheck.android.com
-        android.googleapis.com
-        play.googleapis.com
     """.trimIndent() + "\n"
 
     /**
@@ -119,8 +114,10 @@ object DnsCryptConfigWriter {
             listen_addresses = ['${TunnelEndpoints.LOOPBACK}:$listenPort']
             max_clients = 128
             ipv4_servers = true
-            ipv6_servers = true
-            block_ipv6 = false
+            ipv6_servers = false
+            # AAAA answers make apps Happy-Eyeballs onto IPv6 TUN (Signal/WhatsApp).
+            # Tor exits + hev IPv6 are slower/flakier than IPv4 — force A-only.
+            block_ipv6 = true
             dnscrypt_ephemeral_keys = true
             tls_disable_session_tickets = true
             tls_cipher_suite = [52393, 49199]
@@ -131,7 +128,9 @@ object DnsCryptConfigWriter {
 
             # Always TCP through Tor SOCKS — UDP ASSOCIATE is not a safe DNSCrypt-over-Tor path.
             force_tcp = true
-            timeout = 18000
+            # DNSCrypt-over-Tor needs headroom; Tor SocksTimeout default is 120s.
+            # Keep below TunDnsMux DNS_TIMEOUT so the mux can retry once.
+            timeout = 25000
             keepalive = 30
             cert_refresh_delay = 240
 
@@ -142,7 +141,8 @@ object DnsCryptConfigWriter {
             bootstrap_resolvers = ['$bootstrap']
             ignore_system_dns = true
             netprobe_address = '$bootstrap'
-            netprobe_timeout = 500
+            # Tor DNSPort on cold start can exceed 500ms; fail-open probe must wait.
+            netprobe_timeout = 5000
 
             # Local cache cuts repeat lookups over Tor (double-hop DNSCrypt path).
             cache = true

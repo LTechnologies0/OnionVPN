@@ -138,9 +138,9 @@ internal object TorControlEventParser {
                     status.copy(
                         failedCircuitsRecent = status.failedCircuitsRecent + 1,
                         lastCircEvent = "$st $id ${reason.orEmpty()}".trim(),
-                        lastStabilityAction = signal?.let { meaningfulAction(it) }
-                            ?.ifEmpty { status.lastStabilityAction }
-                            ?: status.lastStabilityAction,
+                        // Do not sticky-preserve SOFT/HARD — recovery edge-triggers on code.
+                        lastStabilityAction = signal?.let { meaningfulAction(it) }.orEmpty()
+                            .ifEmpty { status.lastStabilityAction },
                         lastStabilityCode = if (signal != null && signal.action != StabilityAction.NONE) {
                             signal.code
                         } else {
@@ -212,7 +212,11 @@ internal object TorControlEventParser {
             event = TorControlEvent.OrConn(target, st, reason),
             statusPatch = { status ->
                 if (st == "CONNECTED") {
-                    status.copy(orConnCount = status.orConnCount + 1)
+                    status.copy(
+                        orConnCount = status.orConnCount + 1,
+                        lastStabilityAction = "",
+                        lastStabilityCode = "",
+                    )
                 } else {
                     val signal = StabilityClassifier.forOrConnReason(reason)
                     status.copy(

@@ -28,6 +28,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import ltechnologies.onionphone.onionvpn.core.model.DomainThreatCategory
 import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
+import ltechnologies.onionphone.onionvpn.core.model.observability.MemoryHygiene
 import ltechnologies.onionphone.onionvpn.core.tor.TorProcessManager
 import ltechnologies.onionphone.onionvpn.core.validation.path.TorSocksDns
 import okhttp3.Call
@@ -184,6 +185,7 @@ class DomainReputationRepository @Inject constructor(
                     sourcesOk,
                     viaTor,
                 )
+                MemoryHygiene.afterHeavyWork("domain_reputation_merge")
             }.onFailure { error ->
                 val aborted = error.message?.contains("SOCKS", ignoreCase = true) == true ||
                     error.message?.contains("cancelled", ignoreCase = true) == true

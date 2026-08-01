@@ -3,6 +3,7 @@ package ltechnologies.onionphone.onionvpn.core.tor.lifecycle
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
+import java.net.InetSocketAddress
 import java.nio.ByteBuffer
 import java.util.concurrent.ThreadLocalRandom
 import kotlin.math.min
@@ -24,9 +25,12 @@ object TorDnsResolve {
         val host = hostname.trim().trimEnd('.').lowercase()
         require(host.isNotEmpty()) { "empty hostname" }
         require(!host.contains(' ')) { "invalid hostname" }
-        val query = buildQuery(host)
-        DatagramSocket().use { sock ->
+        val id = ThreadLocalRandom.current().nextInt(0, 0xFFFF)
+        val query = buildQuery(host, id)
+        DatagramSocket(null).use { sock ->
             sock.soTimeout = timeoutMs.coerceIn(500, 60_000)
+            // Bind loopback so we never accept spoofed answers from other interfaces.
+            sock.bind(InetSocketAddress(InetAddress.getByName(dnsHost), 0))
             sock.send(
                 DatagramPacket(
                     query,
@@ -37,14 +41,31 @@ object TorDnsResolve {
             )
             val buf = ByteArray(512)
             val resp = DatagramPacket(buf, buf.size)
-            sock.receive(resp)
-            return parseFirstA(buf, resp.length)
-                ?: throw IllegalStateException("DNSPort returned no A for $host")
+            val deadlineNs = System.nanoTime() + sock.soTimeout * 1_000_000L
+            while (System.nanoTime() < deadlineNs) {
+                val remaining = ((deadlineNs - System.nanoTime()) / 1_000_000L).coerceAtLeast(1L)
+                sock.soTimeout = remaining.toInt()
+                try {
+                    sock.receive(resp)
+                } catch (_: java.net.SocketTimeoutException) {
+                    break
+                }
+                if (resp.length < 12) continue
+                val respId = ((buf[0].toInt() and 0xff) shl 8) or (buf[1].toInt() and 0xff)
+                if (respId != id) continue
+                val flags = ((buf[2].toInt() and 0xff) shl 8) or (buf[3].toInt() and 0xff)
+                if (flags and 0x8000 == 0) continue // QR must be response
+                if (flags and 0x000f != 0) {
+                    throw IllegalStateException("DNSPort RCODE=${flags and 0x000f} for $host")
+                }
+                return parseFirstA(buf, resp.length)
+                    ?: throw IllegalStateException("DNSPort returned no A for $host")
+            }
+            throw IllegalStateException("DNSPort timeout/no matching TXID for $host")
         }
     }
 
-    private fun buildQuery(hostname: String): ByteArray {
-        val id = ThreadLocalRandom.current().nextInt(0, 0xFFFF)
+    private fun buildQuery(hostname: String, id: Int): ByteArray {
         val labels = hostname.split('.').filter { it.isNotEmpty() }
         val nameLen = labels.sumOf { 1 + it.length } + 1
         val packet = ByteArray(12 + nameLen + 4)

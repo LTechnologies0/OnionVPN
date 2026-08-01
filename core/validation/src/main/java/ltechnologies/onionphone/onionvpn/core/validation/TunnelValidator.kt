@@ -237,8 +237,8 @@ object TunnelValidator {
             // OS Private DNS DoT actually active / forced hostname (Tor VPN §5.2.4).
             // tripsKillSwitch set by SystemLeakInspector — opportunistic-only is Soft.
             "android.dns.private" -> true
-            // Another app owns Always-on (tripsKillSwitch set by inspector). Missing
-            // Lockdown is Soft — must not blackhole working Tor.
+            // Another app owns Always-on, or Always-on without Lockdown (tripsKillSwitch).
+            // Missing Always-on entirely stays Soft (user has not opted into OS Lockdown yet).
             "android.vpn.always_on" -> true
             // VPN iface shows a public/ISP address (not OnionVPN virtual gateway).
             "vpn.address.not.public" -> true

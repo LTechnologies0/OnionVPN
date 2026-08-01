@@ -7,15 +7,19 @@ import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.Proxy
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import ltechnologies.onionphone.onionvpn.core.model.TorEngine
 import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
 import ltechnologies.onionphone.onionvpn.core.model.TunnelFailure
 import ltechnologies.onionphone.onionvpn.core.model.TunnelPreferences
 import ltechnologies.onionphone.onionvpn.core.model.TunnelRuntimePorts
+import ltechnologies.onionphone.onionvpn.core.model.observability.MemoryHygiene
 import ltechnologies.onionphone.onionvpn.core.model.observability.OpTrace
 import ltechnologies.onionphone.onionvpn.core.model.stability.ProcessLogLevel
 import ltechnologies.onionphone.onionvpn.core.tor.arti.ArtiRuntime
@@ -30,6 +34,7 @@ import ltechnologies.onionphone.onionvpn.core.tor.lifecycle.TorReadiness
 import okhttp3.Dns
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import org.torproject.arti.ArtiControlNative
 import timber.log.Timber
 
 /**
@@ -74,6 +79,34 @@ class TorProcessManager(
      */
     @Volatile
     private var artiDormant: Boolean = false
+
+    /**
+     * Depth of intentional Tor downtime (NEWNYM / hard restart / DisableNetwork bounce).
+     * Periodic kill-switch validation and forwarder watchdog must not treat SOCKS refusal
+     * as a leak while this is > 0.
+     */
+    private val maintenanceDepth = AtomicInteger(0)
+
+    /** Serializes Arti stop/start and C Tor DisableNetwork bounce (no concurrent restarts). */
+    private val downtimeMutex = Mutex()
+
+    /** True while Tor is mid intentional downtime (SOCKS briefly down by design). */
+    val isInMaintenance: Boolean
+        get() = maintenanceDepth.get() > 0
+
+    /**
+     * Run [block] under maintenance + exclusive downtime lock.
+     * Nested callers queue on the mutex (safe; avoids overlapping Arti JNI restarts).
+     */
+    private suspend fun <T> withTorDowntime(block: suspend () -> T): T =
+        downtimeMutex.withLock {
+            maintenanceDepth.incrementAndGet()
+            try {
+                block()
+            } finally {
+                maintenanceDepth.decrementAndGet()
+            }
+        }
 
     /**
      * Public control session — prefer this over adding more manager wrappers.
@@ -287,9 +320,11 @@ class TorProcessManager(
                     )
                 }
                 runCatching {
-                    arti.restartForNewIdentity()
-                    clearAppDnsCaches()
-                    publishArtiReadyStatus()
+                    withTorDowntime {
+                        arti.restartForNewIdentity()
+                        clearAppDnsCaches()
+                        publishArtiReadyStatus()
+                    }
                 }.fold(
                     onSuccess = {
                         lastArtiNewNymMs = System.currentTimeMillis()
@@ -306,10 +341,24 @@ class TorProcessManager(
                 if (!control.isConnected) {
                     return@withContext Result.failure(IOException("control not connected"))
                 }
-                control.newNym().also {
-                    it.onSuccess { Timber.i("SIGNAL NEWNYM accepted") }
-                    it.onFailure { e -> Timber.w(e, "NEWNYM failed") }
-                }
+                // Holdoff so validation/watchdog don't treat circuit rebuild as a leak.
+                runCatching {
+                    withTorDowntime {
+                        control.newNym().getOrThrow()
+                        clearAppDnsCaches()
+                        // Brief settle — NEWNYM does not drop SOCKS but streams rebuild.
+                        kotlinx.coroutines.delay(NEWNYM_SETTLE_MS)
+                    }
+                }.fold(
+                    onSuccess = {
+                        Timber.i("SIGNAL NEWNYM accepted")
+                        Result.success(Unit)
+                    },
+                    onFailure = { e ->
+                        Timber.w(e, "NEWNYM failed")
+                        Result.failure(e)
+                    },
+                )
             }
         }
     }
@@ -411,9 +460,11 @@ class TorProcessManager(
         )
         if (activeEngine == TorEngine.ARTI) {
             val applied = arti.applyCircuitTimingLive(maxCircuitDirtinessSec, newCircuitPeriodSec)
+            val predApplied = ArtiRuntime.artiPredictionLifetimeSec(newCircuitPeriodSec)
             Timber.i(
-                "Arti circuit timing dirt=%ds prediction_lifetime=%ds applied=%s",
+                "Arti circuit timing dirt=%ds prediction_lifetime=%ds (ui NewCircuitPeriod=%ds) applied=%s",
                 maxCircuitDirtinessSec,
+                predApplied,
                 newCircuitPeriodSec,
                 applied,
             )
@@ -477,6 +528,10 @@ class TorProcessManager(
      */
     fun onNetworkChanged(): Result<Unit> {
         if (activeEngine == TorEngine.ARTI) {
+            // Orbot #1471: after net flip Tor must wake; Arti has no DROPTIMEOUTS —
+            // set_dormant(Normal) + re-probe listeners is the soft equivalent.
+            arti.setDormantNative(soft = false)
+            clearAppDnsCaches()
             publishArtiReadyStatus()
             val ok = runtimePorts?.let { TorReadiness.areSocksPortsReady(it) } == true
             Timber.i("Arti network change soft recovery socksReady=%s", ok)
@@ -501,9 +556,11 @@ class TorProcessManager(
         when (activeEngine) {
             TorEngine.ARTI -> {
                 runCatching {
-                    arti.restartHard()
-                    clearAppDnsCaches()
-                    publishArtiReadyStatus()
+                    withTorDowntime {
+                        arti.restartHard()
+                        clearAppDnsCaches()
+                        publishArtiReadyStatus()
+                    }
                 }.fold(
                     onSuccess = {
                         Timber.w("Arti network recovery HARD: runtime restart")
@@ -519,13 +576,16 @@ class TorProcessManager(
                 if (!control.isConnected) {
                     return@withContext Result.failure(IOException("control not connected"))
                 }
-                control.dropTimeouts().onFailure { Timber.w(it, "DROPTIMEOUTS failed") }
-                control.setDisableNetwork(true).onFailure { Timber.w(it, "DisableNetwork=1 failed") }
-                control.setDisableNetwork(false).onFailure { Timber.w(it, "DisableNetwork=0 failed") }
-                val active = control.setActive()
-                control.clearDnsCache().onFailure { Timber.w(it, "CLEARDNSCACHE failed") }
-                control.refreshHealthLite()
-                active.also {
+                // DisableNetwork bounce drops listeners briefly — same race as Arti NEWNYM.
+                withTorDowntime {
+                    control.dropTimeouts().onFailure { Timber.w(it, "DROPTIMEOUTS failed") }
+                    control.setDisableNetwork(true).onFailure { Timber.w(it, "DisableNetwork=1 failed") }
+                    control.setDisableNetwork(false).onFailure { Timber.w(it, "DisableNetwork=0 failed") }
+                    val active = control.setActive()
+                    control.clearDnsCache().onFailure { Timber.w(it, "CLEARDNSCACHE failed") }
+                    control.refreshHealthLite()
+                    active
+                }.also {
                     it.onSuccess {
                         Timber.w(
                             "Tor network recovery HARD: DROPTIMEOUTS+DisableNetwork bounce+ACTIVE+CLEARDNSCACHE",
@@ -574,9 +634,11 @@ class TorProcessManager(
                 return@withContext Result.failure(IOException("Arti not running"))
             }
             return@withContext runCatching {
-                arti.restartWithPreferences(preferences)
-                clearAppDnsCaches()
-                publishArtiReadyStatus()
+                withTorDowntime {
+                    arti.restartWithPreferences(preferences)
+                    clearAppDnsCaches()
+                    publishArtiReadyStatus()
+                }
             }.fold(
                 onSuccess = {
                     Timber.i("Arti bridges applied via restart")
@@ -691,17 +753,22 @@ class TorProcessManager(
         val socksUp = runtimePorts?.let { TorReadiness.areSocksPortsReady(it) } == true
         val frac = arti.bootstrapFractionOrNull()
         val nativeReady = arti.readyForTrafficNative()
+        // Prefer Ext JNI ready_for_traffic / bootstrap frac — never treat SOCKS accept alone
+        // as "bootstrapped 100%" (listeners can be up before consensus).
         val ready = when {
             artiDormant -> false
+            !arti.isRunning() || !socksUp -> false
             nativeReady -> true
-            frac != null && frac >= 0.99f && socksUp && arti.isRunning() -> true
-            else -> socksUp && arti.isRunning() && !artiDormant
+            frac != null && frac >= 0.99f -> true
+            // Stock AAR without Ext: DNSPort answer is the bootstrap proxy (waitForListeners).
+            frac == null && !ArtiControlNative.isAvailable() -> socksUp
+            else -> false
         }
         val bootPct = when {
             ready -> 100
             frac != null -> (frac * 100f).toInt().coerceIn(0, 99)
-            arti.isRunning() && socksUp -> 100
-            arti.isRunning() -> 50
+            arti.isRunning() && socksUp -> 50
+            arti.isRunning() -> 25
             else -> 0
         }
         // connected=true = runtime healthy (UI bootstrap). Circuits stay 0 — no control plane.
@@ -714,7 +781,7 @@ class TorProcessManager(
                     append(ArtiRuntime.ARTI_CLIENT_VERSION)
                     if (arti.hasControlApi()) {
                         append("; control-api=")
-                        append(org.torproject.arti.ArtiControlNative.controlApiVersion())
+                        append(ArtiControlNative.controlApiVersion())
                     }
                     append(')')
                 },
@@ -1093,6 +1160,7 @@ class TorProcessManager(
         logThread = null
         runtimePorts = null
         runCatching { controlSocketFile.delete() }
+        MemoryHygiene.afterHeavyWork("tor_stop")
     }
 
     private fun killOrphanedProcesses() {
@@ -1108,6 +1176,8 @@ class TorProcessManager(
 
         /** Match C Tor [TorControlOperations.NEWNYM_MIN_INTERVAL_MS] (~10.5s). */
         private const val ARTI_NEWNYM_MIN_INTERVAL_MS = 10_500L
+        /** Brief maintenance hold after SIGNAL NEWNYM while circuits rebuild. */
+        private const val NEWNYM_SETTLE_MS = 2_500L
 
         /**
          * SOCKS5h: unresolved host so Tor resolves the name (no local clearnet DNS).

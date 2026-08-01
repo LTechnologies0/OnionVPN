@@ -25,6 +25,80 @@ enum class TorEngine {
             ARTI -> TorEngineCapabilities.ARTI
         }
 
+    /**
+     * Settings Tor section subtitle — derived only from [capabilities]
+     * so copy cannot drift from the feature matrix.
+     */
+    fun settingsSubtitle(): String {
+        val c = capabilities
+        return buildString {
+            when {
+                c.classicControlPlane && c.liveSetConf ->
+                    append(
+                        "Circuit rotation via ControlPort SETCONF (path-spec). " +
+                            "Live MaxCircuitDirtiness / NewCircuitPeriod when connected.",
+                    )
+                c.liveCircuitTiming && !c.liveSetConf ->
+                    append(
+                        "Circuit timing via Ext JNI: max_dirtiness + prediction_lifetime " +
+                            "(floored ≥3600s; not a 1:1 NewCircuitPeriod map).",
+                    )
+                else -> append("Circuit timing applied at engine start.")
+            }
+            append(' ')
+            when {
+                c.nativeAutomapDnsPort -> append("Native DNSPort Automap. ")
+                c.synthesizeOnionAutomap -> append("App-side Automap synth for .onion/.exit. ")
+            }
+            if (c.socksAuthIsolation) {
+                append(
+                    if (c.multiSocksSessionGroups) {
+                        "Per-UID SOCKS-auth + distinct SessionGroup SocksPorts. "
+                    } else {
+                        "Per-UID SOCKS-auth on a shared SocksPort (no SessionGroups). "
+                    },
+                )
+            }
+            if (c.conjureBridges) {
+                append("Lyrebird + Conjure PTs. ")
+            } else {
+                append("Lyrebird PTs (no Conjure). ")
+            }
+            when {
+                c.nodePrefs -> append("Full Entry/Exit/ExcludeNodes. ")
+                c.exitCountryPrefs -> append("Single-country ExitNodes only. ")
+                else -> append("No node country prefs. ")
+            }
+            if (!c.circuitInspection) append("No circuits UI. ")
+            when {
+                c.liveSetConf -> append("Bridges/nodes can apply live when connected.")
+                c.bridgesAtStart -> append("Bridges/NEWNYM/RELOAD need tunnel restart.")
+            }
+        }.trim()
+    }
+
+    /** Short blurb under the C Tor / Arti engine chips. */
+    fun enginePickerHint(): String {
+        val c = capabilities
+        return buildString {
+            append("Choose which Tor client the tunnel launches. ")
+            append(displayName)
+            append(": ")
+            when {
+                c.classicControlPlane && c.torrcConfig ->
+                    append("full ControlPort + torrc feature set")
+                else ->
+                    append("SOCKS+DNS routing with capability-gated gaps")
+            }
+            if (!c.multiSocksSessionGroups) append("; shared SocksPort")
+            if (!c.circuitInspection) append("; no circuits UI")
+            if (c.conjureBridges) append("; Conjure supported")
+            else append("; no Conjure")
+            if (c.exitCountryPrefs && !c.nodePrefs) append("; Exit country only")
+            append(". Changing engine restarts the tunnel.")
+        }
+    }
+
     companion object {
         fun fromPreference(raw: String?): TorEngine =
             entries.firstOrNull { it.name.equals(raw, ignoreCase = true) } ?: LITTLE_T

@@ -68,9 +68,14 @@ fun SettingsScreen(
     onSavePreferences: (TunnelPreferences, restartIfConnected: Boolean) -> Unit,
     onSaveTorrc: (String) -> Unit,
     onSaveDnsCryptToml: (String) -> Unit,
+    /** Engine currently driving the tunnel, or null when idle. */
+    activeEngine: TorEngine? = null,
     torSocksPort: () -> Int? = { null },
+    /** False while start/stop/restart/identity — disable Apply & engine-switch mash. */
+    controlsEnabled: Boolean = true,
 ) {
     var local by remember(preferences) { mutableStateOf(preferences) }
+    val caps = local.torEngine.capabilities
     val latestLocal = remember { AtomicReference(local) }
     val saveRef = remember { AtomicReference(onSavePreferences) }
     SideEffect {
@@ -228,11 +233,28 @@ fun SettingsScreen(
 
         SectionHeader(
             title = "DNS mode",
-            subtitle = "Clearnet names: DNSCrypt over Tor (encrypted stub, no system resolver).\n" +
-                ".onion / .exit: Tor DNSPort AutomapHostsOnResolve → virtual IP in " +
-                "${TunnelEndpoints.VIRTUAL_ADDR_NETWORK}/${TunnelEndpoints.VIRTUAL_ADDR_PREFIX_LEN}, " +
-                "then SOCKS5A with the real hostname (DNSCrypt is never asked for onion).\n" +
-                "FakeDNS option is legacy — both modes divert UDP/53 through TunDnsMux.",
+            subtitle = buildString {
+                append("Clearnet names: DNSCrypt over Tor (encrypted stub, no system resolver).\n")
+                when {
+                    caps.nativeAutomapDnsPort ->
+                        append(
+                            ".onion / .exit: Tor DNSPort AutomapHostsOnResolve → virtual IP in " +
+                                "${TunnelEndpoints.VIRTUAL_ADDR_NETWORK}/" +
+                                "${TunnelEndpoints.VIRTUAL_ADDR_PREFIX_LEN}, " +
+                                "then SOCKS5A with the real hostname (DNSCrypt never asked for onion).\n",
+                        )
+                    caps.synthesizeOnionAutomap ->
+                        append(
+                            ".onion / .exit: app Automap synth → virtual IP in " +
+                                "${TunnelEndpoints.VIRTUAL_ADDR_NETWORK}/" +
+                                "${TunnelEndpoints.VIRTUAL_ADDR_PREFIX_LEN}, " +
+                                "then SOCKS5A with the real hostname (no native DNSPort Automap).\n",
+                        )
+                    else ->
+                        append(".onion / .exit: engine-specific Automap path.\n")
+                }
+                append("FakeDNS option is legacy — both modes divert UDP/53 through TunDnsMux.")
+            },
         )
         Row(
             modifier = Modifier.horizontalScroll(rememberScrollState()),
@@ -316,11 +338,21 @@ fun SettingsScreen(
 
         SectionHeader(
             title = "Interactive firewall",
-            subtitle = "OpenSnitch-style prompts for new outbound connections on the TUN. " +
-                "Requests wait in a FIFO queue (one at a time) until you answer — no timeout. " +
-                "A heads-up notification shows the app icon with Accept / Deny " +
-                "(permanent rule). Tap the notification for more scope options. " +
-                "Tor circuits are isolated per app UID (SOCKS5 USERNAME/PASSWORD → u{uid}).",
+            subtitle = buildString {
+                append(
+                    "OpenSnitch-style prompts for new outbound connections on the TUN. " +
+                        "Requests wait in a FIFO queue (one at a time) until you answer — no timeout. " +
+                        "A heads-up notification shows the app icon with Accept / Deny " +
+                        "(permanent rule). Tap the notification for more scope options. ",
+                )
+                if (caps.socksAuthIsolation) {
+                    append("Tor streams are isolated per app UID (SOCKS5 USERNAME/PASSWORD → u{uid})")
+                    if (!caps.multiSocksSessionGroups) {
+                        append(" on a shared SocksPort (no SessionGroups)")
+                    }
+                    append(".")
+                }
+            },
         )
         PrefSwitch(
             label = "Enable firewall",
@@ -421,26 +453,35 @@ fun SettingsScreen(
 
         SectionHeader(
             title = "Tor",
-            subtitle = when (local.torEngine) {
-                TorEngine.LITTLE_T ->
-                    "Circuit rotation (path-spec / prop. 368). Per-UID KeepAliveIsolateSOCKSAuth " +
-                        "circuits stay sticky; dirtiness mainly affects non-auth streams. " +
-                        "Default Stable=600s. Live SETCONF when connected (no Tor restart)."
-                TorEngine.ARTI ->
-                    "Arti (arti-client ${ltechnologies.onionphone.onionvpn.core.tor.control.TorControlCompat.ARTI_CLIENT_DOCS_VERSION}): " +
-                        "SOCKS+DNS, Automap synth, SOCKS-auth isolation, NEWNYM/bridges/RELOAD = restart. " +
-                        "DORMANT/ACTIVE + MaxCircuitDirtiness via Ext JNI when patched SO present. " +
-                        "No circuits UI / Entry·Exit / Conjure / NewCircuitPeriod (no Arti field)."
-            },
+            subtitle = local.torEngine.settingsSubtitle(),
         )
+        if (activeEngine != null && activeEngine != local.torEngine) {
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = MaterialTheme.shapes.medium,
+                color = MaterialTheme.colorScheme.errorContainer,
+            ) {
+                Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
+                    Text(
+                        "Engine mismatch",
+                        style = MaterialTheme.typography.titleSmall,
+                        color = MaterialTheme.colorScheme.onErrorContainer,
+                    )
+                    Text(
+                        text = "Settings prefer ${local.torEngine.displayName}, but the tunnel is " +
+                            "running ${activeEngine.displayName}. Use “Apply & restart tunnel”.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onErrorContainer,
+                    )
+                }
+            }
+        }
         Text(
             text = "Tor engine",
             style = MaterialTheme.typography.titleMedium,
         )
         Text(
-            text = "Choose which Tor client the tunnel launches. C Tor (libtor) is the full " +
-                "feature set. Arti is production-usable for SOCKS/DNS routing with known gaps " +
-                "(no circuits UI, no Conjure, shared SocksPort). Changing engine restarts the tunnel.",
+            text = local.torEngine.enginePickerHint(),
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -453,6 +494,7 @@ fun SettingsScreen(
                 onClick = {
                     commit(local.copy(torEngine = TorEngine.LITTLE_T), restart = true)
                 },
+                enabled = controlsEnabled,
                 label = { Text("C Tor") },
             )
             FilterChip(
@@ -460,10 +502,11 @@ fun SettingsScreen(
                 onClick = {
                     commit(local.copy(torEngine = TorEngine.ARTI), restart = true)
                 },
+                enabled = controlsEnabled,
                 label = { Text("Arti") },
             )
         }
-        if (local.torEngine.capabilities.liveSetConf) {
+        if (caps.liveSetConf) {
             Row(
                 modifier = Modifier.horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -508,20 +551,65 @@ fun SettingsScreen(
                     label = { Text("Paranoid") },
                 )
             }
+        } else if (caps.liveCircuitTiming) {
+            Row(
+                modifier = Modifier.horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                FilterChip(
+                    selected = local.torMaxCircuitDirtinessSec == 600,
+                    onClick = {
+                        commit(
+                            local.copy(
+                                torNewCircuitPeriodSec =
+                                    local.torNewCircuitPeriodSec.coerceAtLeast(3_600),
+                                torMaxCircuitDirtinessSec = 600,
+                            ),
+                        )
+                    },
+                    label = { Text("Stable dirtiness") },
+                )
+                FilterChip(
+                    selected = local.torMaxCircuitDirtinessSec == 180,
+                    onClick = {
+                        commit(
+                            local.copy(
+                                torNewCircuitPeriodSec =
+                                    local.torNewCircuitPeriodSec.coerceAtLeast(3_600),
+                                torMaxCircuitDirtinessSec = 180,
+                            ),
+                        )
+                    },
+                    label = { Text("Balanced dirtiness") },
+                )
+                FilterChip(
+                    selected = local.torMaxCircuitDirtinessSec == 60,
+                    onClick = {
+                        commit(
+                            local.copy(
+                                torNewCircuitPeriodSec =
+                                    local.torNewCircuitPeriodSec.coerceAtLeast(3_600),
+                                torMaxCircuitDirtinessSec = 60,
+                            ),
+                        )
+                    },
+                    label = { Text("Paranoid dirtiness") },
+                )
+            }
         }
         Text(
             text = "Tor bridges",
             style = MaterialTheme.typography.titleMedium,
         )
         Text(
-            text = if (local.torEngine.capabilities.conjureBridges) {
+            text = if (caps.conjureBridges) {
                 "Presets paste built-in Tor Browser PT lines (Lyrebird / Conjure). " +
                     "Request from Tor Project uses Moat (obfs4 / Snowflake / WebTunnel). " +
                     "WebTunnel gets utls=none so Lyrebird uses stdlib TLS. " +
                     "Apply & restart tunnel after changing."
             } else {
-                "Arti supports Lyrebird-backed bridges (obfs4 / Snowflake / meek / WebTunnel). " +
-                    "Conjure requires C Tor. Apply & restart tunnel after changing."
+                "Lyrebird-backed bridges (obfs4 / Snowflake / meek / WebTunnel). " +
+                    "Conjure is unavailable on this engine. Apply & restart tunnel after changing."
             },
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -704,7 +792,6 @@ fun SettingsScreen(
             text = "Node countries (StrictNodes)",
             style = MaterialTheme.typography.titleMedium,
         )
-        val caps = local.torEngine.capabilities
         when {
             caps.nodePrefs -> {
                 Text(
@@ -715,8 +802,8 @@ fun SettingsScreen(
             }
             caps.exitCountryPrefs -> {
                 Text(
-                    text = "Arti ExitNodes: pick a single country ({cc}). " +
-                        "EntryNodes / ExcludeNodes need C Tor.",
+                    text = "ExitNodes: pick a single country ({cc}). " +
+                        "EntryNodes / ExcludeNodes need an engine with full node prefs (C Tor).",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -801,23 +888,20 @@ fun SettingsScreen(
             )
         }
         }
-        if (local.torEngine.capabilities.liveSetConf ||
-            local.torEngine.capabilities.torrcConfig ||
-            local.torEngine.capabilities.liveCircuitTiming
-        ) {
+        if (caps.liveSetConf || caps.torrcConfig || caps.liveCircuitTiming) {
+            val artiTiming = caps.liveCircuitTiming && !caps.torrcConfig
             OutlinedTextField(
                 value = local.torNewCircuitPeriodSec.toString(),
                 onValueChange = {
                     it.toIntOrNull()?.let { v ->
-                        local = local.copy(torNewCircuitPeriodSec = v.coerceIn(10, 86_400))
+                        val min = if (artiTiming) 3_600 else 10
+                        local = local.copy(torNewCircuitPeriodSec = v.coerceIn(min, 86_400))
                     }
                 },
                 label = {
                     Text(
-                        if (local.torEngine.capabilities.liveCircuitTiming &&
-                            !local.torEngine.capabilities.torrcConfig
-                        ) {
-                            "NewCircuitPeriod (C Tor); Arti uses ≥3600s prediction_lifetime"
+                        if (artiTiming) {
+                            "prediction_lifetime (sec, ≥3600)"
                         } else {
                             "NewCircuitPeriod (sec)"
                         },
@@ -826,8 +910,13 @@ fun SettingsScreen(
                 modifier = Modifier.fillMaxWidth(),
             )
             Text(
-                text = "MaxCircuitDirtiness (sec) — unused-circuit expiry. " +
-                    "App SocksPort uses KeepAliveIsolateSOCKSAuth with per-UID tokens (sticky).",
+                text = if (artiTiming) {
+                    "max_dirtiness (sec) — unused-circuit expiry via Ext JNI. " +
+                        "prediction_lifetime is floored at 3600s (not a 1:1 NewCircuitPeriod map)."
+                } else {
+                    "MaxCircuitDirtiness (sec) — unused-circuit expiry. " +
+                        "App SocksPort uses KeepAliveIsolateSOCKSAuth with per-UID tokens (sticky)."
+                },
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -838,11 +927,15 @@ fun SettingsScreen(
                         local = local.copy(torMaxCircuitDirtinessSec = v.coerceIn(60, 86_400))
                     }
                 },
-                label = { Text("MaxCircuitDirtiness (sec)") },
+                label = {
+                    Text(
+                        if (artiTiming) "max_dirtiness (sec)" else "MaxCircuitDirtiness (sec)",
+                    )
+                },
                 modifier = Modifier.fillMaxWidth(),
             )
         }
-        if (local.torEngine.capabilities.torrcConfig) {
+        if (caps.torrcConfig) {
             FilledTonalButton(
                 onClick = {
                     scope.launch {
@@ -946,9 +1039,12 @@ fun SettingsScreen(
             modifier = Modifier
                 .fillMaxWidth()
                 .height(56.dp),
+            enabled = controlsEnabled,
             shape = MaterialTheme.shapes.large,
         ) {
-            Text("Apply & restart tunnel")
+            Text(
+                if (controlsEnabled) "Apply & restart tunnel" else "Tunnel busy…",
+            )
         }
         Text(
             text = "Toggles and chips save immediately (firewall stays on when you leave). " +

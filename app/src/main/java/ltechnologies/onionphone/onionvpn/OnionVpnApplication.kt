@@ -1,6 +1,7 @@
 package ltechnologies.onionphone.onionvpn
 
 import android.app.Application
+import android.content.ComponentCallbacks2
 import android.os.StrictMode
 import android.util.Log
 import dagger.hilt.android.HiltAndroidApp
@@ -14,13 +15,17 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import ltechnologies.onionphone.onionvpn.core.dnscrypt.DnsCryptProcessManager
 import ltechnologies.onionphone.onionvpn.core.model.observability.DiagnosticsGate
+import ltechnologies.onionphone.onionvpn.core.model.observability.MemoryHygiene
 import ltechnologies.onionphone.onionvpn.core.model.observability.OpTrace
 import ltechnologies.onionphone.onionvpn.core.model.stability.ProcessLogLevel
 import ltechnologies.onionphone.onionvpn.core.model.stability.StabilitySeverity
 import ltechnologies.onionphone.onionvpn.core.tor.TorProcessManager
 import ltechnologies.onionphone.onionvpn.core.tor.control.TorControlEventFormatter
 import ltechnologies.onionphone.onionvpn.core.tor.control.model.TorControlEvent
+import ltechnologies.onionphone.onionvpn.core.vpn.dns.DnsHostnameCache
+import ltechnologies.onionphone.onionvpn.core.vpn.dns.OnionAutomapAllocator
 import ltechnologies.onionphone.onionvpn.core.vpn.firewall.FirewallBridge
+import ltechnologies.onionphone.onionvpn.core.vpn.forwarder.TcpFlowUidIndex
 import ltechnologies.onionphone.onionvpn.diagnostics.NativeResourceProfiler
 import ltechnologies.onionphone.onionvpn.firewall.InteractiveFirewallEngine
 import ltechnologies.onionphone.onionvpn.logging.LogSource
@@ -44,6 +49,21 @@ class OnionVpnApplication : Application() {
     lateinit var resourceProfiler: NativeResourceProfiler
         private set
 
+    private val memoryTrimListener: (MemoryHygiene.TrimLevel) -> Unit = { level ->
+        when (level) {
+            MemoryHygiene.TrimLevel.SOFT -> TunnelLogBuffer.trimToHalf()
+            MemoryHygiene.TrimLevel.HARD -> TunnelLogBuffer.trimToHalf()
+            MemoryHygiene.TrimLevel.COMPLETE -> {
+                TunnelLogBuffer.clearAll()
+                // Process is under severe pressure / about to die — drop rebuildable maps.
+                DnsHostnameCache.clear()
+                OnionAutomapAllocator.clear()
+                TcpFlowUidIndex.clear()
+            }
+        }
+        Timber.i("MemoryHygiene trim level=%s heap=%.0f%%", level, MemoryHygiene.heapUsageRatio() * 100)
+    }
+
     override fun onCreate() {
         super.onCreate()
         resourceProfiler = NativeResourceProfiler(
@@ -51,6 +71,7 @@ class OnionVpnApplication : Application() {
             scope = appScope,
             torChildPidProvider = { tor.nativeProcessPid() },
         )
+        MemoryHygiene.addTrimListener(memoryTrimListener)
         installObservability()
         if (BuildConfig.DEBUG) {
             StrictMode.setThreadPolicy(
@@ -150,10 +171,31 @@ class OnionVpnApplication : Application() {
         DiagnosticsGate.onDisabled = {
             TunnelLogBuffer.clearAll()
             resourceProfiler.stop()
+            MemoryHygiene.afterHeavyWork("diagnostics_off")
         }
         DiagnosticsGate.onEnabled = {
             OpTrace.info("diagnostics", "diagnostics enabled")
         }
+    }
+
+    @Suppress("DEPRECATION")
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        val trim = when (level) {
+            ComponentCallbacks2.TRIM_MEMORY_COMPLETE -> MemoryHygiene.TrimLevel.COMPLETE
+            ComponentCallbacks2.TRIM_MEMORY_MODERATE,
+            ComponentCallbacks2.TRIM_MEMORY_BACKGROUND,
+            ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW,
+            ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL,
+            -> MemoryHygiene.TrimLevel.HARD
+            else -> MemoryHygiene.TrimLevel.SOFT
+        }
+        MemoryHygiene.onTrim(trim)
+    }
+
+    override fun onLowMemory() {
+        super.onLowMemory()
+        MemoryHygiene.onTrim(MemoryHygiene.TrimLevel.COMPLETE)
     }
 
     companion object {

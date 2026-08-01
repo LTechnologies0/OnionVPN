@@ -30,8 +30,8 @@ data class TunnelPreferences(
     val torEntryNodes: String = "",
     val torExitNodes: String = "",
     val torExcludeNodes: String = "",
-    val torNewCircuitPeriodSec: Int = 180,
-    /** Default 600s (10 min) — closer to Tor Browser stability than aggressive rotation. */
+    val torNewCircuitPeriodSec: Int = 30,
+    /** Default 600s (10 min) — Tor man MaxCircuitDirtiness default. */
     val torMaxCircuitDirtinessSec: Int = 600,
     val dnsCryptRequireNoLog: Boolean = true,
     val dnsCryptRequireNoFilter: Boolean = false,

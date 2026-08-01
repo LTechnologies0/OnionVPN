@@ -260,7 +260,11 @@ private fun OnionVpnApp(
                     onSavePreferences = onSavePreferences,
                     onSaveTorrc = onSaveTorrc,
                     onSaveDnsCryptToml = onSaveDnsCryptToml,
+                    activeEngine = if (snapshot.isActive) snapshot.torEngine else null,
                     torSocksPort = torSocksPort,
+                    controlsEnabled = !snapshot.isBusy &&
+                        !snapshot.identityRefreshing &&
+                        snapshot.phase != ltechnologies.onionphone.onionvpn.core.model.TunnelPhase.Stopping,
                 )
             }
         }

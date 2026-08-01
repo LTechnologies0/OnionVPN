@@ -51,10 +51,10 @@ class TorDnsResolveTest {
             resp[o++] = 60 // TTL
             resp[o++] = 0
             resp[o++] = 4
-            resp[o++] = 1
+            resp[o++] = 192.toByte()
+            resp[o++] = 0
             resp[o++] = 2
-            resp[o++] = 3
-            resp[o++] = 4
+            resp[o++] = 1
             sock.send(
                 DatagramPacket(resp, o, req.address, req.port),
             )
@@ -63,12 +63,12 @@ class TorDnsResolveTest {
         }
         try {
             val ip = TorDnsResolve.resolveA(
-                hostname = "example.test",
+                hostname = "example.com",
                 dnsPort = port,
                 timeoutMs = 3_000,
                 dnsHost = "127.0.0.1",
             )
-            assertEquals("1.2.3.4", ip)
+            assertEquals("192.0.2.1", ip)
             assertTrue(answered.get() >= 1)
         } finally {
             runCatching { sock.close() }

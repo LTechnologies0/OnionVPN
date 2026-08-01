@@ -102,7 +102,7 @@ class TunnelPreferencesStore @Inject constructor(
         torEntryNodes = this[Keys.torEntry].orEmpty(),
         torExitNodes = this[Keys.torExit].orEmpty(),
         torExcludeNodes = this[Keys.torExclude].orEmpty(),
-        torNewCircuitPeriodSec = this[Keys.newCircuit] ?: 180,
+        torNewCircuitPeriodSec = this[Keys.newCircuit] ?: 30,
         torMaxCircuitDirtinessSec = this[Keys.maxDirtiness] ?: 600,
         dnsCryptRequireNoLog = this[Keys.requireNoLog] ?: true,
         dnsCryptRequireNoFilter = this[Keys.requireNoFilter] ?: false,

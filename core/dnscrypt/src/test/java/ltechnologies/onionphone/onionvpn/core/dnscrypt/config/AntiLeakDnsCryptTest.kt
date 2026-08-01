@@ -30,8 +30,8 @@ class AntiLeakDnsCryptTest(private val requiredSubstring: String) {
             "ignore_system_dns = true",
             "dnscrypt_ephemeral_keys = true",
             "tls_disable_session_tickets = true",
-            "block_ipv6 = false",
-            "ipv6_servers = true",
+            "block_ipv6 = true",
+            "ipv6_servers = false",
             "ipv4_servers = true",
             "proxy = 'socks5://${TunnelEndpoints.SOCKS_DNSCRYPT_USER}:${TunnelEndpoints.SOCKS_DNSCRYPT_PASS}",
             "bootstrap_resolvers = ['${TunnelEndpoints.LOOPBACK}:",
@@ -41,7 +41,7 @@ class AntiLeakDnsCryptTest(private val requiredSubstring: String) {
             "[sources.'public-resolvers']",
             "minisign_key",
             "cache = true",
-            "timeout = 15000",
+            "timeout = 25000",
         ).map { arrayOf(it) }
     }
 }
@@ -64,6 +64,28 @@ class AntiLeakDnsCryptBlockedNamesTest(private val host: String) {
                 .filter { it.isNotEmpty() && !it.startsWith("#") }
                 .map { arrayOf(it) }
                 .toList()
+    }
+}
+
+class AntiLeakDnsCryptAppHostsNotBlockedTest {
+    @Test
+    fun googlePlayAndFcmHostsAreNotBlocked() {
+        val body = DnsCryptConfigWriter.blockedNamesFileContent()
+        val mustStayResolvable = listOf(
+            "android.googleapis.com",
+            "play.googleapis.com",
+            "mtalk.google.com",
+            "chat.signal.org",
+            "api.twitter.com",
+            "www.gstatic.com",
+            "clients3.google.com",
+        )
+        for (host in mustStayResolvable) {
+            assertFalse(
+                "Must not block app-critical host: $host",
+                body.lineSequence().any { it.trim() == host },
+            )
+        }
     }
 }
 

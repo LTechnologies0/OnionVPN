@@ -1,6 +1,7 @@
 package ltechnologies.onionphone.onionvpn.core.vpn.firewall
 
 import java.net.InetAddress
+import ltechnologies.onionphone.onionvpn.core.model.TorNetPolicy
 
 /**
  * Parsed IP 5-tuple from a raw TUN packet (IPv4 or IPv6).
@@ -39,8 +40,9 @@ object IpPacketParser {
     }
 
     private fun parseV4(packet: ByteArray, length: Int): IpPacketInfo? {
+        if (!TorNetPolicy.isWellFormedIpv4Packet(packet, length)) return null
         val ihl = (packet[0].toInt() and 0x0f) * 4
-        if (ihl < 20 || length < ihl + 4) return null
+        if (length < ihl + 4) return null
         val protocol = packet[9].toInt() and 0xff
         val srcIpInt = ipv4Int(packet, 12)
         val dstIpInt = ipv4Int(packet, 16)
@@ -49,6 +51,7 @@ object IpPacketParser {
                 if (length < ihl + 14) return null
                 val srcPort = u16(packet, ihl)
                 val dstPort = u16(packet, ihl + 2)
+                if (!TorNetPolicy.isWellFormedTransportPorts(srcPort, dstPort)) return null
                 val flags = packet[ihl + 13].toInt() and 0xff
                 val syn = flags and 0x02 != 0
                 val ack = flags and 0x10 != 0
@@ -66,12 +69,15 @@ object IpPacketParser {
             }
             PROTO_UDP -> {
                 if (length < ihl + 8) return null
+                val srcPort = u16(packet, ihl)
+                val dstPort = u16(packet, ihl + 2)
+                if (!TorNetPolicy.isWellFormedTransportPorts(srcPort, dstPort)) return null
                 IpPacketInfo(
                     protocol = PROTO_UDP,
                     srcIpInt = srcIpInt,
                     dstIpInt = dstIpInt,
-                    srcPort = u16(packet, ihl),
-                    dstPort = u16(packet, ihl + 2),
+                    srcPort = srcPort,
+                    dstPort = dstPort,
                     isTcpSyn = false,
                     isTcp = false,
                     isUdp = true,
@@ -87,13 +93,16 @@ object IpPacketParser {
      * Next-header at offset 6; TCP/UDP header starts at 40.
      */
     private fun parseV6(packet: ByteArray, length: Int): IpPacketInfo? {
-        if (length < 40) return null
+        if (!TorNetPolicy.isWellFormedIpv6Packet(packet, length)) return null
         val next = packet[6].toInt() and 0xff
         val srcHost = formatIpv6(packet, 8) ?: return null
         val dstHost = formatIpv6(packet, 24) ?: return null
         return when (next) {
             PROTO_TCP -> {
                 if (length < 40 + 14) return null
+                val srcPort = u16(packet, 40)
+                val dstPort = u16(packet, 40 + 2)
+                if (!TorNetPolicy.isWellFormedTransportPorts(srcPort, dstPort)) return null
                 val flags = packet[40 + 13].toInt() and 0xff
                 val syn = flags and 0x02 != 0
                 val ack = flags and 0x10 != 0
@@ -101,8 +110,8 @@ object IpPacketParser {
                     protocol = PROTO_TCP,
                     srcIpInt = 0,
                     dstIpInt = 0,
-                    srcPort = u16(packet, 40),
-                    dstPort = u16(packet, 40 + 2),
+                    srcPort = srcPort,
+                    dstPort = dstPort,
                     isTcpSyn = syn && !ack,
                     isTcp = true,
                     isUdp = false,
@@ -113,12 +122,15 @@ object IpPacketParser {
             }
             PROTO_UDP -> {
                 if (length < 40 + 8) return null
+                val srcPort = u16(packet, 40)
+                val dstPort = u16(packet, 40 + 2)
+                if (!TorNetPolicy.isWellFormedTransportPorts(srcPort, dstPort)) return null
                 IpPacketInfo(
                     protocol = PROTO_UDP,
                     srcIpInt = 0,
                     dstIpInt = 0,
-                    srcPort = u16(packet, 40),
-                    dstPort = u16(packet, 40 + 2),
+                    srcPort = srcPort,
+                    dstPort = dstPort,
                     isTcpSyn = false,
                     isTcp = false,
                     isUdp = true,

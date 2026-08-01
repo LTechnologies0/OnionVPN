@@ -109,6 +109,7 @@ class OnionVpnService : VpnService() {
             ?: DnsResolverMode.DNSCRYPT_MUX
 
         // Signal waiters that a rebind is in progress without dropping routes yet.
+        isRebinding.value = true
         isEstablished.value = false
         activeGeneration.value = -1
         forwarderSocksPort.value = -1
@@ -145,6 +146,7 @@ class OnionVpnService : VpnService() {
                     activeGeneration.value = generation
                 }
                 isEstablished.value = true
+                isRebinding.value = false
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                     alwaysOnActive.value = isAlwaysOn
                     lockdownActive.value = isLockdownEnabled
@@ -186,6 +188,7 @@ class OnionVpnService : VpnService() {
                     isEstablished.value = false
                     profileMode.value = null
                 }
+                isRebinding.value = false
             }
         }
     }
@@ -381,6 +384,7 @@ class OnionVpnService : VpnService() {
 
         /** Call before [ACTION_START] so waiters ignore a previous establish. */
         fun nextGeneration(): Int {
+            isRebinding.value = true
             isEstablished.value = false
             activeGeneration.value = -1
             return generationSeq.incrementAndGet()
@@ -388,6 +392,10 @@ class OnionVpnService : VpnService() {
 
         private val isEstablished = MutableStateFlow(false)
         val vpnEstablished: StateFlow<Boolean> = isEstablished.asStateFlow()
+
+        private val isRebinding = MutableStateFlow(false)
+        /** True while TUN is being swapped — validation must not treat as hard leak. */
+        val vpnRebinding: StateFlow<Boolean> = isRebinding.asStateFlow()
 
         private val activeGeneration = MutableStateFlow(-1)
         val vpnGeneration: StateFlow<Int> = activeGeneration.asStateFlow()

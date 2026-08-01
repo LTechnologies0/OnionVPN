@@ -9,6 +9,9 @@ import java.net.ServerSocket
 import java.net.Socket
 import java.net.SocketException
 import java.nio.charset.StandardCharsets
+import java.util.concurrent.ArrayBlockingQueue
+import java.util.concurrent.ThreadPoolExecutor
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
@@ -36,6 +39,7 @@ class DnsCryptSocksBridge(
     private val dnsCryptPort = AtomicInteger(0)
     private val serverRef = AtomicReference<ServerSocket?>(null)
     private var acceptThread: Thread? = null
+    private var clientExecutor = newClientExecutor()
 
     fun updateUpstream(torSocks: Int, dnsCrypt: Int) {
         torSocksPort.set(torSocks.coerceAtLeast(0))
@@ -50,6 +54,9 @@ class DnsCryptSocksBridge(
 
     fun start() {
         if (!running.compareAndSet(false, true)) return
+        if (clientExecutor.isShutdown || clientExecutor.isTerminated) {
+            clientExecutor = newClientExecutor()
+        }
         val server = try {
             ServerSocket(listenPort, 32, InetAddress.getByName(TunnelEndpoints.LOOPBACK))
         } catch (e: Exception) {
@@ -58,23 +65,25 @@ class DnsCryptSocksBridge(
             throw e
         }
         serverRef.set(server)
+        val acceptServer = server
         acceptThread = Thread({
             Timber.i(
                 "PAC SOCKS bridge listening socks5://%s:%d (DNS via DNSCrypt)",
                 TunnelEndpoints.LOOPBACK,
                 listenPort,
             )
-            while (running.get()) {
+            while (!acceptServer.isClosed) {
                 try {
-                    val client = server.accept()
-                    Thread({ handleClient(client) }, "onionvpn-pac-socks").apply {
-                        isDaemon = true
-                        start()
+                    val client = acceptServer.accept()
+                    try {
+                        clientExecutor.execute { handleClient(client) }
+                    } catch (_: java.util.concurrent.RejectedExecutionException) {
+                        runCatching { client.close() }
                     }
                 } catch (_: SocketException) {
-                    if (!running.get()) break
+                    break
                 } catch (e: Exception) {
-                    if (running.get()) Timber.d(e, "PAC SOCKS accept error")
+                    if (!acceptServer.isClosed) Timber.d(e, "PAC SOCKS accept error")
                 }
             }
         }, "onionvpn-pac-socks-accept").apply {
@@ -87,10 +96,26 @@ class DnsCryptSocksBridge(
         if (!running.compareAndSet(true, false)) return
         updateUpstream(0, 0)
         runCatching { serverRef.getAndSet(null)?.close() }
-        acceptThread?.interrupt()
+        acceptThread?.let { t ->
+            t.interrupt()
+            runCatching { t.join(2_000L) }
+        }
         acceptThread = null
+        clientExecutor.shutdownNow()
+        runCatching { clientExecutor.awaitTermination(2, TimeUnit.SECONDS) }
         Timber.i("PAC SOCKS bridge stopped")
     }
+
+    private fun newClientExecutor(): ThreadPoolExecutor =
+        ThreadPoolExecutor(
+            2,
+            32,
+            60L,
+            TimeUnit.SECONDS,
+            ArrayBlockingQueue(32),
+            { r -> Thread(r, "onionvpn-pac-socks").apply { isDaemon = true } },
+            ThreadPoolExecutor.AbortPolicy(),
+        ).apply { allowCoreThreadTimeOut(true) }
 
     private fun handleClient(client: Socket) {
         client.use { c ->

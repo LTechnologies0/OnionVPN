@@ -37,7 +37,7 @@ internal class TcpTunSession(
     @Volatile private var clientSeq: Int = 0
 
     @Volatile private var established = false
-    @Volatile private var connecting = false
+    private val connecting = AtomicBoolean(false)
 
     fun handlePacket(packet: ByteArray, meta: TcpPacketBuilder.TcpMeta) {
         if (!alive.get()) return
@@ -48,7 +48,7 @@ internal class TcpTunSession(
         if (meta.synOnly) {
             clientSeq = meta.seq + 1
             // Retransmitted SYNs must not open a second SOCKS CONNECT.
-            if (established || connecting) return
+            if (established || connecting.get()) return
             openSocksAsync()
             return
         }
@@ -75,8 +75,11 @@ internal class TcpTunSession(
     }
 
     private fun openSocksAsync() {
-        if (connecting || established) return
-        connecting = true
+        if (!connecting.compareAndSet(false, true)) return
+        if (established) {
+            connecting.set(false)
+            return
+        }
         Thread({
             try {
                 val sock = Socks5Client(
@@ -100,7 +103,7 @@ internal class TcpTunSession(
                 Timber.d(e, "SOCKS connect failed uid=$uid $remoteHost:$remotePort")
                 close(sendRst = true)
             } finally {
-                connecting = false
+                connecting.set(false)
             }
         }, "onionvpn-socks-$clientPort").apply {
             isDaemon = true

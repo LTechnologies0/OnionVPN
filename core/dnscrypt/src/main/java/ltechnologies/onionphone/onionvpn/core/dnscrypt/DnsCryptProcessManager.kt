@@ -14,6 +14,7 @@ import ltechnologies.onionphone.onionvpn.core.dnscrypt.lifecycle.DnsCryptReadine
 import ltechnologies.onionphone.onionvpn.core.model.TunnelFailure
 import ltechnologies.onionphone.onionvpn.core.model.TunnelPreferences
 import ltechnologies.onionphone.onionvpn.core.model.TunnelRuntimePorts
+import ltechnologies.onionphone.onionvpn.core.model.observability.MemoryHygiene
 import ltechnologies.onionphone.onionvpn.core.model.observability.OpTrace
 import ltechnologies.onionphone.onionvpn.core.model.stability.ProcessLogLevel
 import timber.log.Timber
@@ -188,8 +189,8 @@ class DnsCryptProcessManager(
                 )
             }
             if (listenerReady.get() ||
-                DnsCryptReadiness.probeLocalDns(port) ||
-                DnsCryptReadiness.probeLocalTcp(port)
+                DnsCryptReadiness.probeLocalTcp(port) ||
+                DnsCryptReadiness.probeLocalDns(port)
             ) {
                 return
             }
@@ -261,6 +262,7 @@ class DnsCryptProcessManager(
         logThread?.interrupt()
         logThread = null
         listenPort = null
+        MemoryHygiene.afterHeavyWork("dnscrypt_stop")
     }
 
     private fun killOrphanedProcesses() {

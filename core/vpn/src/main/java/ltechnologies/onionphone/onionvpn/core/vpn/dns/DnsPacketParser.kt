@@ -1,10 +1,12 @@
 package ltechnologies.onionphone.onionvpn.core.vpn.dns
 
+import ltechnologies.onionphone.onionvpn.core.model.TorNetPolicy
+
 /**
- * Minimal DNS message parser for firewall hostname attribution.
+ * Minimal DNS message parser for firewall hostname attribution and torrified DNS mux.
  *
-     * Extracts the first question QNAME and A/AAAA answer RDATA addresses.
- * Does not allocate during failure paths beyond the returned lists.
+ * Extracts the first question QNAME and A/AAAA answer RDATA addresses.
+ * Rejects oversize QDCOUNT and invalid QNAME/address records (fail-closed).
  */
 object DnsPacketParser {
     data class ParsedDns(
@@ -21,13 +23,18 @@ object DnsPacketParser {
         val isResponse = (flags and 0x8000) != 0
         val qdCount = ((dns[offset + 4].toInt() and 0xff) shl 8) or (dns[offset + 5].toInt() and 0xff)
         val anCount = ((dns[offset + 6].toInt() and 0xff) shl 8) or (dns[offset + 7].toInt() and 0xff)
+        if (qdCount > TorNetPolicy.MAX_DNS_QDCOUNT) return null
         var pos = offset + 12
         val end = offset + length
 
         var qname: String? = null
         if (qdCount > 0) {
             val name = readName(dns, offset, pos, end) ?: return ParsedDns(id, isResponse, null, emptyList())
-            qname = name.first
+            qname = when {
+                name.first.isEmpty() -> ""
+                TorNetPolicy.isValidDnsHostname(name.first) -> name.first
+                else -> return null
+            }
             pos = name.second
             // QTYPE + QCLASS
             if (pos + 4 > end) return ParsedDns(id, isResponse, qname, emptyList())
@@ -40,31 +47,35 @@ object DnsPacketParser {
             }
         }
 
-        val answers = ArrayList<String>(minOf(anCount, 8))
-        if (isResponse && anCount > 0 && qname != null) {
-            for (i in 0 until anCount) {
+        // Always harvest A/AAAA from answers when present — QNAME may be absent/compressed
+        // oddly in some resolver replies; callers attribute via pending QNAME or query context.
+        val answers = ArrayList<String>(minOf(anCount, TorNetPolicy.MAX_DNS_ANSWERS))
+        if (isResponse && anCount > 0) {
+            val limit = minOf(anCount, TorNetPolicy.MAX_DNS_ANSWERS)
+            for (i in 0 until limit) {
                 if (pos >= end) break
                 val nameSkip = readName(dns, offset, pos, end) ?: break
                 pos = nameSkip.second
                 if (pos + 10 > end) break
                 val type = ((dns[pos].toInt() and 0xff) shl 8) or (dns[pos + 1].toInt() and 0xff)
-                // class at pos+2, ttl at pos+4
                 val rdLength = ((dns[pos + 8].toInt() and 0xff) shl 8) or (dns[pos + 9].toInt() and 0xff)
                 pos += 10
                 if (pos + rdLength > end) break
                 if (type == TYPE_A && rdLength == 4) {
-                    answers.add(
+                    val ip =
                         "${dns[pos].toInt() and 0xff}." +
                             "${dns[pos + 1].toInt() and 0xff}." +
                             "${dns[pos + 2].toInt() and 0xff}." +
-                            "${dns[pos + 3].toInt() and 0xff}",
-                    )
+                            "${dns[pos + 3].toInt() and 0xff}"
+                    if (TorNetPolicy.isValidDnsAddressRecord(ip)) answers.add(ip)
                 } else if (type == TYPE_AAAA && rdLength == 16) {
                     runCatching {
                         java.net.InetAddress.getByAddress(
                             dns.copyOfRange(pos, pos + 16),
                         ).hostAddress?.substringBefore('%')
-                    }.getOrNull()?.let { answers.add(it) }
+                    }.getOrNull()?.let { addr ->
+                        if (TorNetPolicy.isValidDnsAddressRecord(addr)) answers.add(addr)
+                    }
                 }
                 pos += rdLength
             }
@@ -86,6 +97,7 @@ object DnsPacketParser {
         var jumped = false
         var next = start
         var jumps = 0
+        var totalLabelBytes = 0
         while (pos < end) {
             val len = dns[pos].toInt() and 0xff
             when {
@@ -103,8 +115,16 @@ object DnsPacketParser {
                     if (pos < msgOffset || pos >= end) return null
                     continue
                 }
+                (len and 0xc0) != 0 -> return null
                 else -> {
+                    if (len > TorNetPolicy.MAX_LABEL_LEN) return null
                     if (pos + 1 + len > end) return null
+                    totalLabelBytes += len + 1
+                    if (totalLabelBytes > TorNetPolicy.MAX_HOSTNAME_LEN + 1) return null
+                    for (i in 1..len) {
+                        val ch = dns[pos + i].toInt() and 0xff
+                        if (ch == 0 || ch > 0x7f) return null
+                    }
                     labels.add(String(dns, pos + 1, len, Charsets.US_ASCII))
                     pos += 1 + len
                     if (!jumped) next = pos

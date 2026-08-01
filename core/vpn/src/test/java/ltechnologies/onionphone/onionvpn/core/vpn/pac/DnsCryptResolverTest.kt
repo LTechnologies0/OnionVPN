@@ -41,14 +41,14 @@ class DnsCryptResolverTest {
                 resp[p++] = 60 // TTL
                 resp[p++] = 0
                 resp[p++] = 4
-                resp[p++] = 1
+                resp[p++] = 192.toByte()
+                resp[p++] = 0
                 resp[p++] = 2
-                resp[p++] = 3
-                resp[p++] = 4
+                resp[p++] = 1
                 stub.send(DatagramPacket(resp, p, packet.address, packet.port))
             }
-            val addr = DnsCryptResolver.resolveIpv4("example.test", "127.0.0.1", port)
-            assertEquals("1.2.3.4", addr.hostAddress)
+            val addr = DnsCryptResolver.resolveIpv4("example.com", "127.0.0.1", port)
+            assertEquals("192.0.2.1", addr.hostAddress)
         }
         executor.shutdownNow()
         executor.awaitTermination(2, TimeUnit.SECONDS)

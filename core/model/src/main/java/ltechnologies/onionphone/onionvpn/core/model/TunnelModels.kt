@@ -58,12 +58,33 @@ object TunnelEndpoints {
         return a == 10 && b in 192..255
     }
 
-    /** Tor `VirtualAddrNetworkIPv6 [FC00::]/7` — Automap AAAA for .onion/.exit. */
+    /** Tor AutomapHostsOnResolve IPv6 pool — must NOT overlap TUN ULA `fd00:8:8:8::/64`. */
+    const val VIRTUAL_ADDR_NETWORK_V6 = "fd12:4e4b:6f6e::"
+    const val VIRTUAL_ADDR_PREFIX_LEN_V6 = 48
+
+    /**
+     * Tor Automap virtual IPv6 (`VirtualAddrNetworkIPv6 [fd12:4e4b:6f6e::]/48`).
+     * Excludes the VPN client ULA prefix so TUN/LAN ULA are never treated as Automap.
+     */
     fun isAutomapVirtualIpv6(hostAddress: String): Boolean {
         if (hostAddress.indexOf(':') < 0) return false
         return runCatching {
             val raw = java.net.InetAddress.getByName(hostAddress).address
-            raw.size == 16 && (raw[0].toInt() and 0xfe) == 0xfc
+            if (raw.size != 16) return@runCatching false
+            // Exclude OnionVPN TUN ULA fd00:8:8:8::/64
+            if (raw[0] == 0xfd.toByte() && raw[1] == 0x00.toByte() &&
+                raw[2] == 0x08.toByte() && raw[3] == 0x08.toByte() &&
+                raw[4] == 0x08.toByte() && raw[5] == 0x08.toByte()
+            ) {
+                return@runCatching false
+            }
+            // fd12:4e4b:6f6e::/48
+            raw[0] == 0xfd.toByte() &&
+                raw[1] == 0x12.toByte() &&
+                raw[2] == 0x4e.toByte() &&
+                raw[3] == 0x4b.toByte() &&
+                raw[4] == 0x6f.toByte() &&
+                raw[5] == 0x6e.toByte()
         }.getOrDefault(false)
     }
 
@@ -102,13 +123,78 @@ object TunnelEndpoints {
         return (a shl 24) or (b shl 16) or (c shl 8) or d
     }
 
-    /** Tor special hostnames that must use DNSPort Automap + SOCKS5A, never DNSCrypt. */
+    /**
+     * Tor Automap / SOCKS5A candidate: any `.onion` / `.exit` suffix (Tor man
+     * AutomapHostsSuffixes). Malformed labels still go to Tor — never DNSCrypt —
+     * so bogus queries do not leak. Use [isValidOnionHostname] / [isValidExitHostname]
+     * when you need address-spec compliance.
+     */
     fun isOnionLikeHostname(hostname: String): Boolean {
-        val h = hostname.trim().trimEnd('.').lowercase()
+        val h = normalizeHostname(hostname)
         return h.endsWith(".onion") || h.endsWith(".exit")
     }
 
+    /**
+     * Tor address-spec onion v3: optional DNS labels + exactly 56 chars of base32
+     * (`a-z2-7`) + `.onion`. Rejects short fakes like `adb.onion` / `abc.onion`.
+     */
+    fun isValidOnionHostname(hostname: String): Boolean {
+        val h = normalizeHostname(hostname)
+        if (!h.endsWith(".onion")) return false
+        val withoutTld = h.removeSuffix(".onion")
+        if (withoutTld.isEmpty()) return false
+        val labels = withoutTld.split('.')
+        val onionLabel = labels.last()
+        if (!ONION_V3_LABEL.matches(onionLabel)) return false
+        return labels.dropLast(1).all { isDnsLabel(it) }
+    }
+
+    /**
+     * Tor address-spec `.exit`: `[destination.]hop.exit` where hop is a nickname
+     * (1–19 alnum) or a 40-hex fingerprint.
+     */
+    fun isValidExitHostname(hostname: String): Boolean {
+        val h = normalizeHostname(hostname)
+        if (!h.endsWith(".exit")) return false
+        val body = h.removeSuffix(".exit")
+        if (body.isEmpty()) return false
+        val parts = body.split('.')
+        val hop = parts.last()
+        val hopOk = EXIT_NICKNAME.matches(hop) || EXIT_FINGERPRINT.matches(hop)
+        if (!hopOk) return false
+        if (parts.size == 1) return true
+        val destination = parts.dropLast(1).joinToString(".")
+        return destination.isNotEmpty() &&
+            (parseIpv4Literal(destination) != null || destination.split('.').all { isDnsLabel(it) })
+    }
+
+    fun normalizeHostname(hostname: String): String =
+        hostname.trim().trimEnd('.').lowercase()
+
+    private fun isDnsLabel(label: String): Boolean =
+        label.isNotEmpty() &&
+            label.length <= 63 &&
+            label[0].isLetterOrDigit() &&
+            label.last().isLetterOrDigit() &&
+            label.all { it.isLetterOrDigit() || it == '-' }
+
+    private val ONION_V3_LABEL = Regex("^[a-z2-7]{56}$")
+    private val EXIT_NICKNAME = Regex("^[a-z0-9]{1,19}$")
+    private val EXIT_FINGERPRINT = Regex("^[0-9a-f]{40}$")
+
     const val VPN_MTU = 1280
+
+    /**
+     * Public DuckDuckGo onion (v3, address-spec). Prefer this over fake `.onion`
+     * labels in unit tests and docs.
+     */
+    const val WELL_KNOWN_ONION_DDG =
+        "duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion"
+
+    /** Public Tor Project onion (v3). */
+    const val WELL_KNOWN_ONION_TORPROJECT =
+        "2gzyxa5ihm7nsggfxnu52rck2vv4rvmdlkiu3zzui5du4xyclen53wid.onion"
+
 
     /**
      * SOCKS5 credentials helpers for per-app IsolateSOCKSAuth (path-spec strong tokens).
@@ -271,6 +357,11 @@ data class TunnelSnapshot(
     val socksProxy: String = "",
     /** Current HTTP CONNECT (HTTPTunnelPort) endpoint. */
     val httpProxy: String = "",
+    /**
+     * True while New Identity / Arti restart is in flight.
+     * UI must disable NEWNYM mash; kill-switch probes are deferred separately.
+     */
+    val identityRefreshing: Boolean = false,
 ) {
     val isBusy: Boolean
         get() = when (phase) {
@@ -282,8 +373,28 @@ data class TunnelSnapshot(
             else -> true
         }
 
+    /** Start/Stop primary button shows "active" chrome. */
     val isActive: Boolean
         get() = phase == TunnelPhase.Connected || phase == TunnelPhase.Blocking
+
+    /** Phases where a fresh START is allowed (toddler-proof). */
+    val canStart: Boolean
+        get() = phase == TunnelPhase.Idle ||
+            phase == TunnelPhase.Error ||
+            phase == TunnelPhase.Blocking
+
+    /** Phases where STOP is meaningful. */
+    val canStop: Boolean
+        get() = when (phase) {
+            TunnelPhase.Idle, TunnelPhase.Stopping, TunnelPhase.Error -> false
+            else -> true
+        }
+
+    /** New Identity only when fully connected and not already refreshing. */
+    val canNewNym: Boolean
+        get() = phase == TunnelPhase.Connected &&
+            !identityRefreshing &&
+            (torRuntimeReady || torControlConnected)
 }
 
 sealed interface VpnEstablishResult {

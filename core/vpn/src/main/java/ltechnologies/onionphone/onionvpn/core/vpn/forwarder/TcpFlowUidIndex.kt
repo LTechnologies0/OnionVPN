@@ -158,10 +158,7 @@ object TcpFlowUidIndex {
             val e = q.peekLast() ?: break
             if (now - e.atMs <= ENTRY_TTL_MS) {
                 takes.incrementAndGet()
-                if (now - e.atMs > ENTRY_TTL_MS / 4) {
-                    q.pollLast()
-                    q.addLast(e.copy(atMs = now))
-                }
+                // Do not mutate deque on peek (pollLast+addLast races concurrent peekers).
                 return e
             }
             q.pollLast()

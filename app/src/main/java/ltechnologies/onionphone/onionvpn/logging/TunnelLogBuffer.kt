@@ -156,6 +156,23 @@ object TunnelLogBuffer {
         LogSource.entries.forEach { clear(it) }
     }
 
+    /** Drop oldest half of each ring under memory pressure (keeps recent diagnostics). */
+    fun trimToHalf() {
+        synchronized(lock) {
+            trimDequeHalf(appDeque)
+            trimDequeHalf(dnsDeque)
+            trimDequeHalf(torDeque)
+            _app.value = appDeque.toList()
+            _dnscrypt.value = dnsDeque.toList()
+            _tor.value = torDeque.toList()
+        }
+    }
+
+    private fun trimDequeHalf(deque: ArrayDeque<LogLine>) {
+        val drop = deque.size / 2
+        repeat(drop) { deque.pollFirst() }
+    }
+
     private fun schedulePublish() {
         if (publishPending) return
         publishPending = true

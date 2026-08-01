@@ -64,25 +64,23 @@ object SystemLeakInspector {
                 detail = "VpnService.isLockdownEnabled=true alwaysOn=$liveAlwaysOn",
                 tripsKillSwitch = false,
             )
-            // Soft: Tor TUN can still route correctly without OS Lockdown. Hard-Blocking would
-            // blackhole working torrified traffic (Whonix/Graphene recommend Lockdown, but it is
-            // an OS setting — not proof that app packets clearnet). Keep Hard only when another
-            // VPN owns Always-on and can steal the TUN.
+            // Soft when Always-on not configured yet (user must opt into OS Lockdown).
+            // Hard when Always-on is ON without Lockdown — apps can bindProcessToNetwork past TUN.
             vpnUp && liveAlwaysOn && !liveLockdown -> ValidationCheck(
                 id = "android.vpn.always_on",
                 label = "Android Always-on VPN lockdown",
                 status = ValidationStatus.Fail,
                 detail = "Always-on ON but Lockdown OFF — enable “Block connections without VPN” " +
-                    "(Privacy Guides / GrapheneOS). Soft: Tor path still carries app traffic.",
-                tripsKillSwitch = false,
+                    "(Privacy Guides / GrapheneOS). Hard kill-switch: clearnet bypass possible.",
+                tripsKillSwitch = true,
             )
             alwaysOnPkg == ourPkg && !liveLockdown -> ValidationCheck(
                 id = "android.vpn.always_on",
                 label = "Android Always-on VPN lockdown",
                 status = ValidationStatus.Fail,
                 detail = "Always-on=$ourPkg but Lockdown not confirmed — enable " +
-                    "“Block connections without VPN”. Soft while TUN+Tor still route.",
-                tripsKillSwitch = false,
+                    "“Block connections without VPN”. Hard while Always-on claims ownership.",
+                tripsKillSwitch = true,
             )
             // Hard: another app owns Always-on and can displace our TUN.
             alwaysOnPkg != null && alwaysOnPkg != ourPkg -> ValidationCheck(

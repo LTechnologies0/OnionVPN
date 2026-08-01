@@ -15,6 +15,13 @@ class StabilityClassifierTest {
     }
 
     @Test
+    fun streamEnd_timeoutIsWarnOnly() {
+        val s = StabilityClassifier.forStreamReason("TIMEOUT")
+        assertEquals(StabilitySeverity.WARN, s.severity)
+        assertEquals(StabilityAction.NONE, s.action)
+    }
+
+    @Test
     fun streamEnd_norouteSoftRecover() {
         val s = StabilityClassifier.forStreamReason("NOROUTE")
         assertEquals(StabilityAction.SOFT_RECOVER, s.action)

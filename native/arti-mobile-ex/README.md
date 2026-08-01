@@ -5,6 +5,8 @@
 # - Hold TorClient handle for control ops
 # - Apply CircuitTimingBuilder::max_dirtiness + prediction_lifetime from
 #   state_dir/onionvpn_circuit_timing
+# - SocksTimeout parity: circuit_timing.request_timeout=120s; stream
+#   connect=90s / resolve=60s / resolve_ptr=30s (Arti defaults were 60/10/10)
 # - ExitNodes country via patched SOCKS StreamPrefs::exit_country (geoip)
 # - Conjure TransportConfig from state_dir/onionvpn_pt_plugins
 # - JNI Ext class org.torproject.arti.ArtiControlNative (control-api=2):

@@ -24,7 +24,8 @@ object TorStabilityCodes {
         EXITPOLICY(4, "EXITPOLICY", StabilitySeverity.INFO),
         DESTROY(5, "DESTROY", StabilitySeverity.WARN, StabilityAction.SOFT_RECOVER),
         DONE(6, "DONE", StabilitySeverity.IGNORE),
-        TIMEOUT(7, "TIMEOUT", StabilitySeverity.WARN, StabilityAction.SOFT_RECOVER),
+        // Single stream TIMEOUT is normal under exit load — do not DROPTIMEOUTS.
+        TIMEOUT(7, "TIMEOUT", StabilitySeverity.WARN),
         NOROUTE(8, "NOROUTE", StabilitySeverity.WARN, StabilityAction.SOFT_RECOVER),
         HIBERNATING(9, "HIBERNATING", StabilitySeverity.WARN, StabilityAction.SOFT_RECOVER),
         INTERNAL(10, "INTERNAL", StabilitySeverity.ERROR),
@@ -71,7 +72,8 @@ object TorStabilityCodes {
         CONNECTFAILED("CONNECTFAILED", StabilitySeverity.WARN, StabilityAction.SOFT_RECOVER),
         OR_IDENTITY("OR_IDENTITY", StabilitySeverity.WARN),
         OR_CONN_CLOSED("OR_CONN_CLOSED", StabilitySeverity.WARN, StabilityAction.SOFT_RECOVER),
-        TIMEOUT("TIMEOUT", StabilitySeverity.WARN, StabilityAction.SOFT_RECOVER),
+        // Circuit build TIMEOUT is expected while learning CBT — soft-recover floods apps.
+        TIMEOUT("TIMEOUT", StabilitySeverity.WARN),
         FINISHED("FINISHED", StabilitySeverity.IGNORE),
         DESTROYED("DESTROYED", StabilitySeverity.WARN),
         NOPATH("NOPATH", StabilitySeverity.ERROR, StabilityAction.SOFT_RECOVER),
@@ -103,7 +105,8 @@ object TorStabilityCodes {
         CONNECTREFUSED("CONNECTREFUSED", StabilitySeverity.WARN, StabilityAction.SOFT_RECOVER),
         IDENTITY("IDENTITY", StabilitySeverity.WARN),
         CONNECTRESET("CONNECTRESET", StabilitySeverity.WARN, StabilityAction.SOFT_RECOVER),
-        TIMEOUT("TIMEOUT", StabilitySeverity.WARN, StabilityAction.SOFT_RECOVER),
+        // One ORCONN TIMEOUT while guards rotate is noise; NOROUTE still hard-recovers.
+        TIMEOUT("TIMEOUT", StabilitySeverity.WARN),
         NOROUTE("NOROUTE", StabilitySeverity.WARN, StabilityAction.HARD_RECOVER),
         IOERROR("IOERROR", StabilitySeverity.WARN, StabilityAction.SOFT_RECOVER),
         RESOURCELIMIT("RESOURCELIMIT", StabilitySeverity.WARN),

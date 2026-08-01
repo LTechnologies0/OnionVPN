@@ -92,17 +92,21 @@ object TorConfigWriter {
 
         appendLine(
             "SOCKSPort ${TunnelEndpoints.LOOPBACK}:$socksPort " +
+                // IPv6Traffic: allow onion/IPv6 streams. Do NOT PreferIPv6 — DNSCrypt is A-only
+                // locally, but SOCKS5A hostname CONNECT is re-resolved at the exit; PreferIPv6
+                // then picks broken AAAA paths and apps (Speedtest OkHttp) hit SSL read timeouts.
                 "SessionGroup=${TunnelEndpoints.SESSION_GROUP_APPS} $SOCKS_ISOLATION_APPS " +
-                "KeepAliveIsolateSOCKSAuth",
+                "IPv6Traffic KeepAliveIsolateSOCKSAuth",
         )
         appendLine(
             "SOCKSPort ${TunnelEndpoints.LOOPBACK}:$dnsCryptSocksPort " +
                 "SessionGroup=${TunnelEndpoints.SESSION_GROUP_DNSCRYPT} $SOCKS_ISOLATION_MAX " +
-                "KeepAliveIsolateSOCKSAuth",
+                "IPv6Traffic KeepAliveIsolateSOCKSAuth",
         )
         appendLine(
             "SOCKSPort ${TunnelEndpoints.LOOPBACK}:$probeSocksPort " +
-                "SessionGroup=${TunnelEndpoints.SESSION_GROUP_PROBE} $SOCKS_ISOLATION_MAX",
+                "SessionGroup=${TunnelEndpoints.SESSION_GROUP_PROBE} $SOCKS_ISOLATION_MAX " +
+                "IPv6Traffic",
         )
         appendLine(
             "DNSPort ${TunnelEndpoints.LOOPBACK}:$dnsPort " +
@@ -115,8 +119,8 @@ object TorConfigWriter {
         appendLine("SafeSocks 0")
         appendLine("TestSocks 0")
         appendLine("VirtualAddrNetwork 10.192.0.0/10")
-        // Automap .onion AAAA into ULA for IPv6-preferring apps (Tor man VirtualAddrNetworkIPv6).
-        appendLine("VirtualAddrNetworkIPv6 [FC00::]/7")
+        // Automap .onion AAAA into a /48 that does not overlap TUN ULA fd00:8:8:8::/64.
+        appendLine("VirtualAddrNetworkIPv6 [${TunnelEndpoints.VIRTUAL_ADDR_NETWORK_V6}]/${TunnelEndpoints.VIRTUAL_ADDR_PREFIX_LEN_V6}")
         appendLine("TransPort 0")
         // HTTPTunnelPort uses Tor name resolution (exit DNS) — conflicts with DNSCrypt policy.
         // Apps that need HTTP CONNECT must use the PAC DNSCrypt→Tor bridge instead.
@@ -165,12 +169,20 @@ object TorConfigWriter {
         appendLine("EnforceDistinctSubnets 1")
         appendLine("StrictNodes 0")
 
-        // Cap pending builds — Isolate* + high pending caused circuit storms on app fan-out.
-        appendLine("MaxClientCircuitsPending 48")
+        // Cap pending builds. Default Tor is 32; forum.torproject.org users raise to 128 under
+        // "already have N circuits pending". Apps SocksPort no longer uses IsolateDestAddr, so
+        // 96 is safe for full-device VPN fan-out without the old circuit-storm pathology.
+        appendLine("MaxClientCircuitsPending 96")
+        // Tor man defaults: CircuitBuildTimeout 60 (initial while learning), SocksTimeout 120.
+        // Keep LearnCircuitBuildTimeout on — forum advice: don't disable learning on mobile.
         appendLine("CircuitBuildTimeout 60")
         appendLine("LearnCircuitBuildTimeout 1")
         appendLine("SocksTimeout 120")
         appendLine("CircuitStreamTimeout 0")
+
+        // Carrier/NAT middleboxes drop idle OR connections; man default is 5 minutes.
+        // Slightly shorter helps Wi‑Fi↔cell handoffs (Orbot #1471 class of "stuck after net flip").
+        appendLine("KeepalivePeriod 150")
 
         appendLine("ConnectionPadding auto")
         appendLine("ReducedConnectionPadding 0")

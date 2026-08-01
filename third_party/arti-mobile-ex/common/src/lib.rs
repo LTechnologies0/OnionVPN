@@ -226,7 +226,10 @@ fn build_client_config(params: &RuntimeParams) -> Result<TorClientConfig> {
         let mut transport = TransportConfigBuilder::default();
         transport
             .protocols(vec!["obfs4".parse().unwrap()])
-            .proxy_addr(SocketAddr::new("127.0.0.1".parse().unwrap(), 47300));
+            .proxy_addr(SocketAddr::new(
+                "127.0.0.1".parse().unwrap(),
+                params.obfs4_port,
+            ));
         client_config_builder.bridges().transports().push(transport);
     }
 
@@ -276,9 +279,24 @@ fn build_client_config(params: &RuntimeParams) -> Result<TorClientConfig> {
     }
 
     // MaxCircuitDirtiness analogue — CircuitTimingBuilder::max_dirtiness
+    // SocksTimeout analogue — request_timeout (C Tor torrc: SocksTimeout 120).
+    // Arti default is 60s; cold mobile circuits often need the full C Tor budget.
+    client_config_builder.circuit_timing().max_dirtiness(Duration::from_secs(
+        params.max_dirtiness_sec.clamp(60, 7_200),
+    ));
     client_config_builder
         .circuit_timing()
-        .max_dirtiness(Duration::from_secs(params.max_dirtiness_sec.clamp(60, 7_200)));
+        .request_timeout(Duration::from_secs(120));
+
+    // Stream timeouts: Arti defaults are 10s (connect + DNS resolve). That is far
+    // tighter than C Tor SocksTimeout and causes app/DNSCrypt timeouts that little-t
+    // does not show. Align with mobile Tor practice.
+    {
+        let st = client_config_builder.stream_timeouts();
+        st.connect_timeout(Duration::from_secs(90));
+        st.resolve_timeout(Duration::from_secs(60));
+        st.resolve_ptr_timeout(Duration::from_secs(30));
+    }
 
     // NewCircuitPeriod analogue — preemptive prediction_lifetime (floor 1h; never map
     // C Tor's short NewCircuitPeriod 1:1 or Arti thrash-rebuilds look like a BW cap).
@@ -287,9 +305,11 @@ fn build_client_config(params: &RuntimeParams) -> Result<TorClientConfig> {
         preempt.prediction_lifetime(Duration::from_secs(
             params.prediction_lifetime_sec.clamp(3_600, 86_400),
         ));
-        // Keep a few warm exits for common ports so first clicks after idle aren't cold.
-        preempt.min_exit_circs_for_port(3);
-        preempt.set_initial_predicted_ports(vec![80, 443, 853]);
+        // Keep warm exits for common ports. Include 8080/8443 — Ookla Speedtest
+        // probes many :8080 hosts in parallel; without predicted exits Arti returns
+        // SOCKS general-failure while building cold circuits (page load on :443 OK).
+        preempt.min_exit_circs_for_port(4);
+        preempt.set_initial_predicted_ports(vec![80, 443, 853, 8080, 8443]);
     }
 
     client_config_builder
@@ -708,7 +728,7 @@ fn apply_arti_max_dirtiness(secs: u64) -> Result<()> {
         .lock()
         .ok()
         .and_then(|g| g.as_ref().map(|p| p.prediction_lifetime_sec))
-        .unwrap_or(600);
+        .unwrap_or(3_600);
     apply_arti_circuit_timing(secs, prediction)
 }
 

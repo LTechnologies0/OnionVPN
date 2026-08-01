@@ -9,6 +9,7 @@ import java.io.File
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.Socket
+import java.util.concurrent.locks.LockSupport
 import timber.log.Timber
 
 /**
@@ -32,6 +33,26 @@ class ConnectionOwnerResolver(context: Context) {
             return resolveApi29Once(info)
         }
         return resolveProcNet(info)
+    }
+
+    /**
+     * SYN→UID races: the kernel often has not registered the socket when the first
+     * TUN SYN is read. A few short retries (off the hot path when possible) recover
+     * most stamps so [SocksUidBridge] does not deny Signal/WhatsApp reconnect storms.
+     */
+    fun resolveUidWithRetry(
+        info: IpPacketInfo,
+        attempts: Int = SYN_UID_RETRY,
+        parkNs: Long = SYN_UID_PARK_NS,
+    ): Int {
+        var uid = resolveUid(info)
+        if (isValidUid(uid)) return uid
+        repeat((attempts - 1).coerceAtLeast(0)) {
+            LockSupport.parkNanos(parkNs)
+            uid = resolveUid(info)
+            if (isValidUid(uid)) return uid
+        }
+        return uid
     }
 
     /**
@@ -151,6 +172,8 @@ class ConnectionOwnerResolver(context: Context) {
         private val addressScratch = ThreadLocal.withInitial { AddressScratch() }
         private const val PAC_UID_RETRY = 5
         private const val PAC_UID_SLEEP_MS = 4L
+        private const val SYN_UID_RETRY = 8
+        private const val SYN_UID_PARK_NS = 2_000_000L // 2ms × 8 ≈ 16ms SYN race window
 
         fun isValidUid(uid: Int): Boolean =
             uid != Process.INVALID_UID && uid >= 0

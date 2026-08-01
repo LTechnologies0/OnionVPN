@@ -99,11 +99,13 @@ class TorBandwidthSampler(
     }
 
     private fun formatRate(bytesPerSec: Double): String {
-        val a = abs(bytesPerSec)
+        // Primary unit = Mbit/s (bits) so UI matches Speedtest / ISP labels.
+        // TrafficStats / Tor counters are bytes — convert ×8.
+        val bits = abs(bytesPerSec) * 8.0
         return when {
-            a >= 1_048_576 -> String.format(Locale.US, "%.1f MB/s", bytesPerSec / 1_048_576.0)
-            a >= 1024 -> String.format(Locale.US, "%.1f KB/s", bytesPerSec / 1024.0)
-            else -> String.format(Locale.US, "%.0f B/s", bytesPerSec)
+            bits >= 1_000_000 -> String.format(Locale.US, "%.1f Mbit/s", bits / 1_000_000.0)
+            bits >= 1_000 -> String.format(Locale.US, "%.0f Kbit/s", bits / 1_000.0)
+            else -> String.format(Locale.US, "%.0f bit/s", bits)
         }
     }
 

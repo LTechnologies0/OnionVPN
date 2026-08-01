@@ -8,6 +8,9 @@ import java.net.ServerSocket
 import java.net.Socket
 import java.net.SocketException
 import java.nio.charset.StandardCharsets
+import java.util.concurrent.ArrayBlockingQueue
+import java.util.concurrent.ThreadPoolExecutor
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
@@ -26,6 +29,7 @@ class PacProxyServer(
     private val bridgeUp = AtomicBoolean(false)
     private val serverRef = AtomicReference<ServerSocket?>(null)
     private var acceptThread: Thread? = null
+    private var clientExecutor = newClientExecutor()
     private val socksBridge = DnsCryptSocksBridge()
 
     val pacUrl: String get() = TunnelEndpoints.pacUrl()
@@ -44,6 +48,9 @@ class PacProxyServer(
 
     fun start() {
         if (!running.compareAndSet(false, true)) return
+        if (clientExecutor.isShutdown || clientExecutor.isTerminated) {
+            clientExecutor = newClientExecutor()
+        }
         socksBridge.start()
         val server = try {
             ServerSocket(listenPort, 8, InetAddress.getByName(TunnelEndpoints.LOOPBACK))
@@ -54,19 +61,21 @@ class PacProxyServer(
             throw e
         }
         serverRef.set(server)
+        val acceptServer = server
         acceptThread = Thread({
             Timber.i("PAC server listening %s", pacUrl)
-            while (running.get()) {
+            while (!acceptServer.isClosed) {
                 try {
-                    val client = server.accept()
-                    Thread({ handleClient(client) }, "onionvpn-pac-req").apply {
-                        isDaemon = true
-                        start()
+                    val client = acceptServer.accept()
+                    try {
+                        clientExecutor.execute { handleClient(client) }
+                    } catch (_: java.util.concurrent.RejectedExecutionException) {
+                        runCatching { client.close() }
                     }
                 } catch (_: SocketException) {
-                    if (!running.get()) break
+                    break
                 } catch (e: Exception) {
-                    if (running.get()) Timber.d(e, "PAC accept error")
+                    if (!acceptServer.isClosed) Timber.d(e, "PAC accept error")
                 }
             }
         }, "onionvpn-pac-accept").apply {
@@ -80,10 +89,26 @@ class PacProxyServer(
         bridgeUp.set(false)
         runCatching { socksBridge.stop() }
         runCatching { serverRef.getAndSet(null)?.close() }
-        acceptThread?.interrupt()
+        acceptThread?.let { t ->
+            t.interrupt()
+            runCatching { t.join(2_000L) }
+        }
         acceptThread = null
+        clientExecutor.shutdownNow()
+        runCatching { clientExecutor.awaitTermination(2, TimeUnit.SECONDS) }
         Timber.i("PAC server stopped")
     }
+
+    private fun newClientExecutor(): ThreadPoolExecutor =
+        ThreadPoolExecutor(
+            1,
+            8,
+            30L,
+            TimeUnit.SECONDS,
+            ArrayBlockingQueue(16),
+            { r -> Thread(r, "onionvpn-pac-req").apply { isDaemon = true } },
+            ThreadPoolExecutor.AbortPolicy(),
+        ).apply { allowCoreThreadTimeOut(true) }
 
     private fun handleClient(socket: Socket) {
         socket.use { sock ->

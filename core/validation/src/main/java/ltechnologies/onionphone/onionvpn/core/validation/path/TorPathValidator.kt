@@ -55,12 +55,12 @@ object TorPathValidator {
         val engineOk = config.contains("engine=arti")
         val readyOk = config.contains("ready=1")
         val socksOk = if (socksPort != null) {
-            config.contains("socks=$socksPort")
+            hasStatusIntField(config, "socks", socksPort)
         } else {
             Regex("""socks=\d+""").containsMatchIn(config)
         }
         val dnsOk = if (dnsPort != null) {
-            config.contains("dns=$dnsPort")
+            hasStatusIntField(config, "dns", dnsPort)
         } else {
             Regex("""dns=\d+""").containsMatchIn(config)
         }
@@ -88,12 +88,12 @@ object TorPathValidator {
     ): ValidationCheck {
         val loopback = TunnelEndpoints.LOOPBACK
         val hasSocks = if (socksPort != null) {
-            config.contains("SOCKSPort $loopback:$socksPort")
+            hasTorPortLine(config, "SOCKSPort", loopback, socksPort)
         } else {
             config.contains("SOCKSPort $loopback:")
         }
         val hasDns = if (dnsPort != null) {
-            config.contains("DNSPort $loopback:$dnsPort")
+            hasTorPortLine(config, "DNSPort", loopback, dnsPort)
         } else {
             config.contains("DNSPort $loopback:")
         }
@@ -120,8 +120,9 @@ object TorPathValidator {
             .filter { it.startsWith("SOCKSPort ") && it.contains("SessionGroup=${TunnelEndpoints.SESSION_GROUP_APPS}") }
             .any { it.contains("KeepAliveIsolateSOCKSAuth") }
         val guardsOk = config.contains("NumEntryGuards 2") && config.contains("NumPrimaryGuards 2")
-        // TorConfigWriter uses 48; keep 32 accepted for older runtime torrc.
-        val pendingOk = config.contains("MaxClientCircuitsPending 48") ||
+        // TorConfigWriter uses 96; keep 48/32 for older runtime torrc still in the field.
+        val pendingOk = config.contains("MaxClientCircuitsPending 96") ||
+            config.contains("MaxClientCircuitsPending 48") ||
             config.contains("MaxClientCircuitsPending 32")
         val ok = hasSocks && hasDns && safeSocksOff && clientOnly &&
             entryGuards && socksIsolation && socksPolicy && multiSocks &&
@@ -226,6 +227,23 @@ object TorPathValidator {
         0x00, 0x01,
         0x00, 0x01,
     )
+
+    /** Exact `Directive 127.0.0.1:port` — avoids `:1` matching `:19050`. */
+    private fun hasTorPortLine(config: String, directive: String, host: String, port: Int): Boolean {
+        val prefix = "$directive $host:$port"
+        return config.lineSequence().any { line ->
+            val trimmed = line.trim()
+            trimmed == prefix || trimmed.startsWith("$prefix ")
+        }
+    }
+
+    private fun hasStatusIntField(config: String, key: String, value: Int): Boolean {
+        val expected = "$key=$value"
+        return config.lineSequence().any { line ->
+            val trimmed = line.trim()
+            trimmed == expected || trimmed.startsWith("$expected ")
+        }
+    }
 
     private const val DNS_PORT_TIMEOUT_MS = 15_000
     private const val REMOTE_DNS_TIMEOUT_MS = 25_000

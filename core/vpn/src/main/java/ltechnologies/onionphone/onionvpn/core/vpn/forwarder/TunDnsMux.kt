@@ -14,7 +14,9 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.locks.LockSupport
+import ltechnologies.onionphone.onionvpn.core.model.TorNetPolicy
 import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
+import ltechnologies.onionphone.onionvpn.core.model.observability.MemoryHygiene
 import ltechnologies.onionphone.onionvpn.core.vpn.dns.DnsHostnameCache
 import ltechnologies.onionphone.onionvpn.core.vpn.dns.DnsOnionAutomapReply
 import ltechnologies.onionphone.onionvpn.core.vpn.dns.DnsPacketParser
@@ -61,6 +63,7 @@ class TunDnsMux(
 ) {
     private val ownerResolver = ConnectionOwnerResolver(context)
     private val running = AtomicBoolean(false)
+    private val generation = AtomicLong(0)
     private var tunToHev: Thread? = null
     private var hevToTun: Thread? = null
     private val tunWriteLock = Any()
@@ -92,6 +95,7 @@ class TunDnsMux(
 
     fun start() {
         if (!running.compareAndSet(false, true)) return
+        val gen = generation.incrementAndGet()
         LeakPacketFilter.resetStats()
         val vpnDns = InetAddress.getByName(vpnDnsAddress).address
         val localTunOut = FileOutputStream(tunFd.fileDescriptor)
@@ -104,7 +108,7 @@ class TunDnsMux(
             tunIn = localTunIn
             val buf = ByteArray(MTU)
             try {
-                while (running.get()) {
+                while (running.get() && generation.get() == gen) {
                     val n = localTunIn.read(buf)
                     when {
                         n < 0 -> break
@@ -125,7 +129,9 @@ class TunDnsMux(
                                 try {
                                     dnsExecutor.execute {
                                         try {
-                                            handleDnsQuery(packet, n, localTunOut)
+                                            if (generation.get() == gen) {
+                                                handleDnsQuery(packet, n, localTunOut)
+                                            }
                                         } finally {
                                             recyclePacket(packet)
                                         }
@@ -153,7 +159,7 @@ class TunDnsMux(
                                 // port-unreachable makes the stack fail over promptly.
                                 IcmpUnreachable.buildForBlackholedUdp(buf, n)?.let { icmp ->
                                     synchronized(tunWriteLock) {
-                                        if (running.get()) {
+                                        if (running.get() && generation.get() == gen) {
                                             localTunOut.write(icmp, 0, icmp.size)
                                         }
                                     }
@@ -168,7 +174,7 @@ class TunDnsMux(
                     }
                 }
             } catch (error: Exception) {
-                if (running.get()) {
+                if (running.get() && generation.get() == gen) {
                     Timber.w(error, "TunDnsMux tun→hev stopped")
                     onFatal?.invoke(error)
                 }
@@ -184,7 +190,7 @@ class TunDnsMux(
             hevIn = localHevIn
             val buf = ByteArray(MTU)
             try {
-                while (running.get()) {
+                while (running.get() && generation.get() == gen) {
                     val n = localHevIn.read(buf)
                     when {
                         n < 0 -> break
@@ -198,14 +204,14 @@ class TunDnsMux(
                             // FakeDNS / hev replies: attribute Fake-IP → hostname.
                             snoopDnsInbound(buf, n)
                             synchronized(tunWriteLock) {
-                                if (!running.get()) return@synchronized
+                                if (!running.get() || generation.get() != gen) return@synchronized
                                 localTunOut.write(buf, 0, n)
                             }
                         }
                     }
                 }
             } catch (error: Exception) {
-                if (running.get()) {
+                if (running.get() && generation.get() == gen) {
                     Timber.w(error, "TunDnsMux hev→tun stopped")
                     onFatal?.invoke(error)
                 }
@@ -220,12 +226,17 @@ class TunDnsMux(
             "TunDnsMux started dns=$vpnDnsAddress divertDns=$divertDnsToDnsCrypt " +
                 "clearnet→$dnsCryptHost:$dnsCryptPort " +
                 "onion→${if (synthesizeOnionAutomap) "synth-automap" else "$torDnsHost:$torDnsPort"} " +
-                "pool=$DNS_CORE_THREADS..$DNS_MAX_THREADS q=$DNS_QUEUE_CAP",
+                "pool=$DNS_CORE_THREADS..$DNS_MAX_THREADS q=$DNS_QUEUE_CAP gen=$gen",
         )
     }
 
     fun stop() {
-        running.set(false)
+        if (!running.compareAndSet(true, false)) {
+            // Still bump generation so any late readers ignore fatals.
+            generation.incrementAndGet()
+            return
+        }
+        generation.incrementAndGet()
         dnsExecutor.shutdownNow()
         runCatching { tunIn?.close() }
         runCatching { hevIn?.close() }
@@ -237,8 +248,14 @@ class TunDnsMux(
         hevOut = null
         runCatching { tunFd.close() }
         runCatching { hevFd.close() }
-        tunToHev?.interrupt()
-        hevToTun?.interrupt()
+        tunToHev?.let { t ->
+            t.interrupt()
+            runCatching { t.join(2_000L) }
+        }
+        hevToTun?.let { t ->
+            t.interrupt()
+            runCatching { t.join(2_000L) }
+        }
         tunToHev = null
         hevToTun = null
         packetPool.clear()
@@ -251,6 +268,7 @@ class TunDnsMux(
                 Timber.w("DNS executor did not terminate cleanly")
             }
         }
+        MemoryHygiene.afterHeavyWork("tundnsmux_stop")
     }
 
     private fun borrowPacket(src: ByteArray, n: Int): ByteArray {
@@ -281,10 +299,25 @@ class TunDnsMux(
         } else {
             TcpFlowUidIndex.hasRecent(info.dstIpInt, info.dstPort)
         }
+        // Always re-stamp SYNs (owner UID may have been missed on the first race).
         if (!info.isTcpSyn && recent) return
         val uid = ownerResolver.resolveUid(info)
         if (ConnectionOwnerResolver.isValidUid(uid)) {
             TcpFlowUidIndex.note(info, uid)
+            return
+        }
+        // Kernel often lacks the socket on the first TUN SYN — retry off the reader thread.
+        if (!info.isTcpSyn || !running.get()) return
+        try {
+            dnsExecutor.execute {
+                if (!running.get()) return@execute
+                val retried = ownerResolver.resolveUidWithRetry(info)
+                if (ConnectionOwnerResolver.isValidUid(retried)) {
+                    TcpFlowUidIndex.note(info, retried)
+                }
+            }
+        } catch (_: RejectedExecutionException) {
+            // Pool saturated — SocksUidBridge still waits / uses last-uid fallback.
         }
     }
 
@@ -307,9 +340,12 @@ class TunDnsMux(
         val payload = udpDnsPayload(packet, length, expectDestPort53 = true) ?: return
         val parsed = DnsPacketParser.parse(packet, payload.first, payload.second) ?: return
         val qname = parsed.qname ?: return
-        // Pending map by query id helps FakeDNS responses that omit useful ANSWER names.
+        // Pending map by (srcPort, queryId) — 16-bit DNS IDs alone collide under load.
         if (!parsed.isResponse && parsed.queryId >= 0) {
-            pendingQnames[parsed.queryId] = qname
+            val ihl = (packet[0].toInt() and 0x0f) * 4
+            val srcPort = ((packet[ihl].toInt() and 0xff) shl 8) or (packet[ihl + 1].toInt() and 0xff)
+            val key = pendingQnameKey(srcPort, parsed.queryId)
+            pendingQnames[key] = qname
             if (pendingQnames.size > PENDING_QNAME_CAP) {
                 val it = pendingQnames.keys.iterator()
                 var n = 0
@@ -329,16 +365,22 @@ class TunDnsMux(
         val ihl = (packet[0].toInt() and 0x0f) * 4
         val srcPort = ((packet[ihl].toInt() and 0xff) shl 8) or (packet[ihl + 1].toInt() and 0xff)
         if (srcPort != 53) return
-        learnFromDnsPayload(packet, payload.first, payload.second)
+        val dstPort = ((packet[ihl + 2].toInt() and 0xff) shl 8) or (packet[ihl + 3].toInt() and 0xff)
+        learnFromDnsPayload(packet, payload.first, payload.second, clientSport = dstPort)
     }
 
-    private fun learnFromDnsPayload(buf: ByteArray, offset: Int, length: Int) {
+    private fun learnFromDnsPayload(buf: ByteArray, offset: Int, length: Int, clientSport: Int = -1) {
         val parsed = DnsPacketParser.parse(buf, offset, length) ?: return
         if (!parsed.isResponse) return
+        val pendingKey = if (clientSport >= 0 && parsed.queryId >= 0) {
+            pendingQnameKey(clientSport, parsed.queryId)
+        } else {
+            -1L
+        }
         val host = parsed.qname
-            ?: pendingQnames.remove(parsed.queryId)
+            ?: pendingQnames.remove(pendingKey)
             ?: return
-        pendingQnames.remove(parsed.queryId)
+        if (pendingKey >= 0) pendingQnames.remove(pendingKey)
         for (ip in parsed.aRecords) {
             DnsHostnameCache.put(ip, host)
         }
@@ -377,10 +419,15 @@ class TunDnsMux(
             if (length <= dnsOffset) return
 
             val queryLen = length - dnsOffset
-            val parsedQuery = DnsPacketParser.parse(packet, dnsOffset, queryLen)
-            val qname = parsedQuery?.qname
-            val expectId = parsedQuery?.queryId ?: -1
-            val useTorAutomap = TunnelEndpoints.isOnionLikeHostname(qname.orEmpty())
+            val parsedQuery = DnsPacketParser.parse(packet, dnsOffset, queryLen) ?: return
+            val qname = parsedQuery.qname
+            val expectId = parsedQuery.queryId
+            val route = TorNetPolicy.classifyDnsQuery(qname)
+            if (route == TorNetPolicy.DnsRoute.Drop) {
+                Timber.d("DNS query dropped — invalid QNAME q=$qname")
+                return
+            }
+            val useTorAutomap = route == TorNetPolicy.DnsRoute.TorAutomap
             val scratch = checkNotNull(dnsScratch.get())
 
             if (useTorAutomap && synthesizeOnionAutomap) {
@@ -443,18 +490,21 @@ class TunDnsMux(
                     ((scratch.responseBuf[0].toInt() and 0xff) shl 8) or
                         (scratch.responseBuf[1].toInt() and 0xff)
                 if (respId == expectId) {
+                    val flags =
+                        ((scratch.responseBuf[2].toInt() and 0xff) shl 8) or
+                            (scratch.responseBuf[3].toInt() and 0xff)
+                    if (flags and 0x8000 == 0) continue // QR
                     matched = true
                     break
                 }
                 Timber.d("TunDnsMux DNS id mismatch expect=$expectId got=$respId — skip stale")
             }
             if (!matched) {
-                // One retry on a fresh socket — shared ThreadLocal socket can be wedged
-                // after a prior Tor-slow timeout with stale datagrams.
+                // One shorter retry on a fresh socket — total budget ≈ DNSCrypt timeout + slack.
                 Timber.d("DNS forward timeout/mismatch — retry once q=$qname")
                 scratch.resetSocket()
                 val retrySock = scratch.socket()
-                retrySock.soTimeout = DNS_TIMEOUT_MS
+                retrySock.soTimeout = DNS_RETRY_TIMEOUT_MS
                 retrySock.send(
                     DatagramPacket(
                         packet,
@@ -464,11 +514,11 @@ class TunDnsMux(
                         upstreamPort,
                     ),
                 )
-                val retryDeadline = System.nanoTime() + DNS_TIMEOUT_MS * 1_000_000L
+                val retryDeadline = System.nanoTime() + DNS_RETRY_TIMEOUT_MS * 1_000_000L
                 while (System.nanoTime() < retryDeadline) {
                     val remainingMs =
                         ((retryDeadline - System.nanoTime()) / 1_000_000L).coerceAtLeast(1L)
-                    retrySock.soTimeout = remainingMs.toInt().coerceAtMost(DNS_TIMEOUT_MS)
+                    retrySock.soTimeout = remainingMs.toInt().coerceAtMost(DNS_RETRY_TIMEOUT_MS)
                     try {
                         retrySock.receive(response)
                     } catch (_: java.net.SocketTimeoutException) {
@@ -479,6 +529,10 @@ class TunDnsMux(
                         ((scratch.responseBuf[0].toInt() and 0xff) shl 8) or
                             (scratch.responseBuf[1].toInt() and 0xff)
                     if (respId == expectId) {
+                        val flags =
+                            ((scratch.responseBuf[2].toInt() and 0xff) shl 8) or
+                                (scratch.responseBuf[3].toInt() and 0xff)
+                        if (flags and 0x8000 == 0) continue
                         matched = true
                         break
                     }
@@ -489,8 +543,28 @@ class TunDnsMux(
                 return
             }
 
-            // Attribute resolved A records → QNAME (Automap virtual IP → .onion for SOCKS5A).
-            learnFromDnsPayload(scratch.responseBuf, 0, response.length)
+            // Attribute resolved A records → QNAME from the *query* (most reliable), then
+            // fall back to message/pending parse. DNSCrypt replies can omit/compress QNAME
+            // in ways that previously skipped A harvest when gated on response qname.
+            val parsedReply = DnsPacketParser.parse(scratch.responseBuf, 0, response.length)
+            val hostForCache = qname?.takeIf { it.isNotEmpty() }
+                ?: parsedReply?.qname?.takeIf { it.isNotEmpty() }
+            if (hostForCache != null && parsedReply != null && parsedReply.aRecords.isNotEmpty()) {
+                for (ip in parsedReply.aRecords) {
+                    DnsHostnameCache.put(ip, hostForCache)
+                }
+            } else {
+                val ihlOut = (packet[0].toInt() and 0x0f) * 4
+                val clientSport =
+                    ((packet[ihlOut].toInt() and 0xff) shl 8) or
+                        (packet[ihlOut + 1].toInt() and 0xff)
+                learnFromDnsPayload(
+                    scratch.responseBuf,
+                    0,
+                    response.length,
+                    clientSport = clientSport,
+                )
+            }
 
             val replyLen = buildDnsReplyInto(
                 request = packet,
@@ -516,6 +590,9 @@ class TunDnsMux(
                         Timber.d(error, "DNS forward failed — query dropped")
                 }
             }
+        } finally {
+            // Close ThreadLocal sockets before worker threads time out (StrictMode leak).
+            runCatching { dnsScratch.get()?.resetSocket() }
         }
     }
 
@@ -598,11 +675,11 @@ class TunDnsMux(
         private const val MTU = 1280
         private const val PROTO_UDP = 17
         /**
-         * Must exceed DNSCrypt's `timeout` (15s) — under Tor the stub often answers
-         * after 8–14s on a cold circuit; dropping earlier causes browser refresh timeouts
-         * while Arti bootstrap is already 100%.
+         * Align with Arti/C Tor resolve budgets (~60s) + one short retry.
+         * Arti stream resolve_timeout default was 10s (too tight vs little-t).
          */
-        private const val DNS_TIMEOUT_MS = 20_000
+        private const val DNS_TIMEOUT_MS = 25_000
+        private const val DNS_RETRY_TIMEOUT_MS = 15_000
         private const val DNS_RESPONSE_CAP = 2048
         private const val EMPTY_READ_BASE_NS = 200_000L // 0.2ms base, exponential cap ~51ms
         private val DNS_CORE_THREADS =
@@ -613,8 +690,11 @@ class TunDnsMux(
 
         private val dnsScratch = ThreadLocal.withInitial { DnsScratch() }
 
-        /** queryId → QNAME for FakeDNS responses that rely on query correlation. */
+        /** (srcPort << 16 | queryId) → QNAME for FakeDNS responses that rely on query correlation. */
         private val pendingQnames =
-            java.util.concurrent.ConcurrentHashMap<Int, String>(64)
+            java.util.concurrent.ConcurrentHashMap<Long, String>(64)
+
+        private fun pendingQnameKey(srcPort: Int, queryId: Int): Long =
+            (srcPort.toLong() and 0xffffL shl 16) or (queryId.toLong() and 0xffffL)
     }
 }

@@ -38,6 +38,7 @@ import ltechnologies.onionphone.onionvpn.core.model.TunnelSnapshot
 import ltechnologies.onionphone.onionvpn.core.model.ValidationCheck
 import ltechnologies.onionphone.onionvpn.core.model.ValidationStatus
 import ltechnologies.onionphone.onionvpn.core.model.observability.DiagnosticsGate
+import ltechnologies.onionphone.onionvpn.core.model.observability.MemoryHygiene
 import ltechnologies.onionphone.onionvpn.core.model.observability.OpTrace
 import ltechnologies.onionphone.onionvpn.core.model.stability.ProcessLogLevel
 import ltechnologies.onionphone.onionvpn.core.tor.control.TorControlHealth
@@ -85,6 +86,8 @@ class TunnelForegroundService : Service() {
     private var validationJob: Job? = null
     private var throughputJob: Job? = null
     private var forwarderWatchJob: Job? = null
+    private var newNymJob: Job? = null
+    @Volatile private var identityRefreshing: Boolean = false
     private var preferences = TunnelPreferences()
     private var runtimePorts: TunnelRuntimePorts? = null
     private val bandwidthSampler by lazy { TorBandwidthSampler(applicationInfo.uid) }
@@ -96,6 +99,10 @@ class TunnelForegroundService : Service() {
     private var lastNotificationUpdateMs: Long = 0L
     private val vpnBridge by lazy { TunnelVpnBridge(this) }
     private val pacServer by lazy { PacProxyServer() }
+    @Volatile private var pendingNetworkRecover = false
+    @Volatile private var pendingForwarderCheck = false
+    @Volatile private var lastHardNetworkRecoverMs = 0L
+    @Volatile private var softNetworkFailStreak = 0
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -109,35 +116,107 @@ class TunnelForegroundService : Service() {
         OnionVpnService.onUnderlyingNetworkChanged = {
             // Never block the main looper with ControlPort / Arti I/O.
             scope.launch(Dispatchers.IO) {
-                tor.onNetworkChanged().onFailure { soft ->
-                    Timber.w(soft, "Tor soft network recovery failed — trying hard")
-                    tor.recoverNetworkHard().onFailure {
-                        Timber.w(it, "Tor hard network recovery failed")
-                    }
-                }
+                recoverUnderlyingNetwork(fromPending = false)
             }
+        }
+    }
+
+    private suspend fun recoverUnderlyingNetwork(fromPending: Boolean) {
+        val phase = _snapshot.value.phase
+        if (phase != TunnelPhase.Connected) {
+            Timber.i("Underlying network change ignored — phase=%s", phase)
+            return
+        }
+        if (tor.isInMaintenance) {
+            pendingNetworkRecover = true
+            Timber.i("Underlying network change deferred — Tor maintenance")
+            return
+        }
+        pendingNetworkRecover = false
+        val soft = tor.onNetworkChanged()
+        if (soft.isSuccess) {
+            softNetworkFailStreak = 0
+            return
+        }
+        Timber.w(soft.exceptionOrNull(), "Tor soft network recovery failed")
+        softNetworkFailStreak++
+        val now = System.currentTimeMillis()
+        if (softNetworkFailStreak < 2 || now - lastHardNetworkRecoverMs < HARD_NETWORK_RECOVER_COOLDOWN_MS) {
+            Timber.i(
+                "Hard recover deferred — streak=%d cooldown=%dms fromPending=%s",
+                softNetworkFailStreak,
+                HARD_NETWORK_RECOVER_COOLDOWN_MS,
+                fromPending,
+            )
+            pendingNetworkRecover = true
+            return
+        }
+        if (tor.isInMaintenance || _snapshot.value.phase != TunnelPhase.Connected) {
+            pendingNetworkRecover = true
+            Timber.i("Hard recover skipped — phase/maintenance changed")
+            return
+        }
+        lastHardNetworkRecoverMs = now
+        softNetworkFailStreak = 0
+        tor.recoverNetworkHard().onFailure {
+            Timber.w(it, "Tor hard network recovery failed")
+            pendingNetworkRecover = true
         }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_START -> {
-                if (tunnelJob?.isActive == true) {
-                    Timber.w("Ignoring duplicate START — tunnel already starting")
-                    return START_STICKY
+                scope.launch {
+                    lifecycleMutex.withLock {
+                        if (tunnelJob?.isActive == true) {
+                            Timber.w("Ignoring duplicate START — tunnel already starting")
+                            return@withLock
+                        }
+                        if (!_snapshot.value.canStart) {
+                            Timber.w("Ignoring START — phase=%s", _snapshot.value.phase)
+                            return@withLock
+                        }
+                        preferences = preferencesFromIntent(intent)
+                        notifications.startForeground(TunnelPhase.StartingTor, throughputText)
+                        tunnelJob = scope.launch { runStartSequence() }
+                    }
                 }
-        preferences = preferencesFromIntent(intent)
-                notifications.startForeground(TunnelPhase.StartingTor, throughputText)
-                tunnelJob = scope.launch { runStartSequence() }
                 return START_STICKY
             }
             ACTION_STOP -> {
+                val phase = _snapshot.value.phase
+                if (phase == TunnelPhase.Idle || phase == TunnelPhase.Stopping) {
+                    Timber.w("Ignoring STOP — phase=%s", phase)
+                    return START_NOT_STICKY
+                }
+                newNymJob?.cancel()
+                newNymJob = null
+                identityRefreshing = false
                 scope.launch { runStopSequence(userInitiated = true) }
                 return START_NOT_STICKY
             }
             ACTION_NEWNYM -> {
-                scope.launch {
-                    val result = tor.newNym()
+                if (newNymJob?.isActive == true || identityRefreshing) {
+                    Timber.w("Ignoring duplicate NEWNYM")
+                    return START_STICKY
+                }
+                if (_snapshot.value.phase != TunnelPhase.Connected) {
+                    Timber.w("NEWNYM ignored — phase=%s", _snapshot.value.phase)
+                    return START_STICKY
+                }
+                newNymJob = scope.launch {
+                    identityRefreshing = true
+                    updateSnapshot(TunnelPhase.Connected)
+                    // Abort in-flight kill-switch probes so mid-NEWNYM SOCKS refusal
+                    // cannot be classified as a leak (Arti restart / C Tor NEWNYM).
+                    validationJob?.cancel()
+                    validationJob = null
+                    val result = try {
+                        tor.newNym()
+                    } finally {
+                        identityRefreshing = false
+                    }
                     result.onSuccess {
                         Timber.i(
                             "New identity via %s",
@@ -152,6 +231,9 @@ class TunnelForegroundService : Service() {
                             lastError = TunnelFailure.userMessageOf(err, "newnym"),
                         )
                     }
+                    if (_snapshot.value.phase == TunnelPhase.Connected) {
+                        startPeriodicValidation()
+                    }
                 }
                 return START_STICKY
             }
@@ -163,6 +245,10 @@ class TunnelForegroundService : Service() {
                     torNewCircuitPeriodSec = period,
                 )
                 scope.launch {
+                    if (_snapshot.value.phase != TunnelPhase.Connected) {
+                        Timber.i("Circuit timing ignored — phase=%s", _snapshot.value.phase)
+                        return@launch
+                    }
                     if (!preferences.torEngine.capabilities.liveCircuitTiming &&
                         !preferences.torEngine.capabilities.liveSetConf
                     ) {
@@ -181,6 +267,9 @@ class TunnelForegroundService : Service() {
                     lifecycleMutex.withLock {
                         tunnelJob?.cancel()
                         tunnelJob = null
+                        newNymJob?.cancel()
+                        newNymJob = null
+                        identityRefreshing = false
                         validationJob?.cancel()
                         validationJob = null
                         stopThroughputUpdates()
@@ -201,7 +290,15 @@ class TunnelForegroundService : Service() {
                 return START_NOT_STICKY
             }
             ACTION_ALWAYS_ON -> {
+                val phase = _snapshot.value.phase
                 if (tunnelJob?.isActive == true) {
+                    return START_STICKY
+                }
+                if (phase == TunnelPhase.Connected || phase == TunnelPhase.Validating ||
+                    phase == TunnelPhase.StartingTor || phase == TunnelPhase.StartingDnsCrypt ||
+                    phase == TunnelPhase.StartingVpn
+                ) {
+                    Timber.w("Ignoring ALWAYS_ON — already up phase=%s", phase)
                     return START_STICKY
                 }
                 // Blocking TUN already up from OnionVpnService; bring Tor path online.
@@ -442,6 +539,7 @@ class TunnelForegroundService : Service() {
             OnionVpnApplication.profiler(application)?.start()
         }
         OpTrace.info("tunnel", "Connected — diagnostics=${DiagnosticsGate.enabled()}")
+        MemoryHygiene.afterHeavyWork("tunnel_connected")
     }
 
     private suspend fun runValidation(ports: TunnelRuntimePorts) = try {
@@ -502,8 +600,33 @@ class TunnelForegroundService : Service() {
         validations: List<ValidationCheck> = emptyList(),
         /** Only stop Tor when SOCKS/process is dead — never nuke a live Tor path for soft faults. */
         stopTorProcesses: Boolean = true,
+        alreadyHoldingLifecycleLock: Boolean = false,
     ) {
-        Timber.e("Tunnel failure: $message (stopTor=$stopTorProcesses)")
+        if (alreadyHoldingLifecycleLock) {
+            handleFailureLocked(message, fromValidation, validations, stopTorProcesses)
+        } else {
+            lifecycleMutex.withLock {
+                handleFailureLocked(message, fromValidation, validations, stopTorProcesses)
+            }
+        }
+    }
+
+    private suspend fun handleFailureLocked(
+        message: String,
+        fromValidation: Boolean,
+        validations: List<ValidationCheck>,
+        stopTorProcesses: Boolean,
+    ) {
+        val phase = _snapshot.value.phase
+        if (phase == TunnelPhase.Stopping || phase == TunnelPhase.Idle) {
+            Timber.i("handleFailure ignored — phase=%s", phase)
+            return
+        }
+        if (identityRefreshing || tor.isInMaintenance) {
+            Timber.i("handleFailure deferred — identity/maintenance (%s)", message)
+            return
+        }
+        Timber.e("Tunnel failure: $message (stopTor=$stopTorProcesses fromValidation=$fromValidation)")
         releaseBootstrapWakeLock()
         stopThroughputUpdates()
 
@@ -572,6 +695,9 @@ class TunnelForegroundService : Service() {
         lifecycleMutex.withLock {
             tunnelJob?.cancel()
             tunnelJob = null
+            newNymJob?.cancel()
+            newNymJob = null
+            identityRefreshing = false
             validationJob?.cancel()
             validationJob = null
             stopThroughputUpdates()
@@ -599,7 +725,12 @@ class TunnelForegroundService : Service() {
         OpTrace.info("tunnel", "teardown phase=$phase error=${lastError ?: "-"}")
         OnionVpnApplication.profiler(application)?.stop()
         domainReputation.onTorUnavailable()
-        updateSnapshot(phase, lastError = lastError, validations = validations)
+        updateSnapshot(
+            phase,
+            lastError = lastError,
+            validations = validations,
+            clearError = lastError == null,
+        )
         validationJob?.cancel()
         validationJob = null
         circuitLifecycle.stop()
@@ -610,6 +741,7 @@ class TunnelForegroundService : Service() {
         dnsCrypt.stop()
         tor.stop()
         releaseBootstrapWakeLock()
+        MemoryHygiene.afterHeavyWork("tunnel_teardown")
         if (resetSnapshot) {
             runtimePorts = null
             throughputTracker.reset()
@@ -622,8 +754,19 @@ class TunnelForegroundService : Service() {
         forwarderWatchJob = scope.launch {
             OnionVpnService.tunForwarderAlive.collect { alive ->
                 if (!alive && _snapshot.value.phase == TunnelPhase.Connected) {
+                    if (tor.isInMaintenance || OnionVpnService.vpnRebinding.value) {
+                        pendingForwarderCheck = true
+                        Timber.i("TUN forwarder flap ignored — Tor maintenance / VPN rebind")
+                        return@collect
+                    }
+                    pendingForwarderCheck = false
                     lifecycleMutex.withLock {
                         if (_snapshot.value.phase != TunnelPhase.Connected) return@withLock
+                        if (tor.isInMaintenance || OnionVpnService.vpnRebinding.value) {
+                            pendingForwarderCheck = true
+                            Timber.i("TUN forwarder recovery deferred — Tor maintenance / rebind")
+                            return@withLock
+                        }
                         val ports = runtimePorts
                         if (ports != null && tor.isRunning() && isSocksReachable(ports.torSocksPort)) {
                             Timber.w("TUN forwarder died — Tor SOCKS still up; rebinding forwarder (keep Tor)")
@@ -635,13 +778,21 @@ class TunnelForegroundService : Service() {
                                 return@withLock
                             }
                         }
+                        if (tor.isInMaintenance) {
+                            pendingForwarderCheck = true
+                            Timber.i("TUN forwarder kill-switch skipped — Tor maintenance")
+                            return@withLock
+                        }
                         Timber.e("TUN forwarder dead and Tor path unusable — kill-switch Blocking TUN")
                         handleFailure(
                             message = "TUN forwarder died",
                             fromValidation = true,
                             stopTorProcesses = !tor.isRunning(),
+                            alreadyHoldingLifecycleLock = true,
                         )
                     }
+                } else if (alive) {
+                    pendingForwarderCheck = false
                 }
             }
         }
@@ -663,6 +814,10 @@ class TunnelForegroundService : Service() {
             while (isActive) {
                 delay(VALIDATION_INTERVAL_MS)
                 if (_snapshot.value.phase != TunnelPhase.Connected) continue
+                if (tor.isInMaintenance || OnionVpnService.vpnRebinding.value) {
+                    Timber.i("Periodic validation deferred — Tor maintenance / VPN rebind")
+                    continue
+                }
                 val ports = runtimePorts ?: continue
                 ticks++
                 val checks = if (ticks % FULL_VALIDATION_TICKS == 0) {
@@ -690,7 +845,23 @@ class TunnelForegroundService : Service() {
                         torEngine = preferences.torEngine,
                     )
                 }
-                val hardFails = checks.filter { TunnelValidator.isHardKillSwitchFailure(it) }
+                // TOCTOU: NEWNYM / hard recover / TUN rebind may have started while probes ran.
+                if (tor.isInMaintenance ||
+                    OnionVpnService.vpnRebinding.value ||
+                    _snapshot.value.phase != TunnelPhase.Connected
+                ) {
+                    Timber.i(
+                        "Periodic validation discarded — maintenance=%s rebind=%s phase=%s",
+                        tor.isInMaintenance,
+                        OnionVpnService.vpnRebinding.value,
+                        _snapshot.value.phase,
+                    )
+                    continue
+                }
+                val hardFails = checks.filter {
+                    TunnelValidator.isHardKillSwitchFailure(it) &&
+                        !(it.id == "vpn.not.established" && OnionVpnService.vpnRebinding.value)
+                }
                 val softFails = checks.filter {
                     it.status == ValidationStatus.Fail && !TunnelValidator.isHardKillSwitchFailure(it)
                 }
@@ -699,6 +870,13 @@ class TunnelForegroundService : Service() {
                     Timber.e("Periodic soft FAIL [${check.id}] ${check.label}: ${check.detail}")
                 }
                 if (hardFails.isNotEmpty()) {
+                    if (tor.isInMaintenance ||
+                        OnionVpnService.vpnRebinding.value ||
+                        _snapshot.value.phase != TunnelPhase.Connected
+                    ) {
+                        Timber.i("Periodic hard FAIL ignored — Tor maintenance / rebind / phase changed")
+                        continue
+                    }
                     hardFails.forEach { check ->
                         Timber.e("Periodic hard FAIL [${check.id}] ${check.label}: ${check.detail}")
                     }
@@ -738,6 +916,40 @@ class TunnelForegroundService : Service() {
                 val st = tor.controlStatus.value
                 if (phase == TunnelPhase.Connected && st.connected) {
                     stabilityRecovery.maybeApply(st)
+                }
+                if (phase == TunnelPhase.Connected && !tor.isInMaintenance) {
+                    if (pendingNetworkRecover) {
+                        recoverUnderlyingNetwork(fromPending = true)
+                    }
+                    if (pendingForwarderCheck &&
+                        !OnionVpnService.vpnRebinding.value &&
+                        !OnionVpnService.tunForwarderAlive.value
+                    ) {
+                        pendingForwarderCheck = false
+                        Timber.i("Replaying deferred TUN forwarder check after maintenance")
+                        // Collector only fires on StateFlow change — nudge false→ already false.
+                        // Run the same recovery path inline.
+                        lifecycleMutex.withLock {
+                            if (_snapshot.value.phase != TunnelPhase.Connected) return@withLock
+                            val ports = runtimePorts
+                            if (ports != null && tor.isRunning() && isSocksReachable(ports.torSocksPort)) {
+                                val gen = OnionVpnService.nextGeneration()
+                                vpnBridge.startConnected(preferences, ports, gen)
+                                if (vpnBridge.waitForConnected(gen, ports)) {
+                                    OnionVpnService.markForwarderAlive()
+                                    return@withLock
+                                }
+                            }
+                            handleFailure(
+                                message = "TUN forwarder died",
+                                fromValidation = true,
+                                stopTorProcesses = !tor.isRunning(),
+                                alreadyHoldingLifecycleLock = true,
+                            )
+                        }
+                    } else if (OnionVpnService.tunForwarderAlive.value) {
+                        pendingForwarderCheck = false
+                    }
                 }
                 val builtLive = circuitLifecycle.liveCircuits.value.count {
                     it.info.status.equals("BUILT", ignoreCase = true)
@@ -782,32 +994,36 @@ class TunnelForegroundService : Service() {
 
     private fun updateSnapshot(
         phase: TunnelPhase,
-        validations: List<ValidationCheck> = _snapshot.value.validations,
-        torRunning: Boolean = _snapshot.value.torRunning,
-        dnsCryptRunning: Boolean = _snapshot.value.dnsCryptRunning,
-        vpnEstablished: Boolean = _snapshot.value.vpnEstablished,
+        validations: List<ValidationCheck>? = null,
+        torRunning: Boolean? = null,
+        dnsCryptRunning: Boolean? = null,
+        vpnEstablished: Boolean? = null,
         lastError: String? = _snapshot.value.lastError,
+        clearError: Boolean = false,
     ) {
         val caps = preferences.torEngine.capabilities
         val liveCircs = circuitLifecycle.liveCircuits.value
         val liveStreams = circuitLifecycle.liveStreams.value
         val controlUp = caps.classicControlPlane && tor.control.isConnected
         val builtLive = liveCircs.count { it.info.status.equals("BUILT", ignoreCase = true) }
-        _snapshot.value = TunnelSnapshotBuilder.build(
-            phase = phase,
-            preferences = preferences,
-            torStatus = tor.controlStatus.value,
-            throughputText = throughputText,
-            validations = validations,
-            torRunning = torRunning,
-            dnsCryptRunning = dnsCryptRunning,
-            vpnEstablished = vpnEstablished,
-            lastError = lastError,
-            runtimePorts = runtimePorts,
-            liveBuiltCircuits = if (controlUp) builtLive else -1,
-            liveStreamCount = if (controlUp) liveStreams.size else -1,
-            torEngine = preferences.torEngine,
-        )
+        _snapshot.update { prev ->
+            TunnelSnapshotBuilder.build(
+                phase = phase,
+                preferences = preferences,
+                torStatus = tor.controlStatus.value,
+                throughputText = throughputText,
+                validations = validations ?: prev.validations,
+                torRunning = torRunning ?: prev.torRunning,
+                dnsCryptRunning = dnsCryptRunning ?: prev.dnsCryptRunning,
+                vpnEstablished = vpnEstablished ?: prev.vpnEstablished,
+                lastError = if (clearError) null else (lastError ?: prev.lastError),
+                runtimePorts = runtimePorts,
+                liveBuiltCircuits = if (controlUp) builtLive else -1,
+                liveStreamCount = if (controlUp) liveStreams.size else -1,
+                torEngine = preferences.torEngine,
+                identityRefreshing = identityRefreshing,
+            )
+        }
         notifications.updateIfChanged(phase, throughputText, lastNotificationText, lastNotificationUpdateMs)
             .also { (text, at) ->
                 lastNotificationText = text
@@ -853,11 +1069,13 @@ class TunnelForegroundService : Service() {
         const val EXTRA_NO_LOGS = "no_logs"
 
         private const val BOOTSTRAP_WAKELOCK_TIMEOUT_MS = 90_000L
+        /** Soft fail streak / cooldown before Arti hard restart on link flap. */
+        private const val HARD_NETWORK_RECOVER_COOLDOWN_MS = 60_000L
         /** Leak checks — catch Private DNS activation sooner without thrashing Tor. */
         private const val VALIDATION_INTERVAL_MS = 45_000L
         private const val VALIDATION_TIMEOUT_MS = 90_000L
         /** After full validateAll timeout: local wiring + OS leak checks only. */
-        private const val HARD_GATE_TIMEOUT_MS = 25_000L
+        private const val HARD_GATE_TIMEOUT_MS = 45_000L
         /** Every N lite validations → one full (includes exit-IP). ~7.5 min at 45s. */
         private const val FULL_VALIDATION_TICKS = 10
         /** UI throughput tick; BW events fill rates without GETINFO each tick. */
@@ -883,7 +1101,7 @@ class TunnelForegroundService : Service() {
             torEntryNodes = intent.getStringExtra(EXTRA_TOR_ENTRY).orEmpty(),
             torExitNodes = intent.getStringExtra(EXTRA_TOR_EXIT).orEmpty(),
             torExcludeNodes = intent.getStringExtra(EXTRA_TOR_EXCLUDE).orEmpty(),
-            torNewCircuitPeriodSec = intent.getIntExtra(EXTRA_TOR_NEW_CIRCUIT, 180),
+            torNewCircuitPeriodSec = intent.getIntExtra(EXTRA_TOR_NEW_CIRCUIT, 30),
             torMaxCircuitDirtinessSec = intent.getIntExtra(EXTRA_TOR_MAX_DIRTINESS, 600),
             dnsCryptRequireNoLog = intent.getBooleanExtra(EXTRA_DNS_NOLOG, true),
             dnsCryptRequireNoFilter = intent.getBooleanExtra(EXTRA_DNS_NOFILTER, false),

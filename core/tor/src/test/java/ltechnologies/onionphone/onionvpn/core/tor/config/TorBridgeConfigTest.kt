@@ -15,12 +15,12 @@ class TorBridgeConfigTest {
 
     @Test
     fun detectsTransports() {
-        assertEquals("obfs4", TorBridgeConfig.transportOf("obfs4 1.2.3.4:443 FPR cert=x iat-mode=0"))
+        assertEquals("obfs4", TorBridgeConfig.transportOf("obfs4 192.0.2.1:443 FPR cert=x iat-mode=0"))
         assertEquals("snowflake", TorBridgeConfig.transportOf("Bridge snowflake 192.0.2.3:80 FPR"))
         assertEquals("webtunnel", TorBridgeConfig.transportOf("webtunnel 192.0.2.1:443 FPR url=https://x.example"))
         assertEquals("conjure", TorBridgeConfig.transportOf("conjure 192.0.2.1:443 FPR"))
         assertEquals("meek_lite", TorBridgeConfig.transportOf("meek_lite 192.0.2.20:80 url=https://x front=y"))
-        assertEquals(null, TorBridgeConfig.transportOf("1.2.3.4:443 AABBCC"))
+        assertEquals(null, TorBridgeConfig.transportOf("192.0.2.1:443 AABBCC"))
     }
 
     @Test
@@ -115,7 +115,7 @@ class TorBridgeConfigTest {
         val torrc = TorConfigWriter.write(
             dataDirectory = tmp.newFolder("tor").absolutePath,
             preferences = TunnelPreferences(
-                torBridges = "obfs4 1.2.3.4:443 FPR cert=x iat-mode=0",
+                torBridges = "obfs4 192.0.2.1:443 FPR cert=x iat-mode=0",
             ),
             nativeLibraryDir = libDir.absolutePath,
         )

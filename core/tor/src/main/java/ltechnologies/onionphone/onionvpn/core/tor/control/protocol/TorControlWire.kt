@@ -1,6 +1,7 @@
 package ltechnologies.onionphone.onionvpn.core.tor.control.protocol
 
 import java.io.IOException
+import ltechnologies.onionphone.onionvpn.core.model.TorNetPolicy
 
 /**
  * Control-spec wire helpers: QuotedString escaping and argument validation
@@ -45,14 +46,11 @@ internal object TorControlWire {
     }
 
     /**
-     * Hostnames for RESOLVE — no whitespace/CRLF (command injection).
+     * Hostnames for RESOLVE — torrified destination shape only (no CRLF injection).
      */
     fun requireHostname(hostname: String): String {
         val h = hostname.trim()
-        if (h.isEmpty() || h.length > 253) {
-            throw IOException("invalid hostname for RESOLVE")
-        }
-        if (h.any { it <= ' ' || it == '\r' || it == '\n' || it == '"' }) {
+        if (!TorNetPolicy.isValidSocksDestination(h)) {
             throw IOException("invalid hostname for RESOLVE")
         }
         return h

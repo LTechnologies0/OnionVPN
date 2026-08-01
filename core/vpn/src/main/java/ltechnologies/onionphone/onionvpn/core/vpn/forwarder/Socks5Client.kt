@@ -7,6 +7,7 @@ import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.Socket
 import java.nio.charset.StandardCharsets
+import ltechnologies.onionphone.onionvpn.core.model.TorNetPolicy
 import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
 import ltechnologies.onionphone.onionvpn.core.model.stability.TorStabilityCodes
 
@@ -21,8 +22,12 @@ class Socks5Client(
     private val username: String,
     private val password: String,
     private val connectTimeoutMs: Int = 20_000,
-    /** Bound for SOCKS greeting/auth/CONNECT reply — Tor circuit build on cold path. */
-    private val handshakeTimeoutMs: Int = 55_000,
+    /**
+     * Bound for SOCKS greeting/auth/CONNECT reply.
+     * Must stay ≥ Tor [SocksTimeout] (default 120s) — aborting earlier causes false
+     * ECONNRESET while little-t is still attaching a circuit (Tor man + forum.torproject).
+     */
+    private val handshakeTimeoutMs: Int = 120_000,
     private val protect: ((Socket) -> Boolean)? = null,
 ) {
     fun connect(destHost: String, destPort: Int): Socket {
@@ -74,8 +79,12 @@ class Socks5Client(
             }
 
             // CONNECT — IPv4 literal, IPv6 literal, or hostname (SOCKS5A via Tor).
+            if (!TorNetPolicy.isValidSocksDestination(destHost) || !TorNetPolicy.isValidPort(destPort)) {
+                socket.close()
+                throw IOException("SOCKS5 invalid destination")
+            }
             val hostBytes = destHost.toByteArray(StandardCharsets.UTF_8)
-            val isIpv4 = destHost.matches(IPV4_REGEX)
+            val isIpv4 = TunnelEndpoints.parseIpv4Literal(destHost) != null
             val isIpv6 = !isIpv4 && destHost.indexOf(':') >= 0
             output.writeByte(0x05)
             output.writeByte(0x01) // CONNECT
@@ -145,8 +154,6 @@ class Socks5Client(
     }
 
     companion object {
-        private val IPV4_REGEX = Regex("""^\d{1,3}(\.\d{1,3}){3}$""")
-
         private fun isLoopback(host: String): Boolean =
             host == "127.0.0.1" || host.equals("localhost", ignoreCase = true) ||
                 host == "::1" || host == TunnelEndpoints.LOOPBACK

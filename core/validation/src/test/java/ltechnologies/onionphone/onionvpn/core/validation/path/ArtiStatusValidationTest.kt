@@ -69,4 +69,44 @@ class ArtiStatusValidationTest {
         )
         assertEquals(ValidationStatus.Pass, check.status)
     }
+
+    @Test
+    fun missingAutomapFlag_fails() {
+        val status = """
+            engine=arti
+            ready=1
+            socks=9050
+            dns=9053
+            shared_socks=1
+            synthesize_onion_automap=0
+        """.trimIndent()
+        val check = TorPathValidator.validateArtiStatusContent(
+            status,
+            "arti.status",
+            socksPort = 9050,
+            dnsPort = 9053,
+        )
+        assertEquals(ValidationStatus.Fail, check.status)
+        assertTrue(check.detail.contains("synthAutomap=false"))
+    }
+
+    @Test
+    fun wrongSocksPort_fails() {
+        val status = """
+            engine=arti
+            ready=1
+            socks=9050
+            dns=9053
+            shared_socks=1
+            synthesize_onion_automap=1
+        """.trimIndent()
+        val check = TorPathValidator.validateArtiStatusContent(
+            status,
+            "arti.status",
+            socksPort = 1111,
+            dnsPort = 9053,
+        )
+        assertEquals(ValidationStatus.Fail, check.status)
+        assertTrue(check.detail.contains("socks=false"))
+    }
 }

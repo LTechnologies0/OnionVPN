@@ -1,16 +1,18 @@
 package ltechnologies.onionphone.onionvpn.core.vpn.forwarder
 
 import java.util.concurrent.atomic.AtomicLong
+import ltechnologies.onionphone.onionvpn.core.model.TorNetPolicy
+import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
 import timber.log.Timber
 
 /**
  * Fail-closed packet filters for torrified VPN (Privacy Guides / Tor: TCP + DNS only).
  *
  * Strategy (no remote UDP gateway until prop. 339 ships):
- * 1. Divert UDP/53 (IPv4+IPv6) → DNSCrypt-over-Tor (handled by [TunDnsMux]).
- * 2. Forward IPv4+IPv6 TCP via hev → SocksUidBridge → Tor SOCKS (ATYP 0x01/0x04/0x03).
- * 3. Blackhole other UDP/ICMP/multicast so apps fall back to TCP
- *    (HTTP/2 instead of QUIC/HTTP3, no WebRTC media, etc.).
+ * 1. Divert UDP/53 (IPv4) → DNSCrypt-over-Tor (handled by [TunDnsMux]).
+ * 2. Forward IPv4 TCP (+ Automap IPv6 ULA) via hev → SocksUidBridge → Tor SOCKS.
+ * 3. Blackhole clearnet IPv6 TCP (DNSCrypt A-only; kills Happy Eyeballs Tor stalls),
+ *    other UDP/ICMP/multicast so apps fall back to TCP.
  * 4. Never forward to the clearnet underlying network.
  */
 object LeakPacketFilter {
@@ -49,7 +51,7 @@ object LeakPacketFilter {
         Dtls,
         TcpDns,
         GenericUdp,
-        /** @deprecated IPv6 TCP is torrified; kept for log compatibility. */
+        /** Clearnet IPv6 TCP (non-Automap) — force IPv4 / Happy Eyeballs fail-fast. */
         Ipv6,
     }
 
@@ -109,31 +111,34 @@ object LeakPacketFilter {
             (packet[40 + 3].toInt() and 0xff)
         // TCP/53 and DoT/853 → blackhole; apps must use UDP/53 → DNSCrypt.
         if (destPort == 53 || destPort == 853) return false
-        return true
+        // Clearnet IPv6 TCP: blackhole — DNSCrypt is A-only; Happy Eyeballs IPv6
+        // races through Tor exits cause SSL timeouts (Speedtest). Automap ULA only.
+        val dest = ipv6DestHost(packet) ?: return false
+        return TunnelEndpoints.isAutomapVirtualIpv6(dest)
     }
 
-    /** True when UDP dest port is 53 (IPv4 or IPv6 — force torrified DNS). */
+    /** True when IPv4 UDP dest port is 53 (IPv6 DNS is blackholed — mux is IPv4-only). */
     fun isDnsUdpPort53(packet: ByteArray, length: Int): Boolean {
         if (length < 28) return false
         val version = (packet[0].toInt() ushr 4) and 0x0f
-        return when (version) {
-            4 -> {
-                val ihl = (packet[0].toInt() and 0x0f) * 4
-                if (length < ihl + 8) return false
-                if (packet[9].toInt() and 0xff != PROTO_UDP) return false
-                val destPort = ((packet[ihl + 2].toInt() and 0xff) shl 8) or
-                    (packet[ihl + 3].toInt() and 0xff)
-                destPort == 53
-            }
-            6 -> {
-                if (length < 40 + 8) return false
-                if (packet[6].toInt() and 0xff != PROTO_UDP) return false
-                val destPort = ((packet[40 + 2].toInt() and 0xff) shl 8) or
-                    (packet[40 + 3].toInt() and 0xff)
-                destPort == 53
-            }
-            else -> false
-        }
+        if (version != 4) return false
+        val ihl = (packet[0].toInt() and 0x0f) * 4
+        if (length < ihl + 8) return false
+        if (packet[9].toInt() and 0xff != PROTO_UDP) return false
+        val destPort = ((packet[ihl + 2].toInt() and 0xff) shl 8) or
+            (packet[ihl + 3].toInt() and 0xff)
+        return destPort == 53
+    }
+
+    /** IPv6 UDP/53 — blackhole until TunDnsMux supports v6 DNS replies. */
+    fun isIpv6DnsUdpPort53(packet: ByteArray, length: Int): Boolean {
+        if (length < 40 + 8) return false
+        val version = (packet[0].toInt() ushr 4) and 0x0f
+        if (version != 6) return false
+        if (packet[6].toInt() and 0xff != PROTO_UDP) return false
+        val destPort = ((packet[40 + 2].toInt() and 0xff) shl 8) or
+            (packet[40 + 3].toInt() and 0xff)
+        return destPort == 53
     }
 
     /** TCP DNS (53) or DoT (853) — blackhole so apps use UDP/53 → DNSCrypt. */
@@ -176,7 +181,11 @@ object LeakPacketFilter {
             val next = packet[6].toInt() and 0xff
             return when (next) {
                 PROTO_ICMPV6 -> BlackholeReason.Icmp
-                PROTO_TCP -> if (isDnsTcpPort(packet, length)) BlackholeReason.TcpDns else BlackholeReason.NotUdp
+                PROTO_TCP -> when {
+                    isDnsTcpPort(packet, length) -> BlackholeReason.TcpDns
+                    !isTorrifiableIpv6Tcp(packet, length) -> BlackholeReason.Ipv6
+                    else -> BlackholeReason.NotUdp
+                }
                 PROTO_UDP -> classifyUdpPortReasonV6(packet, length)
                 else -> BlackholeReason.GenericUdp
             }
@@ -239,9 +248,9 @@ object LeakPacketFilter {
     }
 
     /**
-     * Early drop before DNS divert / firewall.
-     * UDP/53 (v4/v6) is NOT dropped here (caller diverts). IPv6 TCP continues to hev.
-     */
+         * Early drop before DNS divert / firewall.
+         * IPv4 UDP/53 is NOT dropped here (caller diverts). IPv6 UDP/53 blackholes (mux IPv4-only).
+         */
     fun shouldDropEarly(packet: ByteArray, length: Int): Boolean {
         if (length < 20) return true
         val version = (packet[0].toInt() ushr 4) and 0x0f
@@ -298,6 +307,7 @@ object LeakPacketFilter {
         payloadLen: Int,
     ): BlackholeReason {
         when (dstPort) {
+            53 -> return BlackholeReason.TcpDns // IPv6 UDP/53 (mux is IPv4-only)
             443, 80, 8443, 853 -> {
                 if (payloadLen > 0 && looksLikeQuic(packet, payloadOff, payloadLen)) {
                     return BlackholeReason.QuicHttp3
@@ -370,17 +380,23 @@ object LeakPacketFilter {
     }
 
     private fun isMulticastOrBroadcastV4(packet: ByteArray): Boolean {
-        val b0 = packet[16].toInt() and 0xff
-        if (b0 >= 224) return true
-        return (packet[16].toInt() and 0xff) == 255 &&
-            (packet[17].toInt() and 0xff) == 255 &&
-            (packet[18].toInt() and 0xff) == 255 &&
-            (packet[19].toInt() and 0xff) == 255
+        val dst = ipv4Int(packet, 16)
+        return when (TorNetPolicy.classifyIpv4(dst)) {
+            TorNetPolicy.IpClass.Multicast,
+            TorNetPolicy.IpClass.Broadcast,
+            -> true
+            else -> false
+        }
     }
 
-    private fun isLinkLocalV4(packet: ByteArray): Boolean {
-        return (packet[16].toInt() and 0xff) == 169 && (packet[17].toInt() and 0xff) == 254
-    }
+    private fun isLinkLocalV4(packet: ByteArray): Boolean =
+        TorNetPolicy.classifyIpv4(ipv4Int(packet, 16)) == TorNetPolicy.IpClass.LinkLocal
+
+    private fun ipv4Int(packet: ByteArray, offset: Int): Int =
+        ((packet[offset].toInt() and 0xff) shl 24) or
+            ((packet[offset + 1].toInt() and 0xff) shl 16) or
+            ((packet[offset + 2].toInt() and 0xff) shl 8) or
+            (packet[offset + 3].toInt() and 0xff)
 
     /** ff00::/8 multicast or fe80::/10 link-local destination. */
     private fun isMulticastOrLinkLocalV6(packet: ByteArray): Boolean {
@@ -389,5 +405,15 @@ object LeakPacketFilter {
         if (b0 == 0xff) return true // multicast
         if (b0 == 0xfe && (packet[25].toInt() and 0xc0) == 0x80) return true // link-local
         return false
+    }
+
+    /** IPv6 destination host string from a TUN packet (bytes 24..39). */
+    private fun ipv6DestHost(packet: ByteArray): String? {
+        if (packet.size < 40) return null
+        return runCatching {
+            java.net.InetAddress.getByAddress(packet.copyOfRange(24, 40))
+                .hostAddress
+                ?.substringBefore('%')
+        }.getOrNull()
     }
 }

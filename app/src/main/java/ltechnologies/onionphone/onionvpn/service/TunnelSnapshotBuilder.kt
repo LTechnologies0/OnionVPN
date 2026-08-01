@@ -28,6 +28,7 @@ internal object TunnelSnapshotBuilder {
         liveBuiltCircuits: Int = -1,
         liveStreamCount: Int = -1,
         torEngine: TorEngine = preferences.torEngine,
+        identityRefreshing: Boolean = false,
     ): TunnelSnapshot {
         val caps = torEngine.capabilities
         val proxiesLive = phase == TunnelPhase.Connected ||
@@ -71,12 +72,17 @@ internal object TunnelSnapshotBuilder {
             pacUrl = if (ports != null) TunnelEndpoints.pacUrl() else "",
             socksProxy = ports?.let { TunnelEndpoints.pacSocksBridge() }.orEmpty(),
             httpProxy = "", // HTTPTunnelPort disabled — use PAC bridge (DNSCrypt), not Tor exit DNS
+            identityRefreshing = identityRefreshing,
         )
     }
 
-    fun formatRate(bytesPerSec: Long): String = when {
-        bytesPerSec >= 1_000_000 -> "%.1f MB/s".format(bytesPerSec / 1_000_000.0)
-        bytesPerSec >= 1_000 -> "%.0f KB/s".format(bytesPerSec / 1_000.0)
-        else -> "$bytesPerSec B/s"
+    /** [bytesPerSec] → Mbit/s (bits), same unit family as Speedtest / ISP. */
+    fun formatRate(bytesPerSec: Long): String {
+        val bits = bytesPerSec * 8.0
+        return when {
+            bits >= 1_000_000 -> "%.1f Mbit/s".format(bits / 1_000_000.0)
+            bits >= 1_000 -> "%.0f Kbit/s".format(bits / 1_000.0)
+            else -> "%.0f bit/s".format(bits)
+        }
     }
 }

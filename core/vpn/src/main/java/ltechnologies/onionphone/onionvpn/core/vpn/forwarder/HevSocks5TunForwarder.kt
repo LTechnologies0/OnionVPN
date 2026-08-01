@@ -179,6 +179,13 @@ class HevSocks5TunForwarder(
     }
 
     companion object {
+        /**
+         * Packet-oriented mux↔hev link.
+         *
+         * Must stay SOCK_DGRAM: hev-socks5-tunnel treats the VPN fd as a datagram TUN
+         * (one write = one IP packet). SOCK_SEQPACKET broke payload forward after SOCKS
+         * CONNECT (Speedtest: CONNECT ok, zero pipe first-bytes, Read/SSL timeouts).
+         */
         fun createPacketSocketPair(): Array<ParcelFileDescriptor> {
             val fd0 = FileDescriptor()
             val fd1 = FileDescriptor()
@@ -191,7 +198,9 @@ class HevSocks5TunForwarder(
                 )
             }
             runCatching {
-                val buf = 1024 * 1024
+                // 4 MiB each side — parallel CDN flows (Speedtest/OneTrust) need headroom
+                // so a full DGRAM queue does not drop TLS records.
+                val buf = 4 * 1024 * 1024
                 Os.setsockoptInt(fd0, OsConstants.SOL_SOCKET, OsConstants.SO_SNDBUF, buf)
                 Os.setsockoptInt(fd0, OsConstants.SOL_SOCKET, OsConstants.SO_RCVBUF, buf)
                 Os.setsockoptInt(fd1, OsConstants.SOL_SOCKET, OsConstants.SO_SNDBUF, buf)

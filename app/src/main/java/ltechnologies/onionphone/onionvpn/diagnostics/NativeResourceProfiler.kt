@@ -12,6 +12,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import ltechnologies.onionphone.onionvpn.core.model.observability.DiagnosticsGate
+import ltechnologies.onionphone.onionvpn.core.model.observability.MemoryHygiene
 import ltechnologies.onionphone.onionvpn.core.model.observability.OpTrace
 import ltechnologies.onionphone.onionvpn.core.model.observability.ProcFsParser
 import ltechnologies.onionphone.onionvpn.core.model.stability.ProcessLogLevel
@@ -69,6 +70,7 @@ class NativeResourceProfiler(
                 val snap = sample()
                 _snapshot.value = snap
                 OpTrace.event(MODULE, snap.summaryLine(), ProcessLogLevel.DEBUG)
+                MemoryHygiene.suggestGcIfPressure("profiler")
                 delay(intervalMs)
             }
         }
@@ -156,14 +158,14 @@ class NativeResourceProfiler(
     companion object {
         const val MODULE = "profiler"
         const val DEFAULT_INTERVAL_MS = 5_000L
+        // Names must match jniLibs/*.so (Go PTs ship as libLyrebird / libConjure).
         val TRACKED_LIBS = listOf(
             "libtor.so",
             "libarti_mobile_ex.so",
             "libhev-socks5-tunnel.so",
             "libdnscrypt-proxy.so",
-            "liblyrebird.so",
-            "libobfs4proxy.so",
-            "libconjure.so",
+            "libLyrebird.so",
+            "libConjure.so",
         )
     }
 }

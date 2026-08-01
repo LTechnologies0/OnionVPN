@@ -234,7 +234,11 @@ fun StatusScreen(
             modifier = Modifier
                 .fillMaxWidth()
                 .height(56.dp),
-            enabled = !isBusy && snapshot.phase != TunnelPhase.Stopping,
+            enabled = when {
+                snapshot.phase == TunnelPhase.Stopping -> false
+                active -> snapshot.canStop
+                else -> !isBusy && snapshot.canStart
+            },
             shape = MaterialTheme.shapes.large,
             colors = if (active) {
                 ButtonDefaults.buttonColors(
@@ -245,7 +249,7 @@ fun StatusScreen(
                 ButtonDefaults.buttonColors()
             },
         ) {
-            if (isBusy) {
+            if (isBusy || snapshot.identityRefreshing) {
                 CircularProgressIndicator(
                     modifier = Modifier
                         .height(22.dp)
@@ -255,9 +259,10 @@ fun StatusScreen(
                 )
             }
             Text(
-                when (snapshot.phase) {
-                    TunnelPhase.Connected -> "Stop tunnel"
-                    TunnelPhase.Blocking -> "Stop (kill switch)"
+                when {
+                    snapshot.identityRefreshing -> "Refreshing identity…"
+                    snapshot.phase == TunnelPhase.Connected -> "Stop tunnel"
+                    snapshot.phase == TunnelPhase.Blocking -> "Stop (kill switch)"
                     else -> "Start tunnel"
                 },
                 style = MaterialTheme.typography.labelLarge,
@@ -272,16 +277,25 @@ fun StatusScreen(
                         modifier = Modifier
                             .fillMaxWidth()
                             .height(52.dp),
-                        enabled = snapshot.torRuntimeReady || snapshot.torControlConnected,
+                        enabled = snapshot.canNewNym,
                         shape = MaterialTheme.shapes.large,
                     ) {
-                        Icon(Icons.Filled.SwapHoriz, contentDescription = null)
-                        Spacer(modifier = Modifier.width(8.dp))
+                        if (snapshot.identityRefreshing) {
+                            CircularProgressIndicator(
+                                modifier = Modifier
+                                    .height(20.dp)
+                                    .padding(end = 8.dp),
+                                strokeWidth = 2.dp,
+                            )
+                        } else {
+                            Icon(Icons.Filled.SwapHoriz, contentDescription = null)
+                            Spacer(modifier = Modifier.width(8.dp))
+                        }
                         Text(
-                            if (snapshot.torEngine.capabilities.classicControlPlane) {
-                                "New identity"
-                            } else {
-                                "New identity (restart Arti)"
+                            when {
+                                snapshot.identityRefreshing -> "New identity…"
+                                snapshot.torEngine.capabilities.classicControlPlane -> "New identity"
+                                else -> "New identity (restart Arti)"
                             },
                         )
                     }
