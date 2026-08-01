@@ -135,6 +135,14 @@ class HevSocks5TunForwarder(
         mux.start()
     }
 
+    /**
+     * Pause (port=0) or restore upstream Tor SocksPort without tearing down hev.
+     * Used during Tor DisableNetwork / Arti restart so CONNECT never hits a dead Tor.
+     */
+    fun updateTorSocks(port: Int) {
+        uidBridge?.updateTorSocks(port)
+    }
+
     override fun stop() {
         OpTrace.debug("hev", "stop")
         dnsMux?.stop()

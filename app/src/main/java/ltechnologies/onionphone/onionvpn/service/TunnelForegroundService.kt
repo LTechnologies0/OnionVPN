@@ -113,6 +113,24 @@ class TunnelForegroundService : Service() {
             DnsHostnameCache.clear()
             OnionAutomapAllocator.clear()
         }
+        // Tor control-spec: DisableNetwork closes outbound sockets. Pause bridges first
+        // so SOCKS CONNECT never races Tor (avoids status=1 / "DisableNetwork set" spam).
+        tor.onTorDowntimeChanged = { down ->
+            val ports = runtimePorts
+            if (down) {
+                Timber.i("Tor downtime: pause SOCKS bridges")
+                OnionVpnService.setTorSocksUpstream(0)
+                pacServer.updateUpstream(0, ports?.dnsCryptListenPort ?: 0)
+            } else {
+                val socks = ports?.torSocksPort ?: 0
+                val dns = ports?.dnsCryptListenPort ?: 0
+                Timber.i("Tor downtime end: restore SOCKS bridges socks=%d dnscrypt=%d", socks, dns)
+                if (socks > 0) {
+                    OnionVpnService.setTorSocksUpstream(socks)
+                    pacServer.updateUpstream(socks, dns)
+                }
+            }
+        }
         OnionVpnService.onUnderlyingNetworkChanged = {
             // Never block the main looper with ControlPort / Arti I/O.
             scope.launch(Dispatchers.IO) {

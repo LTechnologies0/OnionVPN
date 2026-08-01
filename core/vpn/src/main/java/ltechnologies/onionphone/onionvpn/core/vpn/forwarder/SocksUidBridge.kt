@@ -155,6 +155,7 @@ class SocksUidBridge(
                 }
                 val torPort = torSocksPort.get()
                 if (torPort <= 0) {
+                    // Tor downtime (DisableNetwork / Arti restart) — refuse locally.
                     reply(output, 0x01)
                     return
                 }
@@ -234,12 +235,20 @@ class SocksUidBridge(
                 is SocketException -> {
                     val m = cur.message?.lowercase().orEmpty()
                     if (m.contains("reset") || m.contains("broken pipe") ||
-                        m.contains("closed") || m.contains("connection abort")
+                        m.contains("closed") || m.contains("connection abort") ||
+                        m.contains("connection refused")
                     ) {
                         return true
                     }
                 }
                 is java.net.SocketTimeoutException -> return true
+                is IOException -> {
+                    val m = cur.message?.lowercase().orEmpty()
+                    // SOCKS status=1 = general failure — typical during DisableNetwork race.
+                    if (m.contains("status=1") || m.contains("connection refused")) {
+                        return true
+                    }
+                }
             }
             cur = cur.cause
         }

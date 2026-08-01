@@ -95,15 +95,47 @@ class TorProcessManager(
         get() = maintenanceDepth.get() > 0
 
     /**
+     * Invoked when Tor enters/leaves intentional downtime that drops SocksPort
+     * (DisableNetwork bounce / Arti restart). App layer MUST pause SOCKS bridges
+     * before Tor closes listeners so CONNECT does not race `DisableNetwork`
+     * (control-spec / Tor warn: "Tried to open a socket with DisableNetwork set").
+     *
+     * Not fired for little-t SIGNAL NEWNYM (SocksPort stays up; circuits rebuild).
+     */
+    var onTorDowntimeChanged: ((inDowntime: Boolean) -> Unit)? = null
+
+    /** Nested count of [withTorDowntime] calls that requested bridge pause. */
+    private val bridgePauseDepth = AtomicInteger(0)
+
+    /**
      * Run [block] under maintenance + exclusive downtime lock.
      * Nested callers queue on the mutex (safe; avoids overlapping Arti JNI restarts).
+     *
+     * @param pauseUpstreamSocks when true, notify [onTorDowntimeChanged] so VPN
+     *   bridges stop dialing Tor. Use false for little-t NEWNYM (SOCKS stays up).
      */
-    private suspend fun <T> withTorDowntime(block: suspend () -> T): T =
+    private suspend fun <T> withTorDowntime(
+        pauseUpstreamSocks: Boolean = true,
+        block: suspend () -> T,
+    ): T =
         downtimeMutex.withLock {
             maintenanceDepth.incrementAndGet()
+            val pausedBridges = if (pauseUpstreamSocks) {
+                bridgePauseDepth.incrementAndGet() == 1
+            } else {
+                false
+            }
+            if (pausedBridges) {
+                runCatching { onTorDowntimeChanged?.invoke(true) }
+                    .onFailure { Timber.w(it, "onTorDowntimeChanged(true) failed") }
+            }
             try {
                 block()
             } finally {
+                if (pauseUpstreamSocks && bridgePauseDepth.decrementAndGet() == 0) {
+                    runCatching { onTorDowntimeChanged?.invoke(false) }
+                        .onFailure { Timber.w(it, "onTorDowntimeChanged(false) failed") }
+                }
                 maintenanceDepth.decrementAndGet()
             }
         }
@@ -342,12 +374,13 @@ class TorProcessManager(
                     return@withContext Result.failure(IOException("control not connected"))
                 }
                 // Holdoff so validation/watchdog don't treat circuit rebuild as a leak.
+                // SocksPort stays up — do not pause VPN bridges (unlike DisableNetwork).
                 runCatching {
-                    withTorDowntime {
+                    withTorDowntime(pauseUpstreamSocks = false) {
                         control.newNym().getOrThrow()
                         clearAppDnsCaches()
                         // Brief settle — NEWNYM does not drop SOCKS but streams rebuild.
-                        kotlinx.coroutines.delay(NEWNYM_SETTLE_MS)
+                        delay(NEWNYM_SETTLE_MS)
                     }
                 }.fold(
                     onSuccess = {
@@ -577,10 +610,13 @@ class TorProcessManager(
                     return@withContext Result.failure(IOException("control not connected"))
                 }
                 // DisableNetwork bounce drops listeners briefly — same race as Arti NEWNYM.
+                // Bridges are paused via onTorDowntimeChanged(true) before DisableNetwork=1.
                 withTorDowntime {
                     control.dropTimeouts().onFailure { Timber.w(it, "DROPTIMEOUTS failed") }
                     control.setDisableNetwork(true).onFailure { Timber.w(it, "DisableNetwork=1 failed") }
                     control.setDisableNetwork(false).onFailure { Timber.w(it, "DisableNetwork=0 failed") }
+                    // Let SocksPort listeners return before unpausing bridges (finally).
+                    delay(SOCKS_AFTER_DISABLE_NETWORK_MS)
                     val active = control.setActive()
                     control.clearDnsCache().onFailure { Timber.w(it, "CLEARDNSCACHE failed") }
                     control.refreshHealthLite()
@@ -1178,6 +1214,8 @@ class TorProcessManager(
         private const val ARTI_NEWNYM_MIN_INTERVAL_MS = 10_500L
         /** Brief maintenance hold after SIGNAL NEWNYM while circuits rebuild. */
         private const val NEWNYM_SETTLE_MS = 2_500L
+        /** After DisableNetwork=0, wait for SocksPort to accept before unpausing bridges. */
+        private const val SOCKS_AFTER_DISABLE_NETWORK_MS = 300L
 
         /**
          * SOCKS5h: unresolved host so Tor resolves the name (no local clearnet DNS).

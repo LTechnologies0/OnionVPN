@@ -287,6 +287,7 @@ class OnionVpnService : VpnService() {
         forwarderSocksPort.value = torSocksPort
         forwarderDnsCryptPort.value = dnsCryptPort
         forwarderAlive.value = true
+        torSocksUpstreamUpdater = { port -> forwarder.updateTorSocks(port) }
         forwarder.start(
             tunFd = tun,
             socksHost = TunnelEndpoints.LOOPBACK,
@@ -314,6 +315,7 @@ class OnionVpnService : VpnService() {
     }
 
     private fun stopForwarder() {
+        torSocksUpstreamUpdater = null
         tunForwarder?.stop()
         tunForwarder = null
         forwarderSocksPort.value = -1
@@ -410,6 +412,25 @@ class OnionVpnService : VpnService() {
 
         private val forwarderAlive = MutableStateFlow(true)
         val tunForwarderAlive: StateFlow<Boolean> = forwarderAlive.asStateFlow()
+
+        /**
+         * Live updater for [HevSocks5TunForwarder.updateTorSocks] while TUN is up.
+         * Cleared on forwarder stop.
+         */
+        @Volatile
+        private var torSocksUpstreamUpdater: ((Int) -> Unit)? = null
+
+        /**
+         * Pause (0) or restore Tor SocksPort on the UID bridge without restarting hev.
+         * Call from Tor downtime hooks so apps never dial Tor during DisableNetwork.
+         */
+        fun setTorSocksUpstream(port: Int) {
+            val p = port.coerceAtLeast(0)
+            torSocksUpstreamUpdater?.invoke(p)
+            if (p > 0) {
+                forwarderSocksPort.value = p
+            }
+        }
 
         /** After a successful hev rebind, clear the dead-forwarder latch. */
         fun markForwarderAlive() {

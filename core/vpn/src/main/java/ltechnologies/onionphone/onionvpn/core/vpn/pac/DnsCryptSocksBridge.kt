@@ -292,6 +292,8 @@ class DnsCryptSocksBridge(
         return "broken pipe" in msg ||
             "connection reset" in msg ||
             "connection abort" in msg ||
+            "connection refused" in msg ||
+            "status=1" in msg ||
             "poll timed out" in msg
     }
 
