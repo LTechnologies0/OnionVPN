@@ -74,6 +74,7 @@ class UnderlyingNetworkTracker(
         }
         callback = null
         lastPublishedNetId = null
+        // Teardown: release preference so system default applies again.
         runCatching { vpnService.setUnderlyingNetworks(null) }
     }
 
@@ -90,16 +91,18 @@ class UnderlyingNetworkTracker(
      */
     private fun publish(cm: ConnectivityManager, notifyTor: Boolean) {
         val best = selectBestUnderlying(cm)
-            val netId = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && best != null) {
-                best.networkHandle
-            } else {
-                best?.hashCode()?.toLong()
-            }
+        val netId = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && best != null) {
+            best.networkHandle
+        } else {
+            best?.hashCode()?.toLong()
+        }
         try {
             val changed = netId != lastPublishedNetId
             if (changed) {
-                vpnService.setUnderlyingNetworks(best?.let { arrayOf(it) })
+                // emptyArray = no uplink (fail-closed); null = system default (not the same).
+                // Platform docs: empty ⇒ apps won't send/receive on VPN carrier path.
                 if (best != null) {
+                    vpnService.setUnderlyingNetworks(arrayOf(best))
                     val caps = cm.getNetworkCapabilities(best)
                     Timber.i(
                         "setUnderlyingNetworks net=$best wifi=%s cell=%s validated=%s",
@@ -108,7 +111,8 @@ class UnderlyingNetworkTracker(
                         caps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED),
                     )
                 } else {
-                    Timber.w("No underlying non-VPN network — setUnderlyingNetworks(null)")
+                    vpnService.setUnderlyingNetworks(emptyArray())
+                    Timber.w("No underlying non-VPN network — setUnderlyingNetworks([])")
                 }
             }
             lastPublishedNetId = netId

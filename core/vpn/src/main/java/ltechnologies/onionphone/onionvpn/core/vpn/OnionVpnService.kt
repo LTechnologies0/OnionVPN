@@ -115,20 +115,18 @@ class OnionVpnService : VpnService() {
         forwarderSocksPort.value = -1
         forwarderDnsCryptPort.value = -1
 
+        // Platform seamless handover: keep old TUN+forwarder until new establish() succeeds.
+        // Closing/stopping the old plane first opens a clearnet or blackhole window.
         val previousTun = tunInterface
         val previousForwarder = tunForwarder
-        tunForwarder = null
-
-        // Stop draining the old TUN first — packets blackhole (fail-closed) while we swap.
-        previousForwarder?.stop()
 
         val result = establish(preferences, mode)
         when (result) {
             is VpnEstablishResult.Success -> {
-                // New TUN owns routes — safe to close the previous fd.
-                if (previousTun != null && previousTun !== tunInterface) {
-                    previousTun.close()
-                }
+                // New iface owns egress (platform handover). Release old bridge port, then
+                // bind the new forwarder — SocksUidBridge listen port is process-global.
+                previousForwarder?.stop()
+                if (tunForwarder === previousForwarder) tunForwarder = null
                 if (startForwarder && mode == VpnProfileMode.Connected) {
                     startForwarder(
                         torSocksPort,
@@ -140,6 +138,10 @@ class OnionVpnService : VpnService() {
                     startUnderlyingTracking()
                 } else {
                     stopUnderlyingTracking()
+                    tunForwarder = null
+                }
+                if (previousTun != null && previousTun !== tunInterface) {
+                    previousTun.close()
                 }
                 profileMode.value = mode
                 if (generation >= 0) {
@@ -165,26 +167,17 @@ class OnionVpnService : VpnService() {
             is VpnEstablishResult.Failure -> {
                 OpTrace.error("vpn", "establish failed: ${result.reason}")
                 Timber.e("VPN establish failed: ${result.reason}")
-                // Keep previous TUN if still open so we do not open a clearnet window.
+                // establish() only assigns tunInterface on success — previous plane untouched.
                 if (previousTun != null && tunInterface == null) {
                     tunInterface = previousTun
+                }
+                if (previousForwarder != null && tunForwarder == null) {
+                    tunForwarder = previousForwarder
+                }
+                if (previousTun != null) {
                     isEstablished.value = true
-                    Timber.w("Restored previous TUN after failed rebind")
-                    // Forwarder was stopped before establish — restart so apps are not stuck
-                    // on a live TUN with no Tor drain path.
-                    if (startForwarder && mode == VpnProfileMode.Connected) {
-                        startForwarder(
-                            torSocksPort,
-                            dnsCryptPort,
-                            torDnsPort,
-                            dnsMode,
-                            synthesizeOnionAutomap,
-                        )
-                        startUnderlyingTracking()
-                        Timber.w("Restarted TUN forwarder on restored TUN after failed rebind")
-                    }
+                    Timber.w("Kept previous TUN+forwarder after failed rebind")
                 } else {
-                    previousTun?.close()
                     isEstablished.value = false
                     profileMode.value = null
                 }
@@ -198,12 +191,17 @@ class OnionVpnService : VpnService() {
         isEstablished.value = false
         forwarderSocksPort.value = -1
         forwarderDnsCryptPort.value = -1
-        stopForwarder()
         val previousTun = tunInterface
+        val previousForwarder = tunForwarder
         val result = establish(preferences, VpnProfileMode.Blocking)
         when (result) {
             is VpnEstablishResult.Success -> {
-                previousTun?.close()
+                // Blocking owns routes — stop drain + close previous after new iface is up.
+                previousForwarder?.stop()
+                if (tunForwarder === previousForwarder) tunForwarder = null
+                if (previousTun != null && previousTun !== tunInterface) {
+                    previousTun.close()
+                }
                 profileMode.value = VpnProfileMode.Blocking
                 stopUnderlyingTracking()
                 val gen = generationSeq.incrementAndGet()
@@ -214,9 +212,8 @@ class OnionVpnService : VpnService() {
                 Timber.e("Always-on Blocking establish failed: ${result.reason}")
                 if (previousTun != null && tunInterface == null) {
                     tunInterface = previousTun
+                    tunForwarder = previousForwarder
                     isEstablished.value = true
-                } else {
-                    previousTun?.close()
                 }
             }
         }

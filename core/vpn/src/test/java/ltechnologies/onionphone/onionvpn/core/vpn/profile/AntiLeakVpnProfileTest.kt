@@ -58,4 +58,38 @@ class AntiLeakVpnProfilePolicyTest {
         // Runtime Builder needs Android; we assert the pin list is non-empty fail-closed surface.
         assertFalse(VpnProfileBuilder.BLOCKED_PUBLIC_DNS.isEmpty())
     }
+
+    @Test
+    fun sourceForbidsAllowBypassAndAllowFamily() {
+        // Dual-stack addAddress+addRoute claims families; allowFamily alone can fall through.
+        val src = java.io.File(
+            "src/main/java/ltechnologies/onionphone/onionvpn/core/vpn/profile/VpnProfileBuilder.kt",
+        ).readText()
+        assertFalse(
+            "allowBypass must not be called",
+            Regex("""\.allowBypass\s*\(""").containsMatchIn(src),
+        )
+        assertFalse(
+            "allowFamily must not be called — routes claim IPv4+IPv6",
+            Regex("""\.allowFamily\s*\(""").containsMatchIn(src),
+        )
+        assertTrue("0.0.0.0/0 route required", """addRoute("0.0.0.0", 0)""" in src)
+        assertTrue("::/0 route required", """addRoute("::", 0)""" in src)
+    }
+
+    @Test
+    fun connectedSetsEmptyUnderlyingNetworksOnBuilder() {
+        // emptyArray = no uplink until UnderlyingNetworkTracker; null = system default.
+        val src = java.io.File(
+            "src/main/java/ltechnologies/onionphone/onionvpn/core/vpn/profile/VpnProfileBuilder.kt",
+        ).readText()
+        assertTrue(
+            "Connected must Builder.setUnderlyingNetworks(emptyArray()) pre-establish",
+            src.contains("setUnderlyingNetworks(emptyArray())"),
+        )
+        assertTrue(
+            "empty uplink only for Connected mode",
+            src.contains("mode == VpnProfileMode.Connected"),
+        )
+    }
 }

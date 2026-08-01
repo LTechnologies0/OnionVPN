@@ -64,6 +64,12 @@ Push a tag `v*.*.*` (or run **Release** workflow with a tag input) to publish si
 - `onionvpn-<version>-x86_64.apk`
 - `SHA256SUMS.txt`
 
+**Obtainium / sideload:** on Pixel and most phones use the **`arm64-v8a`** APK only.
+`x86_64` is for emulators (`INSTALL_FAILED_NO_MATCHING_ABIS` on arm64 devices).
+In Obtainium set an APK filter matching `arm64-v8a`. If install fails with
+`INSTALL_FAILED_UPDATE_INCOMPATIBLE`, uninstall leftover installs on **all users/profiles**
+(including work/test profiles) that used a different signing key, then retry.
+
 ### CI signing secrets
 
 | Secret | Description |

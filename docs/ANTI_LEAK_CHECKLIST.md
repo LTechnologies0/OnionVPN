@@ -171,8 +171,9 @@ Generated from source enumeration — do not invent IDs without evidence paths.
 | AL-164 | vpn-profile | `VpnProfileBuilder` | full tunnel 0.0.0.0/0 | AntiLeakVpnProfileTest | Pass |
 | AL-165 | vpn-profile | `VpnProfileBuilder` | full tunnel ::/0 | AntiLeakVpnProfileTest | Pass |
 | AL-166 | vpn-profile | `VpnProfileBuilder` | self-exclude package | AntiLeakVpnProfileTest | Pass |
-| AL-167 | vpn-profile | `VpnProfileBuilder` | allowFamily AF_INET | AntiLeakVpnProfileTest | Pass |
-| AL-168 | vpn-profile | `VpnProfileBuilder` | allowFamily AF_INET6 | AntiLeakVpnProfileTest | Pass |
+| AL-167 | vpn-profile | `VpnProfileBuilder` | No allowFamily (routes claim v4) | AntiLeakVpnProfileTest | Pass |
+| AL-168 | vpn-profile | `VpnProfileBuilder` | No allowFamily (routes claim v6) | AntiLeakVpnProfileTest | Pass |
+| AL-168b | vpn-profile | `VpnProfileBuilder` | Connected Builder.setUnderlyingNetworks(emptyArray()) | AntiLeakVpnProfileTest | Pass |
 | AL-169 | vpn-profile | `VpnProfileBuilder` | setBlocking only in Blocking+killSwitch | AntiLeakVpnProfileTest | Pass |
 | AL-170 | vpn-profile | `VpnProfileBuilder` | Connected DNS = VPN_DNS_ADDRESS | AntiLeakVpnProfileTest | Pass |
 | AL-171 | vpn-profile | `VpnProfileBuilder` | Blocking DNS = FALLBACK_BLOCKING_DNS | AntiLeakVpnProfileTest | Pass |
@@ -341,5 +342,5 @@ Generated from source enumeration — do not invent IDs without evidence paths.
 | AL-334 | ports | `TunnelPortAllocator` | distinct dnsCryptListenPort | AntiLeakPortsTest | Pass |
 | AL-335 | ports | `TunnelPortAllocator` | avoid fixed PAC/UID ports collision | AntiLeakPortsTest | Pass |
 
-**Total: 335** — **Pass: 335** — **Fail: 0** (Pass = automated test and/or verified source invariant).
+**Total: 336** — **Pass: 336** — **Fail: 0** (Pass = automated test and/or verified source invariant).
 

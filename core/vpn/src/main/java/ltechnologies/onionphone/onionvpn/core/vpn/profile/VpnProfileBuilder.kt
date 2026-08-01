@@ -4,7 +4,6 @@ import android.app.PendingIntent
 import android.content.Intent
 import android.net.VpnService
 import android.os.Build
-import android.system.OsConstants
 import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
 import ltechnologies.onionphone.onionvpn.core.model.TunnelPreferences
 import ltechnologies.onionphone.onionvpn.core.model.VpnProfileMode
@@ -14,11 +13,14 @@ import timber.log.Timber
  * Builds fail-closed VPN profiles (Mullvad + InviZible + Orbot):
  *
  * - Full-tunnel IPv4 (`0.0.0.0/0`) and IPv6 (`::/0`) — always; split-tunnel is refused
- * - [allowFamily] IPv4+IPv6 on API 29+ — always (TunnelPreferences.routeAllTrafficThroughTor
- *   is forced true; the preference is a legacy no-op for routes)
+ * - Never [VpnService.Builder.allowFamily] without relying on it for capture: dual-stack
+ *   addresses+routes already claim both families (allowFamily alone can fall through
+ *   to clearnet — Android VpnService docs / anti-leak skill)
  * - Self-excluded so Tor/DNSCrypt/hev loopback is not re-captured
  * - Public DNS /32 routes pinned into tunnel
  * - Never [VpnService.Builder.allowBypass]
+ * - Connected: [VpnService.Builder.setUnderlyingNetworks] `emptyArray()` fail-closed until
+ *   [UnderlyingNetworkTracker] publishes a real `NOT_VPN` uplink (`null` ≠ empty)
  * - [setBlocking] only in [VpnProfileMode.Blocking]: drop unread TUN packets (unroutable).
  *   Connected mode keeps [setBlocking] false so hev can drain Tor-routable streams.
  * - [setConfigureIntent] so Always-on VPN settings open the app (InviZible/Mullvad)
@@ -104,9 +106,15 @@ object VpnProfileBuilder {
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             builder.setMetered(false)
-            // Always claim both families — apps must not fall back to clearnet IPv6/IPv4.
-            builder.allowFamily(OsConstants.AF_INET)
-            builder.allowFamily(OsConstants.AF_INET6)
+        }
+
+        // Pre-establish uplink bind (API 22+): empty = no carrier until tracker selects
+        // NOT_VPN. Service.setUnderlyingNetworks only works after establish(); null would
+        // mean system default (not fail-closed).
+        if (mode == VpnProfileMode.Connected &&
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP_MR1
+        ) {
+            builder.setUnderlyingNetworks(emptyArray())
         }
 
         builder.setConfigureIntent(configurePendingIntent(service))

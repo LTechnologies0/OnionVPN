@@ -8,7 +8,7 @@ package ltechnologies.onionphone.onionvpn.core.model
  */
 data class TunnelPreferences(
     /**
-     * Legacy flag — full default routes + allowFamily are always applied.
+     * Legacy flag — full default IPv4+IPv6 routes are always applied.
      * Kept for intent/prefs compatibility; UI no longer offers split-tunnel.
      */
     val routeAllTrafficThroughTor: Boolean = true,
