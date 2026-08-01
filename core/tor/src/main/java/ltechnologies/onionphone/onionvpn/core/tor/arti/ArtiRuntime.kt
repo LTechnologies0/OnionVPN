@@ -456,6 +456,14 @@ internal class ArtiRuntime(
             TorBridgeConfig.binaryForTransport("conjure", nativeLibraryDir) != null
     }
 
+    /**
+     * Wait until Arti SOCKS accepts TCP.
+     *
+     * DNSPort must NOT be required here: Arti resolves via Tor (needs bootstrap), so a
+     * full DNS query probe would hang for minutes under OnDemand bootstrap — same failure
+     * mode as TorReadiness docs ("never require a successful DNS reply before bootstrap").
+     * SOCKS binds as soon as the proxy task starts (create_unbootstrapped + run_proxy).
+     */
     private suspend fun waitForListeners(
         ports: TunnelRuntimePorts,
         timeoutMs: Long = 180_000,
@@ -463,24 +471,37 @@ internal class ArtiRuntime(
     ) {
         val deadline = System.currentTimeMillis() + timeoutMs
         var lastError: Exception? = null
+        var lastLogMs = 0L
         while (System.currentTimeMillis() < deadline) {
             if (!running) {
                 throw TunnelFailure.TorBinary("Arti stopped before listeners became ready")
             }
             try {
-                if (TorReadiness.areSocksPortsReady(ports) &&
-                    TorReadiness.isDnsPortReady(ports.torDnsPort)
-                ) {
+                if (TorReadiness.areSocksPortsReady(ports)) {
+                    Timber.i(
+                        "Arti SOCKS ready :%d (DNSPort :%d answers after bootstrap)",
+                        ports.torSocksPort,
+                        ports.torDnsPort,
+                    )
                     return
                 }
             } catch (error: Exception) {
                 lastError = error
             }
+            val now = System.currentTimeMillis()
+            if (now - lastLogMs >= 15_000L) {
+                lastLogMs = now
+                Timber.i(
+                    "Arti waiting for SOCKS :%d (elapsed %ds)",
+                    ports.torSocksPort,
+                    (timeoutMs - (deadline - now)) / 1000,
+                )
+            }
             delay(pollMs)
         }
         throw TunnelFailure.TorBootstrap(
             progress = 0,
-            detail = "Arti SOCKS/DNS listeners not ready after ${timeoutMs}ms " +
+            detail = "Arti SOCKS listener not ready after ${timeoutMs}ms " +
                 "(socks=${ports.torSocksPort} dns=${ports.torDnsPort})",
             cause = lastError ?: IOException("timeout"),
         )

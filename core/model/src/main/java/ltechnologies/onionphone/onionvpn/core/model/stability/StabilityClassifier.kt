@@ -94,6 +94,16 @@ object StabilityClassifier {
      */
     fun forAppPriority(priority: Int, line: String): StabilitySignal {
         val fromPriority = ProcessLogLevel.fromAndroidPriority(priority)
+        // DEBUG/VERBOSE: trust Timber. Throwable dumps include "IOException" /
+        // "InterruptedException" and would keyword-escalate every PAC/SOCKS abort to ERROR.
+        if (fromPriority.severity <= StabilitySeverity.DEBUG) {
+            return StabilitySignal(
+                code = "APP_${fromPriority.name}",
+                severity = fromPriority.severity,
+                action = StabilityAction.NONE,
+                detail = fromPriority.name,
+            )
+        }
         val fromText = forAppLogLine(line)
         // Take the worse of Timber priority vs keyword/level in the message.
         return if (fromText.severity > fromPriority.severity) {

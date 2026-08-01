@@ -220,7 +220,8 @@ class DnsCryptSocksBridge(
                 if (isBenignSessionEnd(e)) {
                     Timber.v("PAC SOCKS session end: %s", e.javaClass.simpleName)
                 } else {
-                    Timber.d(e, "PAC SOCKS bridge session failed")
+                    // Avoid "failed" wording — log export classifies that as ERROR.
+                    Timber.d(e, "PAC SOCKS bridge session abort")
                 }
                 safeReply(output, REP_GENERAL_FAILURE)
             }
@@ -284,17 +285,21 @@ class DnsCryptSocksBridge(
     private fun isBenignSessionEnd(e: Throwable): Boolean {
         when (e) {
             is java.io.EOFException -> return true
+            is InterruptedException -> return true
             is SocketException -> return true
             is java.net.SocketTimeoutException -> return true
             is java.net.UnknownHostException -> return true
         }
         val msg = e.message?.lowercase() ?: return false
+        // HTTP/TLS probes hitting the PAC SOCKS port → "not SOCKS5"; teardown → interrupt.
         return "broken pipe" in msg ||
             "connection reset" in msg ||
             "connection abort" in msg ||
             "connection refused" in msg ||
             "status=1" in msg ||
-            "poll timed out" in msg
+            "not socks5" in msg ||
+            "poll timed out" in msg ||
+            "interrupted" in msg
     }
 
     private fun pipe(a: Socket, b: Socket) {

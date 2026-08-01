@@ -107,6 +107,18 @@ class StabilityClassifierTest {
     }
 
     @Test
+    fun appPriority_debugThrowableDumpStaysDebug() {
+        // Timber.d with IOException appends "java.io.IOException: …" — must not escalate.
+        // Android Log.DEBUG == 3
+        val s = StabilityClassifier.forAppPriority(
+            3,
+            "[SocksUidBridge] SocksUidBridge client abort (SOCKS5 CONNECT failed status=1)",
+        )
+        assertEquals(StabilitySeverity.DEBUG, s.severity)
+        assertEquals(StabilityAction.NONE, s.action)
+    }
+
+    @Test
     fun mergeAction_prefersStopTor() {
         assertEquals(
             StabilityAction.STOP_TOR,

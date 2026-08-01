@@ -214,8 +214,11 @@ class SocksUidBridge(
                 handedOff = true
             } catch (e: Exception) {
                 // hev/Happy Eyeballs cancels racing sockets mid-greeting — not a bridge failure.
-                if (!isBenignClientAbort(e)) {
-                    VpnForwarderDebug.socksLog(e) { "SocksUidBridge client failed" }
+                if (isBenignClientAbort(e)) {
+                    runCatching { reply(output, 0x01) }
+                } else {
+                    // Avoid "failed"/"Exception" wording — TunnelLogTree keyword-escalates those.
+                    VpnForwarderDebug.socksLog(e) { "SocksUidBridge client abort" }
                     runCatching { reply(output, 0x01) }
                 }
             }
