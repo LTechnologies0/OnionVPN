@@ -100,13 +100,15 @@ internal class TunnelVpnBridge(
         return false
     }
 
-    suspend fun waitForConnected(generation: Int, ports: TunnelRuntimePorts): Boolean {
+    suspend fun waitForConnected(
+        generation: Int,
+        ports: TunnelRuntimePorts,
+        useDnsCrypt: Boolean = true,
+    ): Boolean {
         repeat(VPN_READY_POLLS) {
             val established = OnionVpnService.vpnEstablished.value
             val genOk = OnionVpnService.vpnGeneration.value == generation
-            val portsOk = OnionVpnService.hevSocksPort.value == ports.torSocksPort &&
-                OnionVpnService.hevDnsCryptPort.value == ports.dnsCryptListenPort
-            if (established && genOk && portsOk) return true
+            if (established && genOk && hevPortsMatch(ports, useDnsCrypt)) return true
             delay(VPN_READY_POLL_MS)
         }
         Timber.e(

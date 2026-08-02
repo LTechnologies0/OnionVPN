@@ -116,8 +116,15 @@ class TunnelForegroundService : Service() {
         super.onCreate()
         notifications.createChannel()
         tor.onClientDnsCacheClear = {
+            // Tor CLEARDNSCACHE / NEWNYM parity: drop app Automap + DNSCrypt sticky IPs
+            // so a new circuit cannot reuse prior hostname→IP bindings.
             DnsHostnameCache.clear()
             OnionAutomapAllocator.clear()
+            scope.launch(Dispatchers.IO) {
+                dnsCrypt.clearQueryCache().onFailure {
+                    Timber.w(it, "DNSCrypt query cache clear failed")
+                }
+            }
         }
         // Tor control-spec: DisableNetwork closes outbound sockets. Pause bridges first
         // so SOCKS CONNECT never races Tor (avoids status=1 / "DisableNetwork set" spam).

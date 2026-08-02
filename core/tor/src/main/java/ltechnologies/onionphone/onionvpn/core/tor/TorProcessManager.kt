@@ -434,14 +434,19 @@ class TorProcessManager(
         return control.setDormant()
     }
 
-    /** SIGNAL CLEARDNSCACHE — Arti: clear app Automap/DNS caches + soft re-probe. */
+    /**
+     * SIGNAL CLEARDNSCACHE — forget client DNS; also flush app Automap + DNSCrypt
+     * (via [onClientDnsCacheClear]) so sticky A/AAAA cannot link identity across circuits.
+     */
     fun clearDnsCache(): Result<Unit> {
         if (activeEngine == TorEngine.ARTI) {
             clearAppDnsCaches()
             return onNetworkChanged()
         }
         if (!control.isConnected) return Result.failure(IOException("control not connected"))
-        return control.clearDnsCache()
+        return control.clearDnsCache().also { result ->
+            if (result.isSuccess) clearAppDnsCaches()
+        }
     }
 
     /** DROPTIMEOUTS — Arti: soft recovery. */
@@ -574,6 +579,8 @@ class TorProcessManager(
         control.dropTimeouts().onFailure { Timber.w(it, "DROPTIMEOUTS failed") }
         val active = control.setActive()
         control.clearDnsCache().onFailure { Timber.w(it, "CLEARDNSCACHE failed") }
+        // App + DNSCrypt sticky IPs — same deanonymization class as Tor CLEARDNSCACHE.
+        clearAppDnsCaches()
         control.refreshHealthLite()
         return active.also {
             it.onSuccess {

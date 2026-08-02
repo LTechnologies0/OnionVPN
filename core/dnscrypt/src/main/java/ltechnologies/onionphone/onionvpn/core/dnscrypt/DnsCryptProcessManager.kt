@@ -3,10 +3,13 @@ package ltechnologies.onionphone.onionvpn.core.dnscrypt
 import android.content.Context
 import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import ltechnologies.onionphone.onionvpn.core.dnscrypt.config.DnsCryptConfigWriter
 import ltechnologies.onionphone.onionvpn.core.dnscrypt.config.DnsCryptPublicResolvers
@@ -40,6 +43,10 @@ class DnsCryptProcessManager(
     private val serverReady = AtomicBoolean(false)
     private var listenPort: Int? = null
     private var preferences: TunnelPreferences = TunnelPreferences()
+    private var lastPorts: TunnelRuntimePorts? = null
+    private var lastServerName: String = "cloudflare"
+    private val lifecycleMutex = Mutex()
+    private val lastClearCacheMs = AtomicLong(0L)
 
     val configDirectory: File
         get() = File(context.filesDir, "dnscrypt").also { it.mkdirs() }
@@ -58,44 +65,78 @@ class DnsCryptProcessManager(
         ports: TunnelRuntimePorts,
         preferences: TunnelPreferences = TunnelPreferences(),
     ): Result<Unit> = withContext(Dispatchers.IO) {
-        OpTrace.stepSuspending("dnscrypt", "start", ProcessLogLevel.INFO) {
-            this@DnsCryptProcessManager.preferences = preferences
-            listenPort = ports.dnsCryptListenPort
-            OpTrace.debug("dnscrypt", "stop_prior")
-            stopInternal()
-            killOrphanedProcesses()
-            listenerReady.set(false)
-            serverReady.set(false)
-            try {
-                OpTrace.step("dnscrypt", "ensure_binary") { ensureExecutable(binaryFile) }
-                OpTrace.step("dnscrypt", "write_config") {
-                    writeConfig(serverName.ifBlank { preferences.dnsCryptServerName }, ports)
-                }
-                OpTrace.step("dnscrypt", "spawn") { spawnProcess() }
-                OpTrace.stepSuspending("dnscrypt", "wait_listener") {
-                    waitForListener(ports.dnsCryptListenPort)
-                }
-                OpTrace.stepSuspending("dnscrypt", "wait_server") { waitForLiveServer() }
-                OpTrace.info("dnscrypt", "listening on ${ports.dnsCryptListenPort}")
-                Timber.i("DNSCrypt listening on ${ports.dnsCryptListenPort}")
-                Result.success(Unit)
-            } catch (error: CancellationException) {
+        lifecycleMutex.withLock {
+            OpTrace.stepSuspending("dnscrypt", "start", ProcessLogLevel.INFO) {
+                this@DnsCryptProcessManager.preferences = preferences
+                lastPorts = ports
+                lastServerName = serverName.ifBlank { preferences.dnsCryptServerName }
+                listenPort = ports.dnsCryptListenPort
+                OpTrace.debug("dnscrypt", "stop_prior")
                 stopInternal()
-                throw error
-            } catch (error: Exception) {
-                OpTrace.error("dnscrypt", "failed to start", error)
-                Timber.e(error, "DNSCrypt failed to start")
-                stopInternal()
-                Result.failure(TunnelFailure.fromThrowable(error, context = "dnscrypt.start"))
+                killOrphanedProcesses()
+                listenerReady.set(false)
+                serverReady.set(false)
+                try {
+                    OpTrace.step("dnscrypt", "ensure_binary") { ensureExecutable(binaryFile) }
+                    OpTrace.step("dnscrypt", "write_config") {
+                        writeConfig(lastServerName, ports)
+                    }
+                    OpTrace.step("dnscrypt", "spawn") { spawnProcess() }
+                    OpTrace.stepSuspending("dnscrypt", "wait_listener") {
+                        waitForListener(ports.dnsCryptListenPort)
+                    }
+                    OpTrace.stepSuspending("dnscrypt", "wait_server") { waitForLiveServer() }
+                    OpTrace.info("dnscrypt", "listening on ${ports.dnsCryptListenPort}")
+                    Timber.i("DNSCrypt listening on ${ports.dnsCryptListenPort}")
+                    Result.success(Unit)
+                } catch (error: CancellationException) {
+                    stopInternal()
+                    throw error
+                } catch (error: Exception) {
+                    OpTrace.error("dnscrypt", "failed to start", error)
+                    Timber.e(error, "DNSCrypt failed to start")
+                    stopInternal()
+                    Result.failure(TunnelFailure.fromThrowable(error, context = "dnscrypt.start"))
+                }
             }
         }
     }
 
     suspend fun stop() = withContext(Dispatchers.IO) {
-        OpTrace.stepSuspending("dnscrypt", "stop") { stopInternal() }
+        lifecycleMutex.withLock {
+            OpTrace.stepSuspending("dnscrypt", "stop") {
+                stopInternal()
+                lastPorts = null
+            }
+        }
     }
 
     fun isRunning(): Boolean = process?.isAlive == true
+
+    /**
+     * Tor CLEARDNSCACHE / NEWNYM parity for dnscrypt-proxy.
+     *
+     * Upstream keeps the query cache in memory only and has no flush RPC — a soft
+     * restart is the supported way to drop cached A/AAAA that could otherwise stick
+     * across circuit identity changes (deanonymization via sticky DNS).
+     */
+    suspend fun clearQueryCache(): Result<Unit> = withContext(Dispatchers.IO) {
+        val ports = lastPorts
+        if (ports == null || !isRunning()) {
+            return@withContext Result.success(Unit)
+        }
+        val now = System.currentTimeMillis()
+        val prev = lastClearCacheMs.get()
+        if (now - prev < CLEAR_CACHE_COOLDOWN_MS) {
+            Timber.d("DNSCrypt clearQueryCache skipped — cooldown")
+            return@withContext Result.success(Unit)
+        }
+        if (!lastClearCacheMs.compareAndSet(prev, now)) {
+            return@withContext Result.success(Unit)
+        }
+        Timber.i("DNSCrypt clearQueryCache — soft restart (flush in-memory DNS cache)")
+        start(lastServerName, ports, preferences)
+    }
 
     private fun spawnProcess() {
         val command = listOf(
@@ -253,6 +294,8 @@ class DnsCryptProcessManager(
 
     companion object {
         const val LOG_TAG = "dnscrypt"
+        /** Avoid thrashing on Wi‑Fi blips that chain CLEARDNSCACHE + soft recovery. */
+        private const val CLEAR_CACHE_COOLDOWN_MS = 5_000L
     }
 
     private fun stopInternal() {

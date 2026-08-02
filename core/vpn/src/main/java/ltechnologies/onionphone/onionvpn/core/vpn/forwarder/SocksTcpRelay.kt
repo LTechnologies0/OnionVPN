@@ -5,7 +5,9 @@ import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
-import java.util.concurrent.Executors
+import java.util.concurrent.ArrayBlockingQueue
+import java.util.concurrent.ThreadPoolExecutor
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import timber.log.Timber
 
@@ -23,12 +25,8 @@ class SocksTcpRelay(
 ) {
     private val running = AtomicBoolean(false)
     private var server: ServerSocket? = null
-    private val acceptExecutor = Executors.newSingleThreadExecutor { r ->
-        Thread(r, "onionvpn-socks-relay-$label").apply { isDaemon = true }
-    }
-    private val pipeExecutor = Executors.newCachedThreadPool { r ->
-        Thread(r, "onionvpn-socks-pipe-$label").apply { isDaemon = true }
-    }
+    private var acceptExecutor: ThreadPoolExecutor? = null
+    private var pipeExecutor: ThreadPoolExecutor? = null
 
     fun start() {
         if (!running.compareAndSet(false, true)) return
@@ -36,7 +34,11 @@ class SocksTcpRelay(
         ss.reuseAddress = true
         ss.bind(InetSocketAddress(InetAddress.getLoopbackAddress(), listenPort))
         server = ss
-        acceptExecutor.execute {
+        val accept = newAcceptExecutor()
+        val pipe = newPipeExecutor()
+        acceptExecutor = accept
+        pipeExecutor = pipe
+        accept.execute {
             Timber.i("SocksTcpRelay[$label] listen=$listenPort → $upstreamHost:$upstreamPort")
             while (running.get()) {
                 val client = try {
@@ -44,7 +46,11 @@ class SocksTcpRelay(
                 } catch (_: IOException) {
                     break
                 }
-                pipeExecutor.execute { handle(client) }
+                try {
+                    pipe.execute { handle(client, pipe) }
+                } catch (_: Exception) {
+                    runCatching { client.close() }
+                }
             }
         }
     }
@@ -53,12 +59,14 @@ class SocksTcpRelay(
         if (!running.compareAndSet(true, false)) return
         runCatching { server?.close() }
         server = null
-        acceptExecutor.shutdownNow()
-        pipeExecutor.shutdownNow()
+        acceptExecutor?.shutdownNow()
+        pipeExecutor?.shutdownNow()
+        acceptExecutor = null
+        pipeExecutor = null
         Timber.i("SocksTcpRelay[$label] stopped")
     }
 
-    private fun handle(client: Socket) {
+    private fun handle(client: Socket, pipe: ThreadPoolExecutor) {
         var upstream: Socket? = null
         try {
             client.tcpNoDelay = true
@@ -66,8 +74,8 @@ class SocksTcpRelay(
             upstream.tcpNoDelay = true
             upstream.connect(InetSocketAddress(upstreamHost, upstreamPort), CONNECT_TIMEOUT_MS)
             val up = upstream
-            val c2u = pipeExecutor.submit { copy(client, up) }
-            val u2c = pipeExecutor.submit { copy(up, client) }
+            val c2u = pipe.submit { copy(client, up) }
+            val u2c = pipe.submit { copy(up, client) }
             c2u.get()
             u2c.get()
         } catch (error: Exception) {
@@ -91,7 +99,34 @@ class SocksTcpRelay(
         runCatching { to.shutdownOutput() }
     }
 
+    private fun newAcceptExecutor(): ThreadPoolExecutor =
+        ThreadPoolExecutor(
+            1,
+            1,
+            0L,
+            TimeUnit.MILLISECONDS,
+            ArrayBlockingQueue(1),
+            { r -> Thread(r, "onionvpn-socks-relay-$label").apply { isDaemon = true } },
+            ThreadPoolExecutor.AbortPolicy(),
+        )
+
+    /**
+     * Bounded pipe pool — role-mux traffic is DNSCrypt + probes only (not full TUN).
+     * Avoids [java.util.concurrent.Executors.newCachedThreadPool] unbounded growth.
+     */
+    private fun newPipeExecutor(): ThreadPoolExecutor =
+        ThreadPoolExecutor(
+            2,
+            MAX_PIPE_THREADS,
+            60L,
+            TimeUnit.SECONDS,
+            ArrayBlockingQueue(32),
+            { r -> Thread(r, "onionvpn-socks-pipe-$label").apply { isDaemon = true } },
+            ThreadPoolExecutor.AbortPolicy(),
+        ).apply { allowCoreThreadTimeOut(true) }
+
     companion object {
         private const val CONNECT_TIMEOUT_MS = 15_000
+        private const val MAX_PIPE_THREADS = 32
     }
 }

@@ -173,17 +173,25 @@ object TunnelLogBuffer {
         repeat(drop) { deque.pollFirst() }
     }
 
+    private val publishRunnable = Runnable {
+        synchronized(lock) {
+            publishPending = false
+            _app.value = appDeque.toList()
+            _dnscrypt.value = dnsDeque.toList()
+            _tor.value = torDeque.toList()
+        }
+    }
+
     private fun schedulePublish() {
         if (publishPending) return
         publishPending = true
-        mainHandler.postDelayed({
-            synchronized(lock) {
-                publishPending = false
-                _app.value = appDeque.toList()
-                _dnscrypt.value = dnsDeque.toList()
-                _tor.value = torDeque.toList()
-            }
-        }, PUBLISH_DEBOUNCE_MS)
+        mainHandler.postDelayed(publishRunnable, PUBLISH_DEBOUNCE_MS)
+    }
+
+    /** Drop pending Main publish (tests / process teardown hygiene). */
+    fun cancelPendingPublish() {
+        mainHandler.removeCallbacks(publishRunnable)
+        synchronized(lock) { publishPending = false }
     }
 
     private fun push(deque: ArrayDeque<LogLine>, line: LogLine) {

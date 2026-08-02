@@ -5,6 +5,8 @@ import android.os.Handler
 import android.os.Looper
 import android.os.ParcelFileDescriptor
 import androidx.lifecycle.Observer
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CoroutineScope
@@ -104,6 +106,8 @@ class OnionmasqTunForwarder(
             dnsMux = mux
             mux.start()
 
+            // Must observe before OnionMasq.start — BootstrapEvent can fire immediately;
+            // a post{} race would miss ready-for-traffic and fail-closed after ~20s.
             attachEventObserver()
             exitCountryCode?.takeIf { it.isNotBlank() }?.let { cc ->
                 runCatching { OnionMasq.setCountryCode(cc) }
@@ -170,16 +174,39 @@ class OnionmasqTunForwarder(
             onOnionmasqEvent?.invoke(event)
         }
         eventObserver = observer
-        mainHandler.post {
+        // Never latch-wait on Main — post+await would deadlock.
+        if (Looper.myLooper() == Looper.getMainLooper()) {
             OnionMasq.getEventObservable().observeForever(observer)
+            return
+        }
+        val attached = CountDownLatch(1)
+        mainHandler.post {
+            try {
+                OnionMasq.getEventObservable().observeForever(observer)
+            } finally {
+                attached.countDown()
+            }
+        }
+        if (!attached.await(2, TimeUnit.SECONDS)) {
+            Timber.w("onionmasq event observer attach timed out — bootstrap may be missed")
         }
     }
 
     private fun detachEventObserver() {
         val observer = eventObserver ?: return
         eventObserver = null
-        mainHandler.post {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
             runCatching { OnionMasq.getEventObservable().removeObserver(observer) }
+            return
         }
+        val detached = CountDownLatch(1)
+        mainHandler.post {
+            try {
+                runCatching { OnionMasq.getEventObservable().removeObserver(observer) }
+            } finally {
+                detached.countDown()
+            }
+        }
+        runCatching { detached.await(2, TimeUnit.SECONDS) }
     }
 }

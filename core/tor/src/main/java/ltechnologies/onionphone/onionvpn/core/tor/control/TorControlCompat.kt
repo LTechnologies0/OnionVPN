@@ -95,7 +95,7 @@ object TorControlCompat {
             littleT = "Clean circuits; new streams get fresh paths; clears client DNS cache",
             arti = ArtiBehavior.EQUIVALENT,
             parity = Parity.SEMANTIC_1_1,
-            artiImpl = "ArtiRuntime.restartForNewIdentity() + clear app DNS/Automap caches",
+            artiImpl = "ArtiRuntime.restartForNewIdentity() + clear app DNS/Automap + DNSCrypt caches",
             docs = "arti-client $ARTI_CLIENT_DOCS_VERSION TorClient::isolated_client is the per-handle " +
                 "NEWNYM analogue; VPN-wide identity requires restart (stronger than isolated_client)",
         ),
@@ -105,8 +105,10 @@ object TorControlCompat {
             littleT = "Forget client-side cached IPs for hostnames",
             arti = ArtiBehavior.SOFT_RECOVER,
             parity = Parity.APP_LAYER_1_1,
-            artiImpl = "Clear DnsHostnameCache + OnionAutomapAllocator; re-probe SOCKS/DNS",
-            docs = "No TorClient::clear_dns_cache in 0.36.0; app Automap store is the client DNS cache on Arti",
+            artiImpl = "Clear DnsHostnameCache + OnionAutomapAllocator + DNSCrypt query cache " +
+                "(soft restart); re-probe SOCKS/DNS",
+            docs = "No TorClient::clear_dns_cache in 0.36.0; app Automap + DNSCrypt in-memory cache " +
+                "are the client DNS caches on the VPN path (dnscrypt-proxy has no flush RPC)",
         ),
         Op(
             name = "ACTIVE",

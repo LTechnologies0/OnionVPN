@@ -7,6 +7,7 @@ import dagger.hilt.android.qualifiers.ApplicationContext
 import java.util.ArrayDeque
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -66,6 +67,9 @@ class InteractiveFirewallEngine @Inject constructor(
     private val mainHandler = Handler(Looper.getMainLooper())
     private val ownUid = android.os.Process.myUid()
     private val promptNotifier = FirewallPromptNotifier(context)
+    /** Collectors are process-lifetime; only wire hot-path hooks per tunnel session. */
+    private val collectorsStarted = AtomicBoolean(false)
+    private val sessionActive = AtomicBoolean(false)
 
     private val preferences = AtomicReference(TunnelPreferences())
     private val rules = AtomicReference<List<FirewallRule>>(emptyList())
@@ -97,7 +101,13 @@ class InteractiveFirewallEngine @Inject constructor(
     )
 
     fun stop() {
+        if (!sessionActive.compareAndSet(true, false)) {
+            appUidResolver.stop()
+            return
+        }
         appUidResolver.stop()
+        FirewallBridge.resolveSocksClientUid = null
+        FirewallBridge.onAutomapRemap = null
     }
 
     fun start() {
@@ -110,6 +120,9 @@ class InteractiveFirewallEngine @Inject constructor(
             caches.invalidateDestination(oldHost)
             caches.invalidateDestination(newHost)
         }
+        sessionActive.set(true)
+        // Singleton: tunnel stop/start must not stack DataStore/journal collectors.
+        if (!collectorsStarted.compareAndSet(false, true)) return
         scope.launch {
             for (entry in journalChannel) {
                 _journal.updateAndGet { list -> (listOf(entry) + list).take(MAX_JOURNAL) }

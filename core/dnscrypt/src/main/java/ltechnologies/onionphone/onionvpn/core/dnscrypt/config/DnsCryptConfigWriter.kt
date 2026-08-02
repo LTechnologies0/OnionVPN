@@ -147,6 +147,8 @@ object DnsCryptConfigWriter {
             netprobe_timeout = 5000
 
             # Local cache cuts repeat lookups over Tor (double-hop DNSCrypt path).
+            # Flushed on Tor CLEARDNSCACHE/NEWNYM via DnsCryptProcessManager.clearQueryCache()
+            # (soft restart — dnscrypt-proxy has no in-process cache flush API).
             cache = true
             cache_size = 512
             cache_min_ttl = 120

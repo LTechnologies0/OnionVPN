@@ -73,13 +73,21 @@ internal object TorReadiness {
     fun isDnsPortReady(port: Int, timeoutMs: Int = 1_500): Boolean =
         runCatching { assertDnsPortReady(port, timeoutMs) }.isSuccess
 
-    /** All three SocksPorts accept TCP. */
+    /**
+     * All three SocksPorts accept TCP.
+     *
+     * **C Tor only** — torrc opens apps + DNSCrypt + probe SocksPorts before bootstrap
+     * completes. Do **not** use for Arti start: DNSCrypt/probe ports are opened later by
+     * [ltechnologies.onionphone.onionvpn.core.vpn.forwarder.ArtiSocksRoleMux] (chicken-egg
+     * deadlock / 180s timeout). Use [isPrimarySocksReady] for Arti.
+     */
     fun assertSocksPortsReady(ports: TunnelRuntimePorts) {
         assertSocksReady(ports.torSocksPort)
         assertSocksReady(ports.torDnsCryptSocksPort)
         assertSocksReady(ports.torProbeSocksPort)
     }
 
+    /** @see assertSocksPortsReady */
     fun areSocksPortsReady(ports: TunnelRuntimePorts): Boolean =
         isSocksReady(ports.torSocksPort) &&
             isSocksReady(ports.torDnsCryptSocksPort) &&
@@ -87,7 +95,8 @@ internal object TorReadiness {
 
     /**
      * Native Tor/Arti SOCKS only (not DNSCrypt/probe role-mux listen ports).
-     * Use for Arti start/readiness — [ArtiSocksRoleMux] opens the other ports later.
+     * Use for Arti start/readiness/network soft recovery — [ArtiSocksRoleMux] opens the
+     * other ports after [ltechnologies.onionphone.onionvpn.core.tor.arti.ArtiRuntime] returns.
      */
     fun isPrimarySocksReady(ports: TunnelRuntimePorts): Boolean =
         isSocksReady(ports.torSocksPort)
