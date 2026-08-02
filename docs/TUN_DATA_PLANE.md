@@ -39,6 +39,14 @@ DNSCrypt upstream → SOCKS IsolationToken
 
 OnionVPN keeps fail-closed routing (no Tor VPN `allowFamily`). Own package stays disallowed from the VPN; onionmasq/Arti sockets use clearnet uplink via `protect`. Tor-native apps (Orbot, Tor Browser, …) are `setExcludedUids` so they are not double-proxied.
 
+### Lifecycle (native abort hazard)
+
+`libonionmasq_mobile.so` uses `panic=abort`. JNI helpers that call `OnionmasqMobile::get()`
+**kill the process** if `OnionMasq.init()` has not succeeded — including `isRunning()` and
+`closeProxy()`. `OnionmasqTunForwarder.start()` calls `stop()` before `init()`; stop must
+gate on Kotlin `proxyOwned` only (never probe native `isRunning` pre-init). See
+`OnionmasqNativeGate` and `native/onionmasq/safe-uninit-jni.patch`.
+
 ### Capability matrix
 
 | Engine / plane | Circuits UI | NEWNYM | DNSCrypt SOCKS |

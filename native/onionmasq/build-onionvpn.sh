@@ -18,6 +18,19 @@ export ANDROID_NDK="$ANDROID_NDK_HOME"
 ARCHS="${1:-arm64-v8a}"
 cd "$OM_SRC"
 
+# OnionVPN patches (idempotent via git apply --check when already applied).
+PATCH_DIR="$ROOT/native/onionmasq"
+for patch in socks-sidecar.patch safe-uninit-jni.patch; do
+  if [[ -f "$PATCH_DIR/$patch" ]]; then
+    if git apply --check "$PATCH_DIR/$patch" 2>/dev/null; then
+      git apply "$PATCH_DIR/$patch"
+      echo "Applied $patch"
+    else
+      echo "Skip $patch (already applied or not applicable)"
+    fi
+  fi
+done
+
 if [[ "${SKIP_NDK_VERSION_CHECK:-}" == "1" ]]; then
   # Temporarily relax build-ndk.sh version gate for local NDK variants.
   sed -i.bak 's/EXPECTED_NDK_VERSION=.*/EXPECTED_NDK_VERSION="$(basename "$ANDROID_NDK_ROOT")"/' build-ndk.sh

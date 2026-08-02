@@ -28,9 +28,15 @@ App DNS still goes TunDnsMux → DNSCrypt. Upstream SOCKS:
 2. **Interim cold-start:** arti-mobile SOCKS + DNSPort until the orchestrator
    starts DNSCrypt after onionmasq is ready (`OnionmasqSocksSidecar.INTERIM_USES_ARTI_MOBILE`).
 
-Re-apply the sidecar after a clean onionmasq clone:
+Re-apply OnionVPN patches after a clean onionmasq clone:
 
 ```bash
 cd third_party/onionmasq
 git apply ../../native/onionmasq/socks-sidecar.patch
+git apply ../../native/onionmasq/safe-uninit-jni.patch
 ```
+
+`safe-uninit-jni.patch` makes `isRunning` / `closeProxy` / `getSocksSidecarPort`
+return safely when `init()` has not run (upstream `get().expect` + `panic=abort`
+otherwise SIGABRTs the app). The Java/Kotlin layers also gate these calls; rebuild
+the `.so` so the native side matches.

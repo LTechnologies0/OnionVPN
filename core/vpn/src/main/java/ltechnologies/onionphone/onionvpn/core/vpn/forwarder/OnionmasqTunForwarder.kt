@@ -22,6 +22,7 @@ import ltechnologies.onionphone.onionvpn.core.model.observability.OpTrace
 import ltechnologies.onionphone.onionvpn.core.model.stability.ProcessLogLevel
 import ltechnologies.onionphone.onionvpn.core.vpn.OnionVpnService
 import ltechnologies.onionphone.onionvpn.core.vpn.profile.TunForwarder
+import ltechnologies.onionphone.onionvpn.core.vpn.onionmasq.OnionmasqNativeGate
 import ltechnologies.onionphone.onionvpn.core.vpn.onionmasq.TorNativeAppUids
 import org.torproject.onionmasq.OnionMasq
 import org.torproject.onionmasq.events.BootstrapEvent
@@ -53,8 +54,13 @@ class OnionmasqTunForwarder(
     private val running = AtomicBoolean(false)
     /**
      * True once we have handed a TUN fd to [OnionMasq.start] (or are about to).
-     * Native [OnionMasq.stop]/[OnionMasqJni.closeProxy] **aborts** (Rust unwrap) if the
-     * control channel was never opened — [runCatching] cannot catch SIGABRT.
+     *
+     * Native [OnionMasq.stop] / [OnionMasq.isRunning] call `OnionmasqMobile::get()`, which
+     * **expect()-aborts** (SIGABRT; panic=abort) when `init()` has not run. [runCatching]
+     * cannot catch that. Gate every native stop/probe on this flag — never on JNI isRunning.
+     *
+     * Regression: 0.3.46 stop() probed [OnionMasq.isRunning] before init → tombstone
+     * `Java_org_torproject_onionmasq_OnionMasqJni_isRunning` → `unwrap_failed`.
      */
     private val proxyOwned = AtomicBoolean(false)
     private var dnsMux: TunDnsMux? = null
@@ -71,9 +77,8 @@ class OnionmasqTunForwarder(
         synthesizeOnionAutomap: Boolean,
     ) {
         OpTrace.step("onionmasq", "start dnsCrypt=$dnsCryptPort", ProcessLogLevel.INFO) {
-            // Tear down a prior start on *this* instance only. Never call closeProxy when
-            // onionmasq was not started — that path SIGABRTs inside libonionmasq_mobile.so
-            // (seen on 0.3.45: startForwarder → stop → closeProxy unwrap_failed).
+            // Tear down a prior start on *this* instance only. stop() must not touch JNI
+            // unless proxyOwned — start() runs before init on a fresh instance.
             stop()
             if (dnsMode != DnsResolverMode.DNSCRYPT_MUX) {
                 Timber.i("dnsMode=$dnsMode coerced to DNSCRYPT_MUX divert for onionmasq")
@@ -155,6 +160,8 @@ class OnionmasqTunForwarder(
                     )
                 } finally {
                     running.set(false)
+                    // start() has returned (drop_command_sender already ran). Clear ownership
+                    // so a later stop() on this instance does not re-enter closeProxy needlessly.
                     proxyOwned.set(false)
                 }
             }
@@ -165,16 +172,15 @@ class OnionmasqTunForwarder(
     override fun stop() {
         OpTrace.debug("onionmasq", "stop")
         running.set(false)
-        proxyOwned.set(false)
         detachEventObserver()
-        // closeProxy aborts (Rust unwrap → SIGABRT) when the control channel was never
-        // opened. isRunning() is the only safe gate — runCatching cannot catch abort.
-        val nativeUp = runCatching { OnionMasq.isRunning() }.getOrDefault(false)
-        if (nativeUp) {
+        // Ownership gate only — do NOT call OnionMasq.isRunning() here.
+        // Pre-init isRunning/closeProxy → OnionmasqMobile::get expect → SIGABRT.
+        val owned = proxyOwned.getAndSet(false)
+        if (OnionmasqNativeGate.mayStopNativeProxy(owned)) {
             runCatching { OnionMasq.stop() }
                 .onFailure { Timber.w(it, "OnionMasq.stop failed") }
         } else {
-            Timber.d("OnionMasq.stop skipped — proxy not running")
+            Timber.d("OnionMasq.stop skipped — proxy not owned (pre-init or never started)")
         }
         dnsMux?.stop()
         dnsMux = null
@@ -185,7 +191,7 @@ class OnionmasqTunForwarder(
         omEnd = null
     }
 
-    fun isRunning(): Boolean = running.get() && OnionMasq.isRunning()
+    fun isRunning(): Boolean = running.get() && proxyOwned.get()
 
     private fun attachEventObserver() {
         val observer = Observer<OnionmasqEvent> { event ->
