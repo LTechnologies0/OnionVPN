@@ -24,6 +24,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import ltechnologies.onionphone.onionvpn.BuildConfig
 import ltechnologies.onionphone.onionvpn.core.dnscrypt.DnsCryptProcessManager
 import ltechnologies.onionphone.onionvpn.core.model.DnsResolverMode
@@ -191,6 +192,19 @@ class TunnelForegroundService : Service() {
                         event.isReadyForTraffic,
                         event.bootstrapStatus,
                     )
+                    // Dual TorClient: arti-mobile status can sit at ~15% while onionmasq
+                    // finishes microdescs — surface onionmasq progress during VPN bring-up.
+                    val phase = _snapshot.value.phase
+                    if (phase == TunnelPhase.StartingVpn || phase == TunnelPhase.Validating) {
+                        val summary = event.bootstrapStatus?.takeIf { it.isNotBlank() }
+                            ?: _snapshot.value.torBootstrapSummary
+                        _snapshot.update { prev ->
+                            prev.copy(
+                                torBootstrapProgress = event.bootstrapPercent.coerceIn(0, 100),
+                                torBootstrapSummary = summary,
+                            )
+                        }
+                    }
                 }
                 else -> Unit
             }
@@ -440,6 +454,18 @@ class TunnelForegroundService : Service() {
             try {
                 startTunnel()
             } catch (error: CancellationException) {
+                val phase = _snapshot.value.phase
+                if (phase == TunnelPhase.StartingTor ||
+                    phase == TunnelPhase.StartingDnsCrypt ||
+                    phase == TunnelPhase.StartingVpn ||
+                    phase == TunnelPhase.Validating
+                ) {
+                    Timber.w("Tunnel start cancelled during %s", phase)
+                    updateSnapshot(
+                        TunnelPhase.Error,
+                        lastError = "Tunnel start cancelled",
+                    )
+                }
                 throw error
             } catch (error: Exception) {
                 Timber.e(error, "Tunnel start crashed")
@@ -595,21 +621,16 @@ class TunnelForegroundService : Service() {
                 )
             }
         }
-        if (_snapshot.value.phase == TunnelPhase.Error) return
+        // Blocking is also a terminal path for start (kill-switch engaged).
+        val afterTun = _snapshot.value.phase
+        if (afterTun == TunnelPhase.Error || afterTun == TunnelPhase.Blocking) return
 
         if (effectivePlane == TunDataPlane.ONIONMASQ) {
-            // Wait for onionmasq BootstrapEvent ready (Tor VPN CONNECTED gate).
-            var ready = OnionVpnService.onionmasqReady.value
-            if (!ready) {
-                repeat(80) { // ~20s — Arti bootstrap can exceed 10s on cold start
-                    if (OnionVpnService.onionmasqReady.value) {
-                        ready = true
-                        return@repeat
-                    }
-                    delay(250)
-                }
-                ready = OnionVpnService.onionmasqReady.value
-            }
+            // Cold microdesc fetch often exceeds 20s; wait for ready_for_traffic only.
+            val ready = OnionVpnService.onionmasqReady.value ||
+                withTimeoutOrNull(ONIONMASQ_BOOTSTRAP_TIMEOUT_MS) {
+                    OnionVpnService.onionmasqReady.first { it }
+                } == true
             val sidecar = ltechnologies.onionphone.onionvpn.core.vpn.onionmasq.OnionmasqSocksSidecar.socksPortOrZero()
             Timber.i(
                 "onionmasq bootstrapReady=%s socksSidecar=%d interimArtiMobile=%s",
@@ -785,7 +806,12 @@ class TunnelForegroundService : Service() {
             Timber.i("handleFailure ignored — phase=%s", phase)
             return
         }
-        if (identityRefreshing || tor.isInMaintenance) {
+        val bootstrapping = phase == TunnelPhase.StartingTor ||
+            phase == TunnelPhase.StartingDnsCrypt ||
+            phase == TunnelPhase.StartingVpn ||
+            phase == TunnelPhase.Validating
+        // Never leave Starting* stuck: defer only once Connected (NEWNYM / soft recover).
+        if (!bootstrapping && (identityRefreshing || tor.isInMaintenance)) {
             Timber.i("handleFailure deferred — identity/maintenance (%s)", message)
             return
         }
@@ -1254,6 +1280,11 @@ class TunnelForegroundService : Service() {
 
         /** Bootstrap / validation budget before Connected holds the lock open-ended. */
         private const val BOOTSTRAP_WAKELOCK_TIMEOUT_MS = 180_000L
+        /**
+         * onionmasq (separate TorClient) cold microdesc fetch often exceeds 60–90s.
+         * Old gate was ~20s → fail/stuck while circuits were still building.
+         */
+        private const val ONIONMASQ_BOOTSTRAP_TIMEOUT_MS = 240_000L
         /** Soft fail streak / cooldown before Arti hard restart on link flap. */
         private const val HARD_NETWORK_RECOVER_COOLDOWN_MS = 60_000L
         /** Leak checks — catch Private DNS activation sooner without thrashing Tor. */

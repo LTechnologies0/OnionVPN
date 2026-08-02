@@ -851,8 +851,11 @@ class TorProcessManager(
                     artiDormant -> "Arti dormant (synthetic Soft)"
                     arti.isRunning() -> {
                         val block = arti.bootstrapBlockageOrEmpty()
-                        if (block.isNotEmpty()) "Arti blocked: $block"
-                        else "Waiting for Arti listeners"
+                        when {
+                            block.isNotEmpty() -> "Arti blocked: $block"
+                            socksUp -> "Waiting for Arti bootstrap"
+                            else -> "Waiting for Arti listeners"
+                        }
                     }
                     else -> "Arti stopped"
                 },

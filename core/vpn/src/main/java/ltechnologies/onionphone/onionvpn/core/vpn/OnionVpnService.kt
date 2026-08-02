@@ -332,7 +332,9 @@ class OnionVpnService : VpnService() {
                     forwarderAlive.value = false
                 },
                 onBootstrap = { event: BootstrapEvent ->
-                    if (event.isReadyForTraffic && event.bootstrapPercent == 100) {
+                    // Tor VPN / Arti: ready_for_traffic is the CONNECTED gate.
+                    // Also accept 100% — some builds emit percent before the boolean flips.
+                    if (event.isReadyForTraffic || event.bootstrapPercent >= 100) {
                         onionmasqBootstrapReady.value = true
                     }
                     onOnionmasqBootstrap?.invoke(event)
