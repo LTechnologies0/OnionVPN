@@ -80,7 +80,9 @@ object TunnelPortAllocator {
         return try {
             DatagramSocket(null).use { socket ->
                 socket.reuseAddress = true
-                socket.bind(InetSocketAddress(InetAddress.getLoopbackAddress(), port))
+                socket.bind(
+                    InetSocketAddress(InetAddress.getByName(TunnelEndpoints.LOOPBACK), port),
+                )
             }
             true
         } catch (_: Exception) {

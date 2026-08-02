@@ -9,6 +9,7 @@ import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
 import timber.log.Timber
 
 /**
@@ -32,7 +33,14 @@ class SocksTcpRelay(
         if (!running.compareAndSet(false, true)) return
         val ss = ServerSocket()
         ss.reuseAddress = true
-        ss.bind(InetSocketAddress(InetAddress.getLoopbackAddress(), listenPort))
+        // Bind IPv4 loopback explicitly — getLoopbackAddress() may be ::1 while
+        // DNSCrypt/validators dial TunnelEndpoints.LOOPBACK (127.0.0.1) → ECONNREFUSED.
+        ss.bind(
+            InetSocketAddress(
+                InetAddress.getByName(TunnelEndpoints.LOOPBACK),
+                listenPort,
+            ),
+        )
         server = ss
         val accept = newAcceptExecutor()
         val pipe = newPipeExecutor()
