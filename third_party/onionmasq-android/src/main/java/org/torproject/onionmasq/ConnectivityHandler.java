@@ -50,7 +50,8 @@ public class ConnectivityHandler {
             super.onLost(network);
             LogObservable.getInstance().addLog("Internet connectivity lost.");
             try {
-                if (OnionMasq.isRunning()) {
+                // isRunning() is false (and JNI-safe) when init has not run.
+                if (OnionMasq.isInitialized() && OnionMasq.isRunning()) {
                     OnionMasqJni.setInternetConnectivity(false);
                 }
             } catch (ProxyStoppedException e) {
@@ -64,7 +65,7 @@ public class ConnectivityHandler {
             super.onCapabilitiesChanged(network, networkCapabilities);
             boolean hasInternetConnectivity = networkCapabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED);
             try {
-                if (OnionMasq.isRunning()) {
+                if (OnionMasq.isInitialized() && OnionMasq.isRunning()) {
                     OnionMasqJni.setInternetConnectivity(hasInternetConnectivity);
                 }
             } catch (ProxyStoppedException e) {

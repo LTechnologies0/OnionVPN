@@ -22,7 +22,9 @@ object OnionmasqSocksSidecar {
 
     /** Bound sidecar port, or 0 if onionmasq is not running / sidecar down. */
     fun socksPortOrZero(): Int {
-        if (!OnionMasq.isRunning()) return 0
+        // OnionMasq.isRunning()/getSocksSidecarPort are Java-hardened for pre-init,
+        // but still avoid probing when the helper reports uninitialized.
+        if (!OnionMasq.isInitialized() || !OnionMasq.isRunning()) return 0
         return runCatching { OnionMasq.getSocksSidecarPort().toInt() }
             .onFailure { Timber.w(it, "getSocksSidecarPort") }
             .getOrDefault(0)

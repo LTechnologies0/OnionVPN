@@ -1,0 +1,63 @@
+diff --git a/crates/onionmasq-mobile/src/ffi.rs b/crates/onionmasq-mobile/src/ffi.rs
+index a0f18ab..b1c2d0e 100644
+--- a/crates/onionmasq-mobile/src/ffi.rs
++++ b/crates/onionmasq-mobile/src/ffi.rs
+@@ -48,8 +48,11 @@ pub extern "C" fn Java_org_torproject_onionmasq_OnionMasqJni_closeProxy(
+     mut env: JNIEnv,
+     _: JClass,
+ ) {
+     panic_handling::capture_unwind!(env, {
+-        let mobile = OnionmasqMobile::get();
++        // Never expect()-abort when stop races ahead of init (Android VPN restart).
++        let Some(mobile) = OnionmasqMobile::try_get() else {
++            return;
++        };
+         if let Err(e) = mobile.stop_proxy() {
+             error!("closeProxy() returned error: {e:?}");
+             errors::throw_java_exception_for(&mut env, e).unwrap();
+@@ -62,14 +65,20 @@ pub extern "C" fn Java_org_torproject_onionmasq_OnionMasqJni_isRunning(
+     _: JClass,
+ ) -> jboolean {
+     panic_handling::capture_unwind!(env, {
+-        let mobile = OnionmasqMobile::get();
+-        anyhow::Ok(mobile.is_running()).expect("Could not determine running state")
++        // Return false when uninitialised — callers (e.g. ConnectivityHandler, VPN
++        // stop-before-start) probe isRunning before init. get().expect aborts the app.
++        match OnionmasqMobile::try_get() {
++            Some(mobile) => mobile.is_running(),
++            None => 0,
++        }
+     })
+ }
+ 
+ #[no_mangle]
+ pub extern "C" fn Java_org_torproject_onionmasq_OnionMasqJni_getSocksSidecarPort(
+     mut env: JNIEnv,
+     _: JClass,
+ ) -> jlong {
+     panic_handling::capture_unwind!(env, {
+-        anyhow::Ok(OnionmasqMobile::get().socks_sidecar_port())
+-            .expect("Could not read SOCKS sidecar port")
++        match OnionmasqMobile::try_get() {
++            Some(mobile) => mobile.socks_sidecar_port(),
++            None => 0,
++        }
+     })
+ }
+diff --git a/crates/onionmasq-mobile/src/lib.rs b/crates/onionmasq-mobile/src/lib.rs
+index 4a4cf12..c9e8f01 100644
+--- a/crates/onionmasq-mobile/src/lib.rs
++++ b/crates/onionmasq-mobile/src/lib.rs
+@@ -169,6 +169,12 @@ impl OnionmasqMobile {
+             .expect("OnionmasqMobile::get() called without being initialised (did you forget to call init?)")
+     }
+ 
++    /// Like [`Self::get`], but returns `None` when `init()` has not run yet.
++    /// Prefer this for probe/stop JNI entry points that must not abort the process.
++    pub fn try_get() -> Option<&'static Self> {
++        ONIONMASQ_MOBILE_SINGLETON.get()
++    }
++
+     /// Get the Android API version.
+     pub fn get_android_api(&self) -> Result<i32> {
+         self.call_jni_class_method("getAndroidAPI", "()I", &[])

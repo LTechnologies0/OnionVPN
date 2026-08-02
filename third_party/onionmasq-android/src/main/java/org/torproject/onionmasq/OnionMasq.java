@@ -246,17 +246,43 @@ public class OnionMasq {
         }
     }
 
+    /** True after a successful [init] (Java instance + native singleton). */
+    public static boolean isInitialized() {
+        return instance != null;
+    }
+
+    /**
+     * Whether the onionmasq control channel exists.
+     * <p>
+     * Safe before [init]: returns {@code false}. Calling into
+     * {@link OnionMasqJni#isRunning()} before native init aborts the process
+     * ({@code OnionmasqMobile::get().expect(...)} with {@code panic=abort}).
+     */
     public static boolean isRunning() {
+        if (instance == null) {
+            return false;
+        }
         return OnionMasqJni.isRunning();
     }
 
-    /** Loopback SOCKS5 port for DNSCrypt/probe (0 if sidecar not listening). */
+    /** Loopback SOCKS5 port for DNSCrypt/probe (0 if sidecar not listening / not init). */
     public static long getSocksSidecarPort() {
+        if (instance == null) {
+            return 0L;
+        }
         return OnionMasqJni.getSocksSidecarPort();
     }
 
+    /**
+     * Stops the proxy. No-op when [init] has not run — native {@code closeProxy}
+     * otherwise expect()-aborts.
+     */
     @WorkerThread
     public static void stop() {
+        if (instance == null) {
+            Log.d(TAG, "stop() skipped — OnionMasq not initialized");
+            return;
+        }
         OnionMasqJni.closeProxy();
         OnionMasqJni.resetCounters();
         getInstance().circuitStore.reset();
