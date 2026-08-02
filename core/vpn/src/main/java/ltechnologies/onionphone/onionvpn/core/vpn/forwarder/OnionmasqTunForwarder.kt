@@ -51,6 +51,12 @@ class OnionmasqTunForwarder(
     private val scope = CoroutineScope(supervisor + Dispatchers.IO)
     private val worker = AtomicReference<Job?>(null)
     private val running = AtomicBoolean(false)
+    /**
+     * True once we have handed a TUN fd to [OnionMasq.start] (or are about to).
+     * Native [OnionMasq.stop]/[OnionMasqJni.closeProxy] **aborts** (Rust unwrap) if the
+     * control channel was never opened — [runCatching] cannot catch SIGABRT.
+     */
+    private val proxyOwned = AtomicBoolean(false)
     private var dnsMux: TunDnsMux? = null
     private var omEnd: ParcelFileDescriptor? = null
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -65,6 +71,9 @@ class OnionmasqTunForwarder(
         synthesizeOnionAutomap: Boolean,
     ) {
         OpTrace.step("onionmasq", "start dnsCrypt=$dnsCryptPort", ProcessLogLevel.INFO) {
+            // Tear down a prior start on *this* instance only. Never call closeProxy when
+            // onionmasq was not started — that path SIGABRTs inside libonionmasq_mobile.so
+            // (seen on 0.3.45: startForwarder → stop → closeProxy unwrap_failed).
             stop()
             if (dnsMode != DnsResolverMode.DNSCRYPT_MUX) {
                 Timber.i("dnsMode=$dnsMode coerced to DNSCRYPT_MUX divert for onionmasq")
@@ -125,11 +134,17 @@ class OnionmasqTunForwarder(
             val bridges = bridgeLines?.takeIf { it.isNotBlank() }
             val job = scope.launch {
                 try {
+                    // Transfer ownership of the socketpair end to native — do not close after.
+                    val fd = onionEnd.detachFd()
+                    omEnd = null
+                    proxyOwned.set(true)
                     Timber.i(
-                        "Starting OnionMasq on mux fd=${onionEnd.fd} bridges=${bridges != null}",
+                        "Starting OnionMasq on mux fd=%d bridges=%s",
+                        fd,
+                        bridges != null,
                     )
                     // Blocking until closeProxy — Tor VPN pattern.
-                    OnionMasq.start(onionEnd.detachFd(), bridges)
+                    OnionMasq.start(fd, bridges)
                 } catch (error: Exception) {
                     Timber.e(error, "OnionMasq exited")
                     onFatal?.invoke(
@@ -140,6 +155,7 @@ class OnionmasqTunForwarder(
                     )
                 } finally {
                     running.set(false)
+                    proxyOwned.set(false)
                 }
             }
             worker.set(job)
@@ -149,13 +165,23 @@ class OnionmasqTunForwarder(
     override fun stop() {
         OpTrace.debug("onionmasq", "stop")
         running.set(false)
+        proxyOwned.set(false)
         detachEventObserver()
-        runCatching { OnionMasq.stop() }
+        // closeProxy aborts (Rust unwrap → SIGABRT) when the control channel was never
+        // opened. isRunning() is the only safe gate — runCatching cannot catch abort.
+        val nativeUp = runCatching { OnionMasq.isRunning() }.getOrDefault(false)
+        if (nativeUp) {
+            runCatching { OnionMasq.stop() }
+                .onFailure { Timber.w(it, "OnionMasq.stop failed") }
+        } else {
+            Timber.d("OnionMasq.stop skipped — proxy not running")
+        }
         dnsMux?.stop()
         dnsMux = null
         worker.getAndSet(null)?.cancel()
         supervisor.cancelChildren()
-        omEnd?.close()
+        // Only if start() failed before detachFd(); after detach, native owns the fd.
+        runCatching { omEnd?.close() }
         omEnd = null
     }
 
