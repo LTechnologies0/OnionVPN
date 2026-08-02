@@ -3,6 +3,7 @@ package org.torproject.onionmasq;
 import android.content.Context;
 import android.os.Build;
 
+import androidx.annotation.Keep;
 import androidx.annotation.WorkerThread;
 
 import org.torproject.onionmasq.errors.CountryCodeException;
@@ -185,6 +186,8 @@ public class OnionMasqJni {
      * @param socket fd of a socket
      * @return true on success.
      */
+    /** Called from Rust — must survive R8 (see app/proguard-rules.pro). */
+    @Keep
     @SuppressWarnings("unused")
     public static boolean protect(int socket) {
         return OnionMasq.protect(socket);
@@ -195,11 +198,13 @@ public class OnionMasqJni {
      * This method can be called from Rust after the Java environment has been initialized ({@link #init()}).
      * @return Android SDK Version number
      */
+    @Keep
     @SuppressWarnings("unused")
     public static int getAndroidAPI() {
         return Build.VERSION.SDK_INT;
     }
 
+    @Keep
     @SuppressWarnings("unused")
     public static void postEvent(String update) {
         // NOTE(eta): we cannot log the `update` directly, since it might contain sensitive
