@@ -6,13 +6,15 @@ import android.net.VpnService
 import android.os.Build
 import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
 import ltechnologies.onionphone.onionvpn.core.model.TunnelPreferences
+import ltechnologies.onionphone.onionvpn.core.model.VpnAppRoutingMode
 import ltechnologies.onionphone.onionvpn.core.model.VpnProfileMode
 import timber.log.Timber
 
 /**
  * Builds fail-closed VPN profiles (Mullvad + InviZible + Orbot):
  *
- * - Full-tunnel IPv4 (`0.0.0.0/0`) and IPv6 (`::/0`) — always; split-tunnel is refused
+ * - Full-tunnel IPv4 (`0.0.0.0/0`) and IPv6 (`::/0`) — always (no route split)
+ * - Per-app allow/deny via [VpnAppRoutingMode] (Orbot); never mixes both lists
  * - Never [VpnService.Builder.allowFamily] without relying on it for capture: dual-stack
  *   addresses+routes already claim both families (allowFamily alone can fall through
  *   to clearnet — Android VpnService docs / anti-leak skill)
@@ -118,9 +120,44 @@ object VpnProfileBuilder {
         }
 
         builder.setConfigureIntent(configurePendingIntent(service))
-        excludeOwnPackage(service, builder)
+        applyAppRouting(service, builder, preferences)
 
         return builder
+    }
+
+    /**
+     * Orbot-style app filter. Own package is never on the VPN (uplink loop).
+     * INCLUDE with empty list → treat as ALL (fail open to full tunnel, not zero apps).
+     */
+    private fun applyAppRouting(
+        service: VpnService,
+        builder: VpnService.Builder,
+        preferences: TunnelPreferences,
+    ) {
+        val own = service.packageName
+        val packages = preferences.vpnAppPackages.filter { it.isNotBlank() && it != own }.toSet()
+        when (preferences.vpnAppRoutingMode) {
+            VpnAppRoutingMode.INCLUDE -> {
+                if (packages.isEmpty()) {
+                    Timber.w("INCLUDE list empty — falling back to ALL (+ self-exclude)")
+                    excludeOwnPackage(service, builder)
+                    return
+                }
+                packages.forEach { pkg ->
+                    runCatching { builder.addAllowedApplication(pkg) }
+                        .onFailure { Timber.w(it, "Skip allow VPN for $pkg") }
+                }
+                // Own package omitted from allow-list ⇒ not captured (no addDisallowed needed).
+            }
+            VpnAppRoutingMode.EXCLUDE -> {
+                excludeOwnPackage(service, builder)
+                packages.forEach { pkg ->
+                    runCatching { builder.addDisallowedApplication(pkg) }
+                        .onFailure { Timber.w(it, "Skip disallow VPN for $pkg") }
+                }
+            }
+            VpnAppRoutingMode.ALL -> excludeOwnPackage(service, builder)
+        }
     }
 
     /** InviZible/Mullvad: gear icon in system VPN settings opens the app. */

@@ -1,6 +1,7 @@
 package ltechnologies.onionphone.onionvpn
 
 import android.Manifest
+import android.content.ActivityNotFoundException
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
@@ -57,7 +58,9 @@ import ltechnologies.onionphone.onionvpn.ui.SettingsScreen
 import ltechnologies.onionphone.onionvpn.ui.StatusScreen
 import ltechnologies.onionphone.onionvpn.ui.applock.AppLockGate
 import ltechnologies.onionphone.onionvpn.ui.theme.OnionVpnTheme
+import ltechnologies.onionphone.onionvpn.util.BatteryOptimization
 import ltechnologies.onionphone.onionvpn.util.WindowSecureHelper
+import timber.log.Timber
 
 @AndroidEntryPoint
 class MainActivity : FragmentActivity() {
@@ -79,6 +82,13 @@ class MainActivity : FragmentActivity() {
 
     private val notificationPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission(),
+    ) {
+        requestBatteryExemptionThenStart()
+    }
+
+    /** OnionShare-style: OS battery whitelist dialog; continue regardless of result. */
+    private val batteryExemptionLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult(),
     ) {
         launchVpnOrStart()
     }
@@ -164,6 +174,18 @@ class MainActivity : FragmentActivity() {
             if (!granted) {
                 notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
                 return
+            }
+        }
+        requestBatteryExemptionThenStart()
+    }
+
+    private fun requestBatteryExemptionThenStart() {
+        if (BatteryOptimization.needsWhitelisting(this)) {
+            try {
+                batteryExemptionLauncher.launch(BatteryOptimization.requestIgnoreIntent(this))
+                return
+            } catch (error: ActivityNotFoundException) {
+                Timber.w(error, "Battery exemption Activity missing — continue start")
             }
         }
         launchVpnOrStart()

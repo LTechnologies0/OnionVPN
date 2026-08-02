@@ -1,0 +1,306 @@
+diff --git a/crates/onionmasq-mobile/Cargo.toml b/crates/onionmasq-mobile/Cargo.toml
+index 63797e4..83c832d 100644
+--- a/crates/onionmasq-mobile/Cargo.toml
++++ b/crates/onionmasq-mobile/Cargo.toml
+@@ -14,13 +14,16 @@ pluggable-transports = ["onion-tunnel/pluggable-transports"]
+ 
+ [dependencies]
+ anyhow = "1.0"
++arti-client = { version = "0.44.0", default-features = false, features = ["tokio", "rustls"] }
+ backtrace = "0.3.71"
+ lazy_static = "1.4.0"
+ onion-tunnel = { path = "../onion-tunnel", version = "0.0.0", features = ["udp-tunnel", "pcap"] }
+ serde = { version = "1.0", features = ["derive"] }
+ serde_json = "1.0"
+-tokio = { version = "1.37.0", features = ["macros", "rt", "rt-multi-thread"] }
++tokio = { version = "1.37.0", features = ["macros", "rt", "rt-multi-thread", "net", "io-util", "sync"] }
+ tokio-stream = "0.1"
++tokio-util = { version = "0.7.10", features = ["compat"] }
++tor-rtcompat = { version = "0.44.0" }
+ tracing = "0.1.40"
+ # the java native interface
+ jni = { version = "0.21", default-features = false }
+diff --git a/crates/onionmasq-mobile/src/ffi.rs b/crates/onionmasq-mobile/src/ffi.rs
+index d94b358..a0f18ab 100644
+--- a/crates/onionmasq-mobile/src/ffi.rs
++++ b/crates/onionmasq-mobile/src/ffi.rs
+@@ -67,6 +67,17 @@ pub extern "C" fn Java_org_torproject_onionmasq_OnionMasqJni_isRunning(
+     })
+ }
+ 
++#[no_mangle]
++pub extern "C" fn Java_org_torproject_onionmasq_OnionMasqJni_getSocksSidecarPort(
++    mut env: JNIEnv,
++    _: JClass,
++) -> jlong {
++    panic_handling::capture_unwind!(env, {
++        anyhow::Ok(OnionmasqMobile::get().socks_sidecar_port())
++            .expect("Could not read SOCKS sidecar port")
++    })
++}
++
+ #[no_mangle]
+ pub extern "C" fn Java_org_torproject_onionmasq_OnionMasqJni_refreshCircuits(
+     mut env: JNIEnv,
+diff --git a/crates/onionmasq-mobile/src/lib.rs b/crates/onionmasq-mobile/src/lib.rs
+index fdbc78d..4a4cf12 100644
+--- a/crates/onionmasq-mobile/src/lib.rs
++++ b/crates/onionmasq-mobile/src/lib.rs
+@@ -6,6 +6,7 @@ mod ffi;
+ mod ffi_event;
+ mod panic_handling;
+ mod scaffolding;
++mod socks_sidecar;
+ 
+ use crate::errors::{CountryCodeError, ProxyStoppedError};
+ use crate::scaffolding::AndroidScaffolding;
+@@ -303,6 +304,15 @@ impl OnionmasqMobile {
+ 
+             debug!("successfully created tun interface");
+ 
++            // OnionVPN DNSCrypt / probe: SOCKS5 sidecar on the same TorClient (IsolationToken by user).
++            let socks_arti = onion_tunnel.get_tor_client();
++            let (_socks_port, socks_shutdown) = socks_sidecar::start_sidecar(socks_arti)
++                .await
++                .map_err(|e| {
++                    error!("SOCKS sidecar failed to start: {e:#}");
++                    e
++                })?;
++
+             let mut events = onion_tunnel.get_bootstrap_events();
+             tokio::spawn(async move {
+                 debug!("starting bootstrap event listening ...");
+@@ -319,6 +329,7 @@ impl OnionmasqMobile {
+ 
+             // (This call is blocking, and only returns in case of error or external shutdown.)
+             let result = onion_tunnel.run().await;
++            let _ = socks_shutdown.send(());
+             if let Err(ref e) = result {
+                 error!("OnionTunnel failed: {e}");
+             }
+@@ -357,6 +368,11 @@ impl OnionmasqMobile {
+         }
+     }
+ 
++    /// Loopback SOCKS5 port for DNSCrypt/probe (0 if sidecar not up yet).
++    fn socks_sidecar_port(&self) -> jlong {
++        socks_sidecar::socks_port() as jlong
++    }
++
+     /// Send a `TunnelCommand` to the running proxy.
+     fn send_command(&self, cmd: TunnelCommand) -> Result<()> {
+         if let Some(sender) = self.command_sender.lock().unwrap().as_mut() {
+diff --git a/crates/onionmasq-mobile/src/socks_sidecar.rs b/crates/onionmasq-mobile/src/socks_sidecar.rs
+new file mode 100644
+index 0000000..77867d4
+--- /dev/null
++++ b/crates/onionmasq-mobile/src/socks_sidecar.rs
+@@ -0,0 +1,208 @@
++//! Loopback SOCKS5 sidecar on the same TorClient as onionmasq TUN traffic.
++//!
++//! DNSCrypt / probe clients authenticate with username/password; each username maps to a
++//! stable [`IsolationToken`] so roles stay isolated without a second Arti bootstrap.
++
++use arti_client::{IntoTorAddr, IsolationToken, StreamPrefs, TorClient};
++use dashmap::DashMap;
++use futures::future::FutureExt;
++use std::net::SocketAddr;
++use std::sync::atomic::{AtomicU16, Ordering};
++use std::sync::Arc;
++use tokio::io::{AsyncReadExt, AsyncWriteExt};
++use tokio::net::{TcpListener, TcpStream};
++use tokio::sync::oneshot;
++use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
++use tor_rtcompat::Runtime;
++use tracing::{debug, info, warn};
++
++static SOCKS_PORT: AtomicU16 = AtomicU16::new(0);
++
++/// Bound loopback SOCKS port, or 0 if the sidecar is not listening.
++pub fn socks_port() -> u16 {
++    SOCKS_PORT.load(Ordering::SeqCst)
++}
++
++fn clear_socks_port() {
++    SOCKS_PORT.store(0, Ordering::SeqCst);
++}
++
++/// Start SOCKS5 on `127.0.0.1:0` (ephemeral) using `arti`.
++///
++/// Returns `(bound_port, shutdown_tx)`. Sending on `shutdown_tx` stops the accept loop.
++pub async fn start_sidecar<R>(arti: Arc<TorClient<R>>) -> anyhow::Result<(u16, oneshot::Sender<()>)>
++where
++    R: Runtime,
++{
++    let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0))).await?;
++    let port = listener.local_addr()?.port();
++    SOCKS_PORT.store(port, Ordering::SeqCst);
++    info!("onionmasq SOCKS sidecar listening on 127.0.0.1:{port}");
++
++    let (shutdown_tx, mut shutdown_rx) = oneshot::channel::<()>();
++    let tokens: Arc<DashMap<String, IsolationToken>> = Arc::new(DashMap::new());
++
++    tokio::spawn(async move {
++        loop {
++            let accept = listener.accept();
++            tokio::select! {
++                _ = &mut shutdown_rx => {
++                    debug!("SOCKS sidecar shutdown");
++                    break;
++                }
++                res = accept => {
++                    match res {
++                        Ok((stream, peer)) => {
++                            let arti = Arc::clone(&arti);
++                            let tokens = Arc::clone(&tokens);
++                            tokio::spawn(async move {
++                                if let Err(e) = handle_client(stream, peer, arti, tokens).await {
++                                    warn!("SOCKS sidecar client error from {peer}: {e:#}");
++                                }
++                            });
++                        }
++                        Err(e) => {
++                            warn!("SOCKS sidecar accept failed: {e}");
++                            break;
++                        }
++                    }
++                }
++            }
++        }
++        clear_socks_port();
++    });
++
++    Ok((port, shutdown_tx))
++}
++
++async fn handle_client<R>(
++    mut stream: TcpStream,
++    peer: SocketAddr,
++    arti: Arc<TorClient<R>>,
++    tokens: Arc<DashMap<String, IsolationToken>>,
++) -> anyhow::Result<()>
++where
++    R: Runtime,
++{
++    // Greeting
++    let mut hdr = [0u8; 2];
++    stream.read_exact(&mut hdr).await?;
++    if hdr[0] != 0x05 {
++        anyhow::bail!("unsupported SOCKS version {}", hdr[0]);
++    }
++    let nmethods = hdr[1] as usize;
++    let mut methods = vec![0u8; nmethods];
++    stream.read_exact(&mut methods).await?;
++    if !methods.contains(&0x02) {
++        stream.write_all(&[0x05, 0xFF]).await?;
++        anyhow::bail!("client does not offer username/password auth");
++    }
++    stream.write_all(&[0x05, 0x02]).await?;
++
++    // Username/password auth (RFC 1929)
++    let mut auth_ver = [0u8; 1];
++    stream.read_exact(&mut auth_ver).await?;
++    if auth_ver[0] != 0x01 {
++        anyhow::bail!("bad auth version");
++    }
++    let mut ulen = [0u8; 1];
++    stream.read_exact(&mut ulen).await?;
++    let mut uname = vec![0u8; ulen[0] as usize];
++    stream.read_exact(&mut uname).await?;
++    let mut plen = [0u8; 1];
++    stream.read_exact(&mut plen).await?;
++    let mut passwd = vec![0u8; plen[0] as usize];
++    stream.read_exact(&mut passwd).await?;
++    let username = String::from_utf8_lossy(&uname).into_owned();
++    let _password = passwd;
++    stream.write_all(&[0x01, 0x00]).await?;
++
++    // Request
++    let mut req = [0u8; 4];
++    stream.read_exact(&mut req).await?;
++    if req[0] != 0x05 {
++        anyhow::bail!("bad request version");
++    }
++    if req[1] != 0x01 {
++        reply_socks_error(&mut stream, 0x07).await?;
++        anyhow::bail!("unsupported SOCKS command {}", req[1]);
++    }
++    let (host, port) = match req[3] {
++        0x01 => {
++            let mut addr = [0u8; 4];
++            stream.read_exact(&mut addr).await?;
++            let mut p = [0u8; 2];
++            stream.read_exact(&mut p).await?;
++            let port = u16::from_be_bytes(p);
++            (
++                format!("{}.{}.{}.{}", addr[0], addr[1], addr[2], addr[3]),
++                port,
++            )
++        }
++        0x03 => {
++            let mut len = [0u8; 1];
++            stream.read_exact(&mut len).await?;
++            let mut name = vec![0u8; len[0] as usize];
++            stream.read_exact(&mut name).await?;
++            let mut p = [0u8; 2];
++            stream.read_exact(&mut p).await?;
++            let port = u16::from_be_bytes(p);
++            (String::from_utf8_lossy(&name).into_owned(), port)
++        }
++        0x04 => {
++            reply_socks_error(&mut stream, 0x08).await?;
++            anyhow::bail!("IPv6 SOCKS destination not supported");
++        }
++        other => {
++            reply_socks_error(&mut stream, 0x08).await?;
++            anyhow::bail!("unknown ATYP {other}");
++        }
++    };
++
++    let isolation = *tokens
++        .entry(username.clone())
++        .or_insert_with(IsolationToken::new);
++
++    let mut prefs = StreamPrefs::new();
++    prefs.set_isolation(isolation);
++
++    let tor_addr = (host.as_str(), port)
++        .into_tor_addr()
++        .map_err(|e| anyhow::anyhow!("TorAddr: {e}"))?;
++
++    debug!("SOCKS CONNECT {username}@{peer} → {host}:{port}");
++
++    let arti_stream = match arti.connect_with_prefs(tor_addr, &prefs).await {
++        Ok(s) => s,
++        Err(e) => {
++            reply_socks_error(&mut stream, 0x05).await?;
++            return Err(e.into());
++        }
++    };
++
++    stream
++        .write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
++        .await?;
++
++    let (mut arti_r, mut arti_w) = arti_stream.split();
++    let (cli_r, cli_w) = stream.into_split();
++    let mut cli_r = cli_r.compat();
++    let mut cli_w = cli_w.compat_write();
++
++    let c2a = futures::io::copy(&mut cli_r, &mut arti_w).fuse();
++    let a2c = futures::io::copy(&mut arti_r, &mut cli_w).fuse();
++    tokio::pin!(c2a);
++    tokio::pin!(a2c);
++    tokio::select! {
++        r = &mut c2a => { let _ = r; }
++        r = &mut a2c => { let _ = r; }
++    }
++    Ok(())
++}
++
++async fn reply_socks_error(stream: &mut TcpStream, rep: u8) -> anyhow::Result<()> {
++    stream
++        .write_all(&[0x05, rep, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
++        .await?;
++    Ok(())
++}

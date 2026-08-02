@@ -17,10 +17,12 @@ class TorEnginePortAllocatorTest {
     }
 
     @Test
-    fun arti_sharesSingleSocksPortAcrossRoles() {
+    fun arti_allocatesDistinctRoleSocksPorts() {
+        // Distinct listen ports; ArtiSocksRoleMux relays DNSCrypt/probe → Arti SOCKS.
         val ports = TunnelPortAllocator.allocate(TorEngine.ARTI)
-        assertEquals(ports.torSocksPort, ports.torDnsCryptSocksPort)
-        assertEquals(ports.torSocksPort, ports.torProbeSocksPort)
+        assertNotEquals(ports.torSocksPort, ports.torDnsCryptSocksPort)
+        assertNotEquals(ports.torSocksPort, ports.torProbeSocksPort)
+        assertNotEquals(ports.torDnsCryptSocksPort, ports.torProbeSocksPort)
         assertNotEquals(ports.torSocksPort, ports.torDnsPort)
         assertTrue(ports.dnsCryptListenPort > 0)
     }
@@ -42,13 +44,14 @@ class TorEnginePortAllocatorTest {
         assertFalse(a.torrcConfig)
         assertTrue(a.synthesizeOnionAutomap)
         assertTrue(a.newIdentity)
-        assertFalse(a.circuitInspection)
+        assertTrue(a.circuitInspection)
         assertTrue(a.conjureBridges)
         assertFalse(a.nodePrefs)
         assertTrue(a.exitCountryPrefs)
         assertTrue(a.liveCircuitTiming)
         assertTrue(a.bridgesAtStart)
         assertTrue(a.socksAuthIsolation)
+        assertTrue(a.multiSocksSessionGroups) // app-layer role relays
         assertTrue(a.dormantSignals) // TorClient::set_dormant via Ext JNI when patched
         assertTrue(c.nodePrefs)
         assertTrue(c.exitCountryPrefs)

@@ -34,6 +34,21 @@ internal class TunnelVpnBridge(
                 )
                 putExtra(OnionVpnService.EXTRA_GENERATION, generation)
                 putExtra(OnionVpnService.EXTRA_DNS_MODE, preferences.dnsResolverMode.name)
+                putExtra(OnionVpnService.EXTRA_VPN_APP_MODE, preferences.vpnAppRoutingMode.name)
+                putExtra(
+                    OnionVpnService.EXTRA_VPN_APP_PACKAGES,
+                    preferences.vpnAppPackages.toTypedArray(),
+                )
+                putExtra(OnionVpnService.EXTRA_TUN_DATA_PLANE, preferences.tunDataPlane.name)
+                putExtra(OnionVpnService.EXTRA_BRIDGE_LINES, preferences.torBridges)
+                val exitCc = preferences.torExitNodes
+                    .trim()
+                    .removePrefix("{")
+                    .removeSuffix("}")
+                    .takeIf { it.length == 2 }
+                if (exitCc != null) {
+                    putExtra(OnionVpnService.EXTRA_EXIT_COUNTRY, exitCc.uppercase())
+                }
             },
         )
     }
@@ -46,6 +61,11 @@ internal class TunnelVpnBridge(
                 putExtra(OnionVpnService.EXTRA_KILL_SWITCH, true)
                 putExtra(OnionVpnService.EXTRA_PROFILE_MODE, VpnProfileMode.Blocking.name)
                 putExtra(OnionVpnService.EXTRA_GENERATION, generation)
+                putExtra(OnionVpnService.EXTRA_VPN_APP_MODE, preferences.vpnAppRoutingMode.name)
+                putExtra(
+                    OnionVpnService.EXTRA_VPN_APP_PACKAGES,
+                    preferences.vpnAppPackages.toTypedArray(),
+                )
             },
         )
     }
@@ -84,15 +104,16 @@ internal class TunnelVpnBridge(
         repeat(VPN_READY_POLLS) {
             val established = OnionVpnService.vpnEstablished.value
             val genOk = OnionVpnService.vpnGeneration.value == generation
-            val hevOk = OnionVpnService.hevSocksPort.value == ports.torSocksPort &&
+            val portsOk = OnionVpnService.hevSocksPort.value == ports.torSocksPort &&
                 OnionVpnService.hevDnsCryptPort.value == ports.dnsCryptListenPort
-            if (established && genOk && hevOk) return true
+            if (established && genOk && portsOk) return true
             delay(VPN_READY_POLL_MS)
         }
         Timber.e(
             "VPN wait timeout gen=$generation established=${OnionVpnService.vpnEstablished.value} " +
                 "activeGen=${OnionVpnService.vpnGeneration.value} " +
-                "hevSocks=${OnionVpnService.hevSocksPort.value} hevDns=${OnionVpnService.hevDnsCryptPort.value}",
+                "socks=${OnionVpnService.hevSocksPort.value} dns=${OnionVpnService.hevDnsCryptPort.value} " +
+                "plane=${OnionVpnService.vpnDataPlane.value}",
         )
         return false
     }

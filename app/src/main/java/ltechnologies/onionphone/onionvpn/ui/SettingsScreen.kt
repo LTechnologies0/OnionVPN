@@ -49,15 +49,21 @@ import ltechnologies.onionphone.onionvpn.core.dnscrypt.config.DnsCryptPublicReso
 import ltechnologies.onionphone.onionvpn.core.model.DnsResolverMode
 import ltechnologies.onionphone.onionvpn.core.model.FirewallDefaultAction
 import ltechnologies.onionphone.onionvpn.core.model.TorEngine
+import ltechnologies.onionphone.onionvpn.core.model.TunDataPlane
 import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
 import ltechnologies.onionphone.onionvpn.core.model.TunnelPreferences
+import ltechnologies.onionphone.onionvpn.core.model.VpnAppRoutingMode
 import ltechnologies.onionphone.onionvpn.core.tor.config.TorBridgeConfig
+import ltechnologies.onionphone.onionvpn.core.vpn.OnionVpnService
+import ltechnologies.onionphone.onionvpn.core.vpn.forwarder.TunDataPlaneFactory
 import ltechnologies.onionphone.onionvpn.threat.repo.DomainReputationRepository
 import ltechnologies.onionphone.onionvpn.ui.components.SectionHeader
 import ltechnologies.onionphone.onionvpn.ui.components.TonalSection
 import ltechnologies.onionphone.onionvpn.ui.settings.DnsCryptResolverMultiPickerDialog
+import ltechnologies.onionphone.onionvpn.ui.settings.PerAppVpnDialog
 import ltechnologies.onionphone.onionvpn.ui.settings.TorCountryCatalog
 import ltechnologies.onionphone.onionvpn.ui.settings.TorNodePickerDialog
+import ltechnologies.onionphone.onionvpn.util.BatteryOptimization
 import ltechnologies.onionphone.onionvpn.util.SystemSecurityIntents
 @Composable
 fun SettingsScreen(
@@ -97,6 +103,7 @@ fun SettingsScreen(
     var editingToml by remember { mutableStateOf(false) }
     var pickingResolver by remember { mutableStateOf(false) }
     var pickingEntry by remember { mutableStateOf(false) }
+    var pickingPerApp by remember { mutableStateOf(false) }
     var pickingExit by remember { mutableStateOf(false) }
     var pickingExclude by remember { mutableStateOf(false) }
     var requestingBridges by remember { mutableStateOf(false) }
@@ -142,6 +149,9 @@ fun SettingsScreen(
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         val context = LocalContext.current
+        val onionmasqNative = remember(context) {
+            TunDataPlaneFactory.isOnionmasqNativePresent(context)
+        }
 
         SectionHeader(
             title = "App security",
@@ -180,6 +190,107 @@ fun SettingsScreen(
         }
 
         SectionHeader(
+            title = "Per-app VPN",
+            subtitle = "Orbot-style: choose which apps use the Tor tunnel. " +
+                "Apps off the VPN use clearnet. Restart tunnel to apply.",
+        )
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            FilterChip(
+                selected = local.vpnAppRoutingMode == VpnAppRoutingMode.ALL,
+                onClick = {
+                    commit(local.copy(vpnAppRoutingMode = VpnAppRoutingMode.ALL), restart = true)
+                },
+                enabled = controlsEnabled,
+                label = { Text("All apps") },
+            )
+            FilterChip(
+                selected = local.vpnAppRoutingMode == VpnAppRoutingMode.INCLUDE,
+                onClick = {
+                    commit(local.copy(vpnAppRoutingMode = VpnAppRoutingMode.INCLUDE), restart = true)
+                },
+                enabled = controlsEnabled,
+                label = { Text("Only selected") },
+            )
+            FilterChip(
+                selected = local.vpnAppRoutingMode == VpnAppRoutingMode.EXCLUDE,
+                onClick = {
+                    commit(local.copy(vpnAppRoutingMode = VpnAppRoutingMode.EXCLUDE), restart = true)
+                },
+                enabled = controlsEnabled,
+                label = { Text("Exclude selected") },
+            )
+        }
+        if (local.vpnAppRoutingMode != VpnAppRoutingMode.ALL) {
+            OutlinedButton(
+                onClick = { pickingPerApp = true },
+                modifier = Modifier.fillMaxWidth(),
+                enabled = controlsEnabled,
+                shape = MaterialTheme.shapes.large,
+            ) {
+                Text("Choose apps (${local.vpnAppPackages.size})")
+            }
+            if (local.vpnAppRoutingMode == VpnAppRoutingMode.INCLUDE && local.vpnAppPackages.isEmpty()) {
+                Text(
+                    text = "Empty include list → full tunnel until you pick apps.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+        if (pickingPerApp) {
+            PerAppVpnDialog(
+                selected = local.vpnAppPackages,
+                onDismiss = { pickingPerApp = false },
+                onConfirm = { pkgs ->
+                    pickingPerApp = false
+                    commit(local.copy(vpnAppPackages = pkgs), restart = true)
+                },
+            )
+        }
+
+        SectionHeader(
+            title = "TUN data plane",
+            subtitle = "hev→SOCKS is the shipped Orbot-class path. onionmasq (Arti TUN) " +
+                "needs libonionmasq.so + Arti engine — otherwise HEV is used.",
+        )
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            FilterChip(
+                selected = local.tunDataPlane == TunDataPlane.HEV_SOCKS,
+                onClick = {
+                    commit(local.copy(tunDataPlane = TunDataPlane.HEV_SOCKS), restart = true)
+                },
+                enabled = controlsEnabled,
+                label = { Text("hev SOCKS") },
+            )
+            FilterChip(
+                selected = local.tunDataPlane == TunDataPlane.ONIONMASQ,
+                onClick = {
+                    commit(
+                        local.copy(
+                            tunDataPlane = TunDataPlane.ONIONMASQ,
+                            torEngine = TorEngine.ARTI,
+                        ),
+                        restart = true,
+                    )
+                },
+                enabled = controlsEnabled && onionmasqNative,
+                label = {
+                    Text(if (onionmasqNative) "onionmasq" else "onionmasq (lib missing)")
+                },
+            )
+        }
+
+        SectionHeader(
             title = "System leak protection",
             subtitle = "GrapheneOS improves VPN leak blocking when Always-on VPN + " +
                 "“Block connections without VPN” are on. OnionVPN cannot flip those itself.",
@@ -198,13 +309,41 @@ fun SettingsScreen(
         ) {
             Text("Open network settings (set Private DNS Off)")
         }
+        OutlinedButton(
+            onClick = {
+                if (BatteryOptimization.needsWhitelisting(context)) {
+                    runCatching {
+                        context.startActivity(
+                            BatteryOptimization.requestIgnoreIntent(context).addFlags(
+                                android.content.Intent.FLAG_ACTIVITY_NEW_TASK,
+                            ),
+                        )
+                    }.onFailure {
+                        BatteryOptimization.openAppBatterySettings(context)
+                    }
+                } else {
+                    BatteryOptimization.openAppBatterySettings(context)
+                }
+            },
+            modifier = Modifier.fillMaxWidth(),
+            shape = MaterialTheme.shapes.large,
+        ) {
+            Text(
+                if (BatteryOptimization.needsWhitelisting(context)) {
+                    "Allow background (battery / Doze whitelist)"
+                } else {
+                    "Battery optimization already unrestricted"
+                },
+            )
+        }
         Text(
             text = "Checklist (Privacy Guides / GrapheneOS VPN leak blocking):\n" +
                 "1. Always-on VPN → OnionVPN ON\n" +
                 "2. Block connections without VPN ON (OS kill switch)\n" +
                 "3. Private DNS → Off (DoT bypasses tunnel DNS)\n" +
-                "4. Stop other VPNs\n" +
-                "5. Prefer Vanadium; disable WebRTC if possible",
+                "4. Unrestricted battery (Doze whitelist) — asked on Connect\n" +
+                "5. Stop other VPNs\n" +
+                "6. Prefer Vanadium; disable WebRTC if possible",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -500,7 +639,16 @@ fun SettingsScreen(
             FilterChip(
                 selected = local.torEngine == TorEngine.ARTI,
                 onClick = {
-                    commit(local.copy(torEngine = TorEngine.ARTI), restart = true)
+                    val plane =
+                        if (TunDataPlaneFactory.isOnionmasqNativePresent(context)) {
+                            TunDataPlane.ONIONMASQ
+                        } else {
+                            TunDataPlane.HEV_SOCKS
+                        }
+                    commit(
+                        local.copy(torEngine = TorEngine.ARTI, tunDataPlane = plane),
+                        restart = true,
+                    )
                 },
                 enabled = controlsEnabled,
                 label = { Text("Arti") },
@@ -817,6 +965,17 @@ fun SettingsScreen(
             }
         }
         if (caps.nodePrefs || caps.exitCountryPrefs) {
+        val onionExitCatalog = OnionVpnService.circuitRepository.relaysByCountry
+        if (onionExitCatalog.isNotEmpty() && local.tunDataPlane == TunDataPlane.ONIONMASQ) {
+            Text(
+                text = "Directory exits (onionmasq): " +
+                    onionExitCatalog.entries.sortedByDescending { it.value }
+                        .take(8)
+                        .joinToString { "${it.key}=${it.value}" },
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
         if (caps.nodePrefs) {
         OutlinedButton(
             onClick = { pickingEntry = true },
@@ -871,6 +1030,18 @@ fun SettingsScreen(
                         it
                     }
                     commit(local.copy(torExitNodes = next), restart = false)
+                    // Live apply under onionmasq (Tor VPN ExitSelection pattern).
+                    if (local.tunDataPlane == TunDataPlane.ONIONMASQ) {
+                        val cc = TorCountryCatalog.parseNodeCodes(next).firstOrNull()
+                        runCatching {
+                            if (cc.isNullOrBlank()) {
+                                org.torproject.onionmasq.OnionMasq.setCountryCode(null)
+                            } else {
+                                org.torproject.onionmasq.OnionMasq.setCountryCode(cc.uppercase())
+                            }
+                            org.torproject.onionmasq.OnionMasq.refreshCircuits()
+                        }.onFailure { timber.log.Timber.w(it, "live exit country apply") }
+                    }
                     pickingExit = false
                 },
                 onDismiss = { pickingExit = false },

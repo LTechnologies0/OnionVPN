@@ -39,6 +39,12 @@ class TunnelOrchestrator @Inject constructor(
                 putExtra(TunnelForegroundService.EXTRA_DNS_FORCE_TCP, preferences.dnsCryptForceTcp)
                 putExtra(TunnelForegroundService.EXTRA_DNS_DNSSEC, preferences.dnsCryptRequireDnssec)
                 putExtra(TunnelForegroundService.EXTRA_NO_LOGS, preferences.noLogsEnabled)
+                putExtra(TunnelForegroundService.EXTRA_VPN_APP_MODE, preferences.vpnAppRoutingMode.name)
+                putExtra(
+                    TunnelForegroundService.EXTRA_VPN_APP_PACKAGES,
+                    preferences.vpnAppPackages.joinToString("\n"),
+                )
+                putExtra(TunnelForegroundService.EXTRA_TUN_DATA_PLANE, preferences.tunDataPlane.name)
             },
         )
     }

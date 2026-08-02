@@ -15,16 +15,19 @@ Privacy-focused Android VPN that routes **all device traffic through Tor**, with
 | Domain threat lists | HaGeZi lists colour destinations on prompts: 🟢 safe (unlisted), 🟠 ads/tracking/telemetry, 🔴 malware/C2 — updates prefer Tor when the tunnel is up |
 | App lock | Lock the UI without stopping the tunnel or kill switch |
 | Tor tuning | Circuit rotation presets, stream isolation modes, editable `torrc` / `dnscrypt-proxy.toml` |
-| Tor engine | Dual backend: **C Tor** (`libtor.so`, default) or experimental **Arti** (Rust, `arti-mobile`) |
+| Tor engine | Dual backend: **C Tor** (`libtor.so`, default) or **Arti** (`arti-mobile` and/or **onionmasq** TUN) |
+| TUN data plane | **hev-socks5** (C Tor / Arti fallback) or **onionmasq** (Arti preferred when `libonionmasq_mobile.so` is present) |
+| Circuit UI | Onionmasq path: per-app hops, NEWNYM-per-app, exit directory from `NewDirectoryEvent` |
 
 ## Architecture
 
 | Layer | Role |
 |-------|------|
 | Tor | SOCKS + DNSPort (ephemeral ports), SafeSocks depending on DNS mode |
-| Arti (opt-in) | In-process Rust Tor via `org.torproject:arti-mobile`; one shared SOCKS + DNS; no classic ControlSocket |
+| Arti (opt-in) | In-process Rust Tor via `arti-mobile` and/or onionmasq; capability-gated ControlPort gaps |
+| onionmasq | When selected: TUN → smoltcp → arti-client; SOCKS sidecar for DNSCrypt IsolationTokens (see `docs/TUN_DATA_PLANE.md`) |
 | DNSCrypt | App DNS via TunDnsMux; upstream via Tor SOCKS; bootstrap via Tor DNSPort |
-| VPN | `OnionVpnService` + hev-socks5-tunnel; client `10.8.0.2`, DNS `10.8.0.1` |
+| VPN | `OnionVpnService` + hev **or** onionmasq; client `10.8.0.2`, DNS `10.8.0.1` |
 | Firewall | `InteractiveFirewallEngine` on the TUN; DNS hostname cache + local reputation DB (HaGeZi / URLhaus / Yoyo / uAssets) for prompt UI |
 
 Modules: `app`, `core:model`, `core:tor`, `core:dnscrypt`, `core:vpn`, `core:validation`.

@@ -3,6 +3,7 @@ package ltechnologies.onionphone.onionvpn.core.vpn
 import android.content.Intent
 import android.net.VpnService
 import android.os.Build
+import android.os.IBinder
 import android.os.ParcelFileDescriptor
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
@@ -10,29 +11,32 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import ltechnologies.onionphone.onionvpn.core.model.DnsResolverMode
+import ltechnologies.onionphone.onionvpn.core.model.TunDataPlane
 import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
 import ltechnologies.onionphone.onionvpn.core.model.TunnelFailure
 import ltechnologies.onionphone.onionvpn.core.model.TunnelPreferences
+import ltechnologies.onionphone.onionvpn.core.model.VpnAppRoutingMode
 import ltechnologies.onionphone.onionvpn.core.model.VpnEstablishResult
 import ltechnologies.onionphone.onionvpn.core.model.VpnProfileMode
 import ltechnologies.onionphone.onionvpn.core.model.observability.OpTrace
 import ltechnologies.onionphone.onionvpn.core.model.stability.ProcessLogLevel
 import ltechnologies.onionphone.onionvpn.core.vpn.forwarder.HevSocks5TunForwarder
+import ltechnologies.onionphone.onionvpn.core.vpn.forwarder.OnionmasqTunForwarder
+import ltechnologies.onionphone.onionvpn.core.vpn.forwarder.TunDataPlaneFactory
 import ltechnologies.onionphone.onionvpn.core.vpn.net.UnderlyingNetworkTracker
+import ltechnologies.onionphone.onionvpn.core.vpn.onionmasq.OnionmasqCircuitRepository
+import ltechnologies.onionphone.onionvpn.core.vpn.onionmasq.TorNativeAppUids
 import ltechnologies.onionphone.onionvpn.core.vpn.profile.TunForwarder
 import ltechnologies.onionphone.onionvpn.core.vpn.profile.VpnProfileBuilder
+import org.torproject.onionmasq.ISocketProtect
+import org.torproject.onionmasq.OnionMasq
+import org.torproject.onionmasq.events.BootstrapEvent
 import timber.log.Timber
 
 /**
- * Android [VpnService] data plane — builds TUN profiles and runs hev → SocksUidBridge → Tor.
+ * Android [VpnService] data plane — hev→SOCKS or onionmasq→Arti.
  *
- * Sequential applyProfile:
- * 1. Parse intent prefs/mode/ports/generation
- * 2. [VpnProfileBuilder.configure] + establish TUN (before closing old)
- * 3. Start [HevSocks5TunForwarder] (TunDnsMux + hev TCP + per-UID SOCKS bridge)
- * 4. [UnderlyingNetworkTracker] for SIGNAL ACTIVE on net change
- *
- * Coordinator: [ltechnologies.onionphone.onionvpn.service.TunnelForegroundService].
+ * Implements [ISocketProtect] so onionmasq can [VpnService.protect] Arti/PT sockets.
  */
 class OnionVpnService : VpnService() {
     private var tunForwarder: TunForwarder? = null
@@ -40,6 +44,23 @@ class OnionVpnService : VpnService() {
     private var underlyingTracker: UnderlyingNetworkTracker? = null
     private val executor = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "onionvpn-vpn").apply { isDaemon = true }
+    }
+    private val protectBinder = object : android.os.Binder(), ISocketProtect {
+        override fun protect(socket: Int): Boolean = this@OnionVpnService.protect(socket)
+    }
+
+    override fun onBind(intent: Intent?): IBinder? {
+        // System VPN binding must use VpnService's binder; OnionMasq.bindVPNService uses a plain bind.
+        if (intent?.action == SERVICE_INTERFACE) {
+            return super.onBind(intent)
+        }
+        return protectBinder
+    }
+
+    override fun onCreate() {
+        super.onCreate()
+        // Do not bind here: OnionMasq.init() has not run yet (getInstance throws).
+        // OnionmasqTunForwarder rebinds after init.
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -67,6 +88,7 @@ class OnionVpnService : VpnService() {
     }
 
     override fun onDestroy() {
+        runCatching { OnionMasq.unbindVPNService() }
         // Run teardown on the VPN thread and wait — shutdown() alone can drop stopTunnel.
         try {
             executor.submit { stopTunnel() }.get(8, java.util.concurrent.TimeUnit.SECONDS)
@@ -92,10 +114,7 @@ class OnionVpnService : VpnService() {
      * one so Android never has a window with no VPN routes (clearnet leak).
      */
     private fun applyProfile(intent: Intent, startForwarder: Boolean) {
-        val preferences = TunnelPreferences(
-            routeAllTrafficThroughTor = intent.getBooleanExtra(EXTRA_ROUTE_ALL, true),
-            killSwitchEnabled = intent.getBooleanExtra(EXTRA_KILL_SWITCH, true),
-        )
+        val preferences = preferencesFromVpnIntent(intent)
         val mode = intent.getStringExtra(EXTRA_PROFILE_MODE)
             ?.let { runCatching { VpnProfileMode.valueOf(it) }.getOrNull() }
             ?: if (startForwarder) VpnProfileMode.Connected else VpnProfileMode.Blocking
@@ -107,6 +126,11 @@ class OnionVpnService : VpnService() {
         val dnsMode = intent.getStringExtra(EXTRA_DNS_MODE)
             ?.let { runCatching { DnsResolverMode.valueOf(it) }.getOrNull() }
             ?: DnsResolverMode.DNSCRYPT_MUX
+        val tunDataPlane = intent.getStringExtra(EXTRA_TUN_DATA_PLANE)
+            ?.let { runCatching { TunDataPlane.valueOf(it) }.getOrNull() }
+            ?: TunDataPlane.HEV_SOCKS
+        val bridgeLines = intent.getStringExtra(EXTRA_BRIDGE_LINES)
+        val exitCountry = intent.getStringExtra(EXTRA_EXIT_COUNTRY)
 
         // Signal waiters that a rebind is in progress without dropping routes yet.
         isRebinding.value = true
@@ -134,6 +158,9 @@ class OnionVpnService : VpnService() {
                         torDnsPort,
                         dnsMode,
                         synthesizeOnionAutomap,
+                        tunDataPlane = tunDataPlane,
+                        bridgeLines = bridgeLines,
+                        exitCountry = exitCountry,
                     )
                     startUnderlyingTracking()
                 } else {
@@ -264,27 +291,76 @@ class OnionVpnService : VpnService() {
         torDnsPort: Int,
         dnsMode: DnsResolverMode,
         synthesizeOnionAutomap: Boolean = false,
+        tunDataPlane: TunDataPlane = TunDataPlane.HEV_SOCKS,
+        bridgeLines: String? = null,
+        exitCountry: String? = null,
     ) {
         OpTrace.debug(
             "vpn",
-            "startForwarder socks=$torSocksPort dnscrypt=$dnsCryptPort torDns=$torDnsPort",
+            "startForwarder plane=$tunDataPlane socks=$torSocksPort dnscrypt=$dnsCryptPort torDns=$torDnsPort",
         )
         val tun = tunInterface ?: return
-        // hev → SocksUidBridge → Tor with per-UID IsolateSOCKSAuth (native TCP + circuit UX).
-        val forwarder = HevSocks5TunForwarder(
+        val plane = TunDataPlaneFactory.resolve(
             context = applicationContext,
-            dnsMode = dnsMode,
-            protectSocket = { socket -> protect(socket) },
-            onFatal = { error ->
-                Timber.e(error, "TUN forwarder died — signalling fail-closed")
-                forwarderAlive.value = false
+            requested = tunDataPlane,
+            engine = when (tunDataPlane) {
+                TunDataPlane.ONIONMASQ -> ltechnologies.onionphone.onionvpn.core.model.TorEngine.ARTI
+                else -> ltechnologies.onionphone.onionvpn.core.model.TorEngine.LITTLE_T
             },
         )
+        // Caller already gated Arti+onionmasq; resolve again for fail-closed.
+        val effective = if (
+            tunDataPlane == TunDataPlane.ONIONMASQ &&
+            TunDataPlaneFactory.isOnionmasqNativePresent(applicationContext)
+        ) {
+            TunDataPlane.ONIONMASQ
+        } else {
+            TunDataPlane.HEV_SOCKS
+        }
+        Timber.i("VPN forwarder effectivePlane=$effective (requested=$tunDataPlane resolved=$plane)")
+
+        val forwarder: TunForwarder = if (effective == TunDataPlane.ONIONMASQ) {
+            circuitRepository.reset()
+            onionmasqBootstrapReady.value = false
+            OnionmasqTunForwarder(
+                context = applicationContext,
+                dnsMode = dnsMode,
+                bridgeLines = bridgeLines,
+                exitCountryCode = exitCountry,
+                onFatal = { error ->
+                    Timber.e(error, "onionmasq forwarder died — signalling fail-closed")
+                    forwarderAlive.value = false
+                },
+                onBootstrap = { event: BootstrapEvent ->
+                    if (event.isReadyForTraffic && event.bootstrapPercent == 100) {
+                        onionmasqBootstrapReady.value = true
+                    }
+                    onOnionmasqBootstrap?.invoke(event)
+                },
+                onOnionmasqEvent = { event ->
+                    circuitRepository.handleEvent(event)
+                    onOnionmasqEvent?.invoke(event)
+                },
+            )
+        } else {
+            HevSocks5TunForwarder(
+                context = applicationContext,
+                dnsMode = dnsMode,
+                protectSocket = { socket -> protect(socket) },
+                onFatal = { error ->
+                    Timber.e(error, "TUN forwarder died — signalling fail-closed")
+                    forwarderAlive.value = false
+                },
+            )
+        }
         tunForwarder = forwarder
         forwarderSocksPort.value = torSocksPort
         forwarderDnsCryptPort.value = dnsCryptPort
         forwarderAlive.value = true
-        torSocksUpstreamUpdater = { port -> forwarder.updateTorSocks(port) }
+        activeDataPlane.value = effective
+        torSocksUpstreamUpdater = { port ->
+            (tunForwarder as? HevSocks5TunForwarder)?.updateTorSocks(port)
+        }
         forwarder.start(
             tunFd = tun,
             socksHost = TunnelEndpoints.LOOPBACK,
@@ -374,8 +450,29 @@ class OnionVpnService : VpnService() {
         const val EXTRA_SYNTHESIZE_ONION_AUTOMAP = "synthesize_onion_automap"
         const val EXTRA_GENERATION = "vpn_generation"
         const val EXTRA_DNS_MODE = "dns_mode"
+        const val EXTRA_VPN_APP_MODE = "vpn_app_mode"
+        const val EXTRA_VPN_APP_PACKAGES = "vpn_app_packages"
+        const val EXTRA_TUN_DATA_PLANE = "tun_data_plane"
+        const val EXTRA_BRIDGE_LINES = "bridge_lines"
+        const val EXTRA_EXIT_COUNTRY = "exit_country"
 
         private val generationSeq = AtomicInteger(0)
+
+        fun preferencesFromVpnIntent(intent: Intent): TunnelPreferences {
+            val mode = intent.getStringExtra(EXTRA_VPN_APP_MODE)
+                ?.let { runCatching { VpnAppRoutingMode.valueOf(it) }.getOrNull() }
+                ?: VpnAppRoutingMode.ALL
+            val packages = intent.getStringArrayExtra(EXTRA_VPN_APP_PACKAGES)
+                ?.filter { it.isNotBlank() }
+                ?.toSet()
+                ?: emptySet()
+            return TunnelPreferences(
+                routeAllTrafficThroughTor = intent.getBooleanExtra(EXTRA_ROUTE_ALL, true),
+                killSwitchEnabled = intent.getBooleanExtra(EXTRA_KILL_SWITCH, true),
+                vpnAppRoutingMode = mode,
+                vpnAppPackages = packages,
+            )
+        }
 
         /** Invoked when Wi‑Fi/cell underlying network changes — wake Tor (SIGNAL ACTIVE). */
         @Volatile
@@ -409,6 +506,20 @@ class OnionVpnService : VpnService() {
 
         private val forwarderAlive = MutableStateFlow(true)
         val tunForwarderAlive: StateFlow<Boolean> = forwarderAlive.asStateFlow()
+
+        private val activeDataPlane = MutableStateFlow(TunDataPlane.HEV_SOCKS)
+        val vpnDataPlane: StateFlow<TunDataPlane> = activeDataPlane.asStateFlow()
+
+        private val onionmasqBootstrapReady = MutableStateFlow(false)
+        val onionmasqReady: StateFlow<Boolean> = onionmasqBootstrapReady.asStateFlow()
+
+        val circuitRepository = OnionmasqCircuitRepository()
+
+        @Volatile
+        var onOnionmasqBootstrap: ((BootstrapEvent) -> Unit)? = null
+
+        @Volatile
+        var onOnionmasqEvent: ((org.torproject.onionmasq.events.OnionmasqEvent) -> Unit)? = null
 
         /**
          * Live updater for [HevSocks5TunForwarder.updateTorSocks] while TUN is up.

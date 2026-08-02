@@ -72,4 +72,19 @@ data class TunnelPreferences(
      * (see [ltechnologies.onionphone.onionvpn.prefs.TunnelPreferencesStore]).
      */
     val noLogsEnabled: Boolean = true,
+    /**
+     * Per-app VPN routing (Orbot). [VpnAppRoutingMode.ALL] = full tunnel.
+     * Changing this requires VPN rebind (restart tunnel).
+     */
+    val vpnAppRoutingMode: VpnAppRoutingMode = VpnAppRoutingMode.ALL,
+    /**
+     * Package names for [VpnAppRoutingMode.INCLUDE] / [EXCLUDE].
+     * Ignored when mode is [VpnAppRoutingMode.ALL]. Own package is never routed.
+     */
+    val vpnAppPackages: Set<String> = emptySet(),
+    /**
+     * TUN forwarder stack. [TunDataPlane.ONIONMASQ] only with [TorEngine.ARTI] and
+     * when native onionmasq is present; otherwise HEV is used.
+     */
+    val tunDataPlane: TunDataPlane = TunDataPlane.HEV_SOCKS,
 )

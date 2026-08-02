@@ -187,12 +187,14 @@ data class TorEngineCapabilities(
 
         val ARTI = TorEngineCapabilities(
             classicControlPlane = false,
-            multiSocksSessionGroups = false,
+            // App-layer role relays give distinct DNSCrypt/probe listen ports → Arti SOCKS
+            // (IsolationToken via SOCKS auth). Not native SessionGroup, same product effect.
+            multiSocksSessionGroups = true,
             socksAuthIsolation = true,
             nativeAutomapDnsPort = false,
             synthesizeOnionAutomap = true,
             newIdentity = true,
-            circuitInspection = false,
+            circuitInspection = true, // onionmasq CircuitStore / hops UI when TUN plane is ONIONMASQ
             liveCircuitTiming = true,
             liveSetConf = false,
             // TorClient::set_dormant via Ext JNI when patched .so is loaded.

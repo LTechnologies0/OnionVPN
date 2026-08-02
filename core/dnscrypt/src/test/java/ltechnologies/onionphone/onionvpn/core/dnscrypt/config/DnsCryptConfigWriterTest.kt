@@ -66,4 +66,21 @@ class DnsCryptConfigWriterTest {
         assertTrue(config.contains("[static.'cloudflare']"))
         assertTrue(config.contains("[static.'adguard-dns']"))
     }
+
+    @Test
+    fun onionmasqSidecarSocksPort_appearsInProxyLine() {
+        val sidecar = 19050
+        val config = DnsCryptConfigWriter.write(
+            configDirectory = "/tmp",
+            torSocksPort = sidecar,
+            torDnsPort = 19053,
+        )
+        val proxy =
+            "socks5://${TunnelEndpoints.SOCKS_DNSCRYPT_USER}:${TunnelEndpoints.SOCKS_DNSCRYPT_PASS}" +
+                "@${TunnelEndpoints.LOOPBACK}:$sidecar"
+        assertTrue(config.contains("proxy = '$proxy'"))
+        assertTrue(config.contains("bootstrap_resolvers = ['${TunnelEndpoints.LOOPBACK}:19053']"))
+        assertTrue(config.contains("force_tcp = true"))
+        assertTrue(config.contains("ignore_system_dns = true"))
+    }
 }

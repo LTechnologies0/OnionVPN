@@ -74,9 +74,23 @@ fun StatusScreen(
     diagnosticsEnabled: Boolean = false,
 ) {
     var showCircuits by remember { mutableStateOf(false) }
+    var showOnionmasqCircuits by remember { mutableStateOf(false) }
     val context = LocalContext.current
     val appUidResolver = remember { AppUidResolver(context) }
     val resources by resourceSnapshot.collectAsStateWithLifecycle()
+    val dataPlane by ltechnologies.onionphone.onionvpn.core.vpn.OnionVpnService.vpnDataPlane
+        .collectAsStateWithLifecycle()
+
+    if (showOnionmasqCircuits) {
+        Column(Modifier.fillMaxSize().padding(16.dp)) {
+            OutlinedButton(onClick = { showOnionmasqCircuits = false }) {
+                Text("Back")
+            }
+            Spacer(Modifier.height(8.dp))
+            OnionmasqCircuitsPanel(appUidResolver = appUidResolver)
+        }
+        return
+    }
 
     if (showCircuits && circuitLifecycle != null) {
         CircuitsScreen(
@@ -295,6 +309,8 @@ fun StatusScreen(
                             when {
                                 snapshot.identityRefreshing -> "New identity…"
                                 snapshot.torEngine.capabilities.classicControlPlane -> "New identity"
+                                dataPlane == ltechnologies.onionphone.onionvpn.core.model.TunDataPlane.ONIONMASQ ->
+                                    "New identity (circuits)"
                                 else -> "New identity (restart Arti)"
                             },
                         )
@@ -312,6 +328,19 @@ fun StatusScreen(
                         Icon(Icons.Filled.Hub, contentDescription = null)
                         Spacer(modifier = Modifier.width(8.dp))
                         Text("Circuits")
+                    }
+                }
+                if (dataPlane == ltechnologies.onionphone.onionvpn.core.model.TunDataPlane.ONIONMASQ) {
+                    OutlinedButton(
+                        onClick = { showOnionmasqCircuits = true },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(52.dp),
+                        shape = MaterialTheme.shapes.large,
+                    ) {
+                        Icon(Icons.Filled.Hub, contentDescription = null)
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("App circuits (onionmasq)")
                     }
                 }
             }

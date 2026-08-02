@@ -75,6 +75,11 @@ class AntiLeakVpnProfilePolicyTest {
         )
         assertTrue("0.0.0.0/0 route required", """addRoute("0.0.0.0", 0)""" in src)
         assertTrue("::/0 route required", """addRoute("::", 0)""" in src)
+        assertTrue(
+            "per-app routing must call addAllowedApplication or addDisallowedApplication",
+            src.contains("addAllowedApplication") && src.contains("addDisallowedApplication"),
+        )
+        assertTrue("VpnAppRoutingMode INCLUDE handled", src.contains("VpnAppRoutingMode.INCLUDE"))
     }
 
     @Test

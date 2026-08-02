@@ -8,6 +8,8 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- OnionShare-style: OS dialog to whitelist app from Doze / battery kill. -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <uses-permission android:name="android.permission.USE_BIOMETRIC" />
     <!-- Resolve firewall app labels (package visibility on API 30+). -->
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />

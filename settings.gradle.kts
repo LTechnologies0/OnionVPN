@@ -27,4 +27,5 @@ include(
     ":core:dnscrypt",
     ":core:vpn",
     ":core:validation",
+    ":third_party:onionmasq-android",
 )

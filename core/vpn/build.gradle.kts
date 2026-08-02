@@ -18,7 +18,9 @@ android {
 
 dependencies {
     implementation(project(":core:model"))
+    implementation(project(":third_party:onionmasq-android"))
     implementation(libs.androidx.core.ktx)
+    implementation(libs.androidx.lifecycle.livedata.ktx)
     implementation(libs.kotlinx.coroutines.core)
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.timber)

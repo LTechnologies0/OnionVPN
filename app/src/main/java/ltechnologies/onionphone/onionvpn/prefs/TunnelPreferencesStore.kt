@@ -17,7 +17,9 @@ import kotlinx.coroutines.flow.map
 import ltechnologies.onionphone.onionvpn.core.model.DnsResolverMode
 import ltechnologies.onionphone.onionvpn.core.model.FirewallDefaultAction
 import ltechnologies.onionphone.onionvpn.core.model.TorEngine
+import ltechnologies.onionphone.onionvpn.core.model.TunDataPlane
 import ltechnologies.onionphone.onionvpn.core.model.TunnelPreferences
+import ltechnologies.onionphone.onionvpn.core.model.VpnAppRoutingMode
 
 private val Context.tunnelDataStore: DataStore<Preferences> by preferencesDataStore(name = "tunnel_prefs")
 
@@ -50,6 +52,9 @@ class TunnelPreferencesStore @Inject constructor(
         val autoStartOnBoot = booleanPreferencesKey("auto_start_on_boot")
         val moatRequestViaTor = booleanPreferencesKey("moat_request_via_tor")
         val noLogs = booleanPreferencesKey("no_logs")
+        val vpnAppMode = stringPreferencesKey("vpn_app_mode")
+        val vpnAppPackages = stringPreferencesKey("vpn_app_packages")
+        val tunDataPlane = stringPreferencesKey("tun_data_plane")
     }
 
     /** Release (non-debuggable) → no-logs ON; debug builds → OFF. */
@@ -87,6 +92,9 @@ class TunnelPreferencesStore @Inject constructor(
             prefs[Keys.autoStartOnBoot] = next.autoStartOnBoot
             prefs[Keys.moatRequestViaTor] = next.moatRequestViaTor
             prefs[Keys.noLogs] = next.noLogsEnabled
+            prefs[Keys.vpnAppMode] = next.vpnAppRoutingMode.name
+            prefs[Keys.vpnAppPackages] = next.vpnAppPackages.sorted().joinToString("\n")
+            prefs[Keys.tunDataPlane] = next.tunDataPlane.name
         }
     }
 
@@ -119,5 +127,15 @@ class TunnelPreferencesStore @Inject constructor(
         autoStartOnBoot = this[Keys.autoStartOnBoot] ?: false,
         moatRequestViaTor = this[Keys.moatRequestViaTor] ?: false,
         noLogsEnabled = this[Keys.noLogs] ?: defaultNoLogsEnabled,
+        vpnAppRoutingMode = this[Keys.vpnAppMode]
+            ?.let { runCatching { VpnAppRoutingMode.valueOf(it) }.getOrNull() }
+            ?: VpnAppRoutingMode.ALL,
+        vpnAppPackages = this[Keys.vpnAppPackages]
+            ?.lineSequence()
+            ?.map { it.trim() }
+            ?.filter { it.isNotEmpty() }
+            ?.toSet()
+            ?: emptySet(),
+        tunDataPlane = TunDataPlane.fromPreference(this[Keys.tunDataPlane]),
     )
 }

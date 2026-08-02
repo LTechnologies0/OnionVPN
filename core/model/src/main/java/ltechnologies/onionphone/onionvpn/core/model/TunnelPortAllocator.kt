@@ -29,10 +29,11 @@ object TunnelPortAllocator {
             TunnelEndpoints.DNSCRYPT_LISTEN_PORT,
         )
         val socks = allocateTcpPort(used)
-        // Arti-mobile exposes a single SOCKS listener — apps / DNSCrypt / probes share it.
-        // SOCKS username/password isolation still separates streams inside Arti.
-        val dnsCryptSocks = if (engine == TorEngine.ARTI) socks else allocateTcpPort(used)
-        val probeSocks = if (engine == TorEngine.ARTI) socks else allocateTcpPort(used)
+        // Always distinct role ports (SessionGroup parity). On Arti, [torSocksPort] is the
+        // real Arti listener; DNSCrypt/probe ports are local TCP relays that forward to it
+        // so IsolationToken usernames stay role-separated even without multi SocksPort.
+        val dnsCryptSocks = allocateTcpPort(used)
+        val probeSocks = allocateTcpPort(used)
         return TunnelRuntimePorts(
             torSocksPort = socks,
             torDnsCryptSocksPort = dnsCryptSocks,
