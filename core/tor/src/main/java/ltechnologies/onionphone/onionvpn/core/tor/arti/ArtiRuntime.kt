@@ -477,9 +477,14 @@ internal class ArtiRuntime(
                 throw TunnelFailure.TorBinary("Arti stopped before listeners became ready")
             }
             try {
-                if (TorReadiness.areSocksPortsReady(ports)) {
+                // Only the native Arti SOCKS port exists here. DNSCrypt/probe ports are
+                // opened later by ArtiSocksRoleMux (after tor.start returns) — requiring
+                // areSocksPortsReady() deadlocks forever (seen as 180s timeout while Arti
+                // already logs "Listening on 127.0.0.1:<socks>").
+                if (TorReadiness.isPrimarySocksReady(ports)) {
                     Timber.i(
-                        "Arti SOCKS ready :%d (DNSPort :%d answers after bootstrap)",
+                        "Arti SOCKS ready :%d (DNSPort :%d answers after bootstrap; " +
+                            "role mux ports after start)",
                         ports.torSocksPort,
                         ports.torDnsPort,
                     )

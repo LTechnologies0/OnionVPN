@@ -566,7 +566,7 @@ class TorProcessManager(
             arti.setDormantNative(soft = false)
             clearAppDnsCaches()
             publishArtiReadyStatus()
-            val ok = runtimePorts?.let { TorReadiness.areSocksPortsReady(it) } == true
+            val ok = runtimePorts?.let { TorReadiness.isPrimarySocksReady(it) } == true
             Timber.i("Arti network change soft recovery socksReady=%s", ok)
             return if (ok) Result.success(Unit) else Result.failure(IOException("Arti SOCKS not ready"))
         }
@@ -786,7 +786,8 @@ class TorProcessManager(
     }
 
     private fun publishArtiReadyStatus() {
-        val socksUp = runtimePorts?.let { TorReadiness.areSocksPortsReady(it) } == true
+        // Primary Arti SOCKS only — role-mux DNSCrypt/probe ports are app-layer relays.
+        val socksUp = runtimePorts?.let { TorReadiness.isPrimarySocksReady(it) } == true
         val frac = arti.bootstrapFractionOrNull()
         val nativeReady = arti.readyForTrafficNative()
         // Prefer Ext JNI ready_for_traffic / bootstrap frac — never treat SOCKS accept alone

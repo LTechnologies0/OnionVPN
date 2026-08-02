@@ -86,6 +86,13 @@ internal object TorReadiness {
             isSocksReady(ports.torProbeSocksPort)
 
     /**
+     * Native Tor/Arti SOCKS only (not DNSCrypt/probe role-mux listen ports).
+     * Use for Arti start/readiness — [ArtiSocksRoleMux] opens the other ports later.
+     */
+    fun isPrimarySocksReady(ports: TunnelRuntimePorts): Boolean =
+        isSocksReady(ports.torSocksPort)
+
+    /**
      * True when apps + DNSCrypt + probe SocksPorts and DNSPort all respond.
      *
      * @throws Exception from the first failing probe
