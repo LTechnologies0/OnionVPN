@@ -106,9 +106,10 @@ jobs:
             abi=$(basename "$apk" | sed -E 's/^app-|-release\.apk$//g')
             out="dist/release/onionvpn-${VERSION}-${abi}.apk"
             cp "$apk" "$out"
-            sha256sum "$out" >> dist/release/SHA256SUMS.txt
             echo "- \`onionvpn-${VERSION}-${abi}.apk\` — **${abi}**" >> dist/release/ABI_LIST.md
           done
+          # Basename paths so `sha256sum -c` works after downloading assets flat.
+          (cd dist/release && sha256sum onionvpn-*.apk > SHA256SUMS.txt)
           {
             echo "## OnionVPN ${VERSION}"
             echo
@@ -118,6 +119,8 @@ jobs:
             cat dist/release/ABI_LIST.md
             echo
             echo "Verify: \`sha256sum -c SHA256SUMS.txt\`"
+            echo
+            echo "Phones: prefer **arm64-v8a**. Obtainium APK filter: \`arm64-v8a\`."
           } > dist/release/RELEASE_NOTES.md
           ls -lh dist/release/
           cat dist/release/SHA256SUMS.txt
@@ -129,12 +132,13 @@ jobs:
           name: OnionVPN ${{ steps.meta.outputs.version }}
           generate_release_notes: true
           prerelease: ${{ contains(steps.meta.outputs.version, 'alpha') || contains(steps.meta.outputs.version, 'beta') }}
-          latest: true
+          make_latest: true
           body_path: dist/release/RELEASE_NOTES.md
           files: |
             dist/release/onionvpn-*.apk
             dist/release/SHA256SUMS.txt
           fail_on_unmatched_files: true
+          overwrite_files: true
 
   scorecard:
     if: >
