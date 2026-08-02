@@ -2,6 +2,8 @@ package ltechnologies.onionphone.onionvpn.core.vpn.forwarder
 
 import android.content.Context
 import android.os.ParcelFileDescriptor
+import android.system.Os
+import java.io.FileDescriptor
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.net.DatagramPacket
@@ -98,13 +100,15 @@ class TunDnsMux(
         val gen = generation.incrementAndGet()
         LeakPacketFilter.resetStats()
         val vpnDns = InetAddress.getByName(vpnDnsAddress).address
-        val localTunOut = FileOutputStream(tunFd.fileDescriptor)
-        val localHevOut = FileOutputStream(hevFd.fileDescriptor)
+        // Dup FDs so each stream owns a distinct OS fd — FIS+FOS on the same
+        // FileDescriptor close the same underlying fd twice (UAF / wrong-fd reuse).
+        val localTunOut = FileOutputStream(dupOwned(tunFd.fileDescriptor))
+        val localHevOut = FileOutputStream(dupOwned(hevFd.fileDescriptor))
         tunOut = localTunOut
         hevOut = localHevOut
 
         tunToHev = Thread({
-            val localTunIn = FileInputStream(tunFd.fileDescriptor)
+            val localTunIn = FileInputStream(dupOwned(tunFd.fileDescriptor))
             tunIn = localTunIn
             val buf = ByteArray(MTU)
             try {
@@ -186,7 +190,7 @@ class TunDnsMux(
         }
 
         hevToTun = Thread({
-            val localHevIn = FileInputStream(hevFd.fileDescriptor)
+            val localHevIn = FileInputStream(dupOwned(hevFd.fileDescriptor))
             hevIn = localHevIn
             val buf = ByteArray(MTU)
             try {
@@ -231,13 +235,12 @@ class TunDnsMux(
     }
 
     fun stop() {
-        if (!running.compareAndSet(true, false)) {
-            // Still bump generation so any late readers ignore fatals.
-            generation.incrementAndGet()
-            return
-        }
+        val wasRunning = running.compareAndSet(true, false)
+        // Always bump generation and close owned PFDs — even if start() never ran.
         generation.incrementAndGet()
-        dnsExecutor.shutdownNow()
+        if (wasRunning) {
+            dnsExecutor.shutdownNow()
+        }
         runCatching { tunIn?.close() }
         runCatching { hevIn?.close() }
         runCatching { tunOut?.close() }
@@ -263,10 +266,15 @@ class TunDnsMux(
         pendingQnames.clear()
         DnsHostnameCache.clear()
         TcpFlowUidIndex.clear()
-        runCatching {
-            if (!dnsExecutor.awaitTermination(2, TimeUnit.SECONDS)) {
-                Timber.w("DNS executor did not terminate cleanly")
+        if (wasRunning) {
+            runCatching {
+                if (!dnsExecutor.awaitTermination(2, TimeUnit.SECONDS)) {
+                    Timber.w("DNS executor did not terminate cleanly")
+                }
             }
+        } else {
+            // start() never ran — still shut down the idle pool so FDs/threads release.
+            runCatching { dnsExecutor.shutdownNow() }
         }
         MemoryHygiene.afterHeavyWork("tundnsmux_stop")
     }
@@ -696,5 +704,8 @@ class TunDnsMux(
 
         private fun pendingQnameKey(srcPort: Int, queryId: Int): Long =
             (srcPort.toLong() and 0xffffL shl 16) or (queryId.toLong() and 0xffffL)
+
+        /** Independent OS fd so stream close does not invalidate sibling streams. */
+        private fun dupOwned(src: FileDescriptor): FileDescriptor = Os.dup(src)
     }
 }

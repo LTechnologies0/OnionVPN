@@ -41,11 +41,20 @@ OnionVPN keeps fail-closed routing (no Tor VPN `allowFamily`). Own package stays
 
 ### Lifecycle (native abort hazard)
 
-`libonionmasq_mobile.so` uses `panic=abort`. JNI helpers that call `OnionmasqMobile::get()`
-**kill the process** if `OnionMasq.init()` has not succeeded — including `isRunning()` and
-`closeProxy()`. `OnionmasqTunForwarder.start()` calls `stop()` before `init()`; stop must
-gate on Kotlin `proxyOwned` only (never probe native `isRunning` pre-init). See
-`OnionmasqNativeGate` and `native/onionmasq/safe-uninit-jni.patch`.
+`libonionmasq_mobile.so` / `libarti_mobile_ex.so` use `panic=abort`. JNI helpers that call
+`OnionmasqMobile::get()` **kill the process** if `OnionMasq.init()` has not succeeded —
+including `isRunning`, `closeProxy`, `refreshCircuits*`, `getBytes*ForApp`, `setCountryCode`,
+`setExcludedUids`, `setInternetConnectivity`. `runCatching` cannot catch SIGABRT.
+
+Rules:
+1. `OnionmasqTunForwarder.start()` calls `stop()` before `init()` — gate stop on Kotlin
+   `proxyOwned` only (never probe native `isRunning` pre-init).
+2. UI / Settings / NEWNYM must check `OnionMasq.isInitialized()` (+ `isRunning()` for commands)
+   before any onionmasq JNI.
+3. Java `OnionMasq.*` soft-guards every JNI entry; rebuild `.so` with
+   `native/onionmasq/safe-uninit-jni.patch` for native-side try_get.
+4. TunDnsMux / UID forwarder must `Os.dup` before wrapping the same FD in both FIS and FOS.
+5. Arti JNI must never `.expect` / `panic!` on the boundary (source under `third_party/arti-mobile-ex`).
 
 ### Capability matrix
 

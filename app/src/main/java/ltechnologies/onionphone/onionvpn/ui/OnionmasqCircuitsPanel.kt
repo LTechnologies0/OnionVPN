@@ -59,6 +59,10 @@ fun OnionmasqCircuitsPanel(
         )
         FilledTonalButton(
             onClick = {
+                if (!OnionMasq.isInitialized() || !OnionMasq.isRunning()) {
+                    Timber.w("refreshCircuits skipped — onionmasq not running")
+                    return@FilledTonalButton
+                }
                 runCatching { OnionMasq.refreshCircuits() }
                     .onFailure { Timber.w(it, "refreshCircuits failed") }
             },
@@ -89,6 +93,10 @@ fun OnionmasqCircuitsPanel(
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 FilledTonalButton(
                                     onClick = {
+                                        if (!OnionMasq.isInitialized() || !OnionMasq.isRunning()) {
+                                            Timber.w("refreshCircuitsForApp skipped — not running")
+                                            return@FilledTonalButton
+                                        }
                                         try {
                                             OnionMasq.refreshCircuitsForApp(row.uid.toLong())
                                             OnionVpnService.circuitRepository.removeCountryCodes(row.uid)
@@ -121,8 +129,16 @@ private fun collectOnionmasqRows(appUidResolver: AppUidResolver): List<AppCircui
     return repo.knownAppUids().sorted().map { uid ->
         val hops = repo.countryCodesForAppUid(uid)
         val identity = appUidResolver.resolve(uid)
-        val rx = runCatching { OnionMasq.getBytesReceivedForApp(uid.toLong()) }.getOrDefault(0L)
-        val tx = runCatching { OnionMasq.getBytesSentForApp(uid.toLong()) }.getOrDefault(0L)
+        val rx = if (OnionMasq.isInitialized()) {
+            runCatching { OnionMasq.getBytesReceivedForApp(uid.toLong()) }.getOrDefault(0L)
+        } else {
+            0L
+        }
+        val tx = if (OnionMasq.isInitialized()) {
+            runCatching { OnionMasq.getBytesSentForApp(uid.toLong()) }.getOrDefault(0L)
+        } else {
+            0L
+        }
         AppCircuitRow(
             uid = uid,
             label = identity.label,

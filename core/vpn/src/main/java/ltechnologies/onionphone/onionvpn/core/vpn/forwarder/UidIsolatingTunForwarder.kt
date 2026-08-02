@@ -3,6 +3,7 @@ package ltechnologies.onionphone.onionvpn.core.vpn.forwarder
 import android.content.Context
 import android.os.ParcelFileDescriptor
 import android.os.Process
+import android.system.Os
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.net.Socket
@@ -81,8 +82,9 @@ class UidIsolatingTunForwarder(
         ).also { it.start() }
 
         running.set(true)
-        val localIn = FileInputStream(engineEnd.fileDescriptor)
-        val localOut = FileOutputStream(engineEnd.fileDescriptor)
+        // Dup so FIS/FOS each own a distinct OS fd (shared FD → double-close UAF).
+        val localIn = FileInputStream(Os.dup(engineEnd.fileDescriptor))
+        val localOut = FileOutputStream(Os.dup(engineEnd.fileDescriptor))
         engineIn = localIn
         engineOut = localOut
 

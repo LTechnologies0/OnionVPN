@@ -310,9 +310,15 @@ class DnsCryptProcessManager(
 
     private fun killOrphanedProcesses() {
         runCatching {
-            Runtime.getRuntime()
+            val proc = Runtime.getRuntime()
                 .exec(arrayOf("sh", "-c", "pkill -f ${binaryFile.name} 2>/dev/null || true"))
-                .waitFor()
+            try {
+                proc.inputStream.use { it.readBytes() }
+                proc.errorStream.use { it.readBytes() }
+                proc.waitFor()
+            } finally {
+                proc.destroyForcibly()
+            }
         }
     }
 }

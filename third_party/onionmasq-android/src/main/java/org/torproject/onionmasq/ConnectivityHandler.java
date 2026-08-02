@@ -37,7 +37,10 @@ public class ConnectivityHandler {
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
                 try {
                     LogObservable.getInstance().addLog("Internet connectivity available.");
-                    OnionMasqJni.setInternetConnectivity(true);
+                    // Pre-init JNI setInternetConnectivity expect()-aborts (panic=abort).
+                    if (OnionMasq.isInitialized() && OnionMasq.isRunning()) {
+                        OnionMasqJni.setInternetConnectivity(true);
+                    }
                     OnionMasq.handleEvent(new ConnectivityEvent(true));
                 } catch (ProxyStoppedException e) {
                     e.printStackTrace();

@@ -7,6 +7,8 @@ import org.junit.Test
 /**
  * Regression: 0.3.46 called native isRunning()/closeProxy from stop() before init,
  * which SIGABRTs inside libonionmasq_mobile.so (unwrap on OnionmasqMobile::get).
+ *
+ * 0.3.48: also cover refreshCircuits / getBytes*ForApp / setCountryCode blind spots.
  */
 class OnionmasqNativeGateTest {
     @Test
@@ -24,5 +26,39 @@ class OnionmasqNativeGateTest {
     fun nativeRunningProbeRequiresJavaInit() {
         assertFalse(OnionmasqNativeGate.mayProbeNativeRunning(javaInitialized = false))
         assertTrue(OnionmasqNativeGate.mayProbeNativeRunning(javaInitialized = true))
+    }
+
+    @Test
+    fun commandsRequireInitAndRunning() {
+        assertFalse(
+            OnionmasqNativeGate.mayCommandRunningProxy(
+                javaInitialized = false,
+                nativeRunning = false,
+            ),
+        )
+        assertFalse(
+            OnionmasqNativeGate.mayCommandRunningProxy(
+                javaInitialized = true,
+                nativeRunning = false,
+            ),
+        )
+        assertFalse(
+            OnionmasqNativeGate.mayCommandRunningProxy(
+                javaInitialized = false,
+                nativeRunning = true,
+            ),
+        )
+        assertTrue(
+            OnionmasqNativeGate.mayCommandRunningProxy(
+                javaInitialized = true,
+                nativeRunning = true,
+            ),
+        )
+    }
+
+    @Test
+    fun appCountersRequireInitOnly() {
+        assertFalse(OnionmasqNativeGate.mayReadAppCounters(javaInitialized = false))
+        assertTrue(OnionmasqNativeGate.mayReadAppCounters(javaInitialized = true))
     }
 }

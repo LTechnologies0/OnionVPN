@@ -292,12 +292,19 @@ class TunnelForegroundService : Service() {
                         if (OnionVpnService.vpnDataPlane.value == TunDataPlane.ONIONMASQ) {
                             // Dual TorClient interim: rotate onionmasq app circuits AND
                             // arti-mobile (DNSCrypt / probe IsolationTokens).
-                            runCatching {
-                                org.torproject.onionmasq.OnionMasq.refreshCircuits()
-                            }.onSuccess {
-                                Timber.i("New identity via onionmasq refreshCircuits()")
-                            }.onFailure { err ->
-                                Timber.w(err, "onionmasq refreshCircuits failed")
+                            // Gate init — native refreshCircuits expect()-aborts pre-init.
+                            if (org.torproject.onionmasq.OnionMasq.isInitialized() &&
+                                org.torproject.onionmasq.OnionMasq.isRunning()
+                            ) {
+                                runCatching {
+                                    org.torproject.onionmasq.OnionMasq.refreshCircuits()
+                                }.onSuccess {
+                                    Timber.i("New identity via onionmasq refreshCircuits()")
+                                }.onFailure { err ->
+                                    Timber.w(err, "onionmasq refreshCircuits failed")
+                                }
+                            } else {
+                                Timber.w("onionmasq refreshCircuits skipped — not running")
                             }
                             if (ltechnologies.onionphone.onionvpn.core.vpn.onionmasq
                                     .OnionmasqSocksSidecar.INTERIM_USES_ARTI_MOBILE

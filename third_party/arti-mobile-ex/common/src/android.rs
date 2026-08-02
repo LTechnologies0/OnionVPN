@@ -36,16 +36,23 @@ pub extern "system" fn Java_org_torproject_arti_ArtiJNI_startArtiProxyJNI<'local
     dns_port: jint,
     loggingCallback: JObject<'local>,
 ) -> jstring {
-    let cacheDir: String = env
-        .get_string(&cacheDir)
-        .expect("cache_dir is invalid")
-        .to_string_lossy()
-        .into_owned();
-    let stateDir: String = env
-        .get_string(&stateDir)
-        .expect("state_dir is invalid")
-        .to_string_lossy()
-        .into_owned();
+    // Never expect()/panic on the JNI boundary — Android builds use panic=abort.
+    let Ok(cacheDir) = env.get_string(&cacheDir) else {
+        return env
+            .new_string("Error: cache_dir is invalid")
+            .ok()
+            .map(|s| s.into_raw())
+            .unwrap_or(std::ptr::null_mut());
+    };
+    let cacheDir: String = cacheDir.to_string_lossy().into_owned();
+    let Ok(stateDir) = env.get_string(&stateDir) else {
+        return env
+            .new_string("Error: state_dir is invalid")
+            .ok()
+            .map(|s| s.into_raw())
+            .unwrap_or(std::ptr::null_mut());
+    };
+    let stateDir: String = stateDir.to_string_lossy().into_owned();
     let obfs4proxyPath: Option<String> = match env.get_string(&obfs4proxyPath) {
         Ok(v) => Some(v.to_string_lossy().into_owned()),
         Err(_) => None,
@@ -55,12 +62,21 @@ pub extern "system" fn Java_org_torproject_arti_ArtiJNI_startArtiProxyJNI<'local
         Err(_) => None,
     };
 
-    let log_cb_ref = env
-        .new_global_ref(loggingCallback)
-        .expect("couldn't create global ref to log callback");
-    let exec = Executor::new(Arc::new(
-        env.get_java_vm().expect("could get jvm ref from env"),
-    ));
+    let Ok(log_cb_ref) = env.new_global_ref(loggingCallback) else {
+        return env
+            .new_string("Error: couldn't create global ref to log callback")
+            .ok()
+            .map(|s| s.into_raw())
+            .unwrap_or(std::ptr::null_mut());
+    };
+    let Ok(jvm) = env.get_java_vm() else {
+        return env
+            .new_string("Error: could get jvm ref from env")
+            .ok()
+            .map(|s| s.into_raw())
+            .unwrap_or(std::ptr::null_mut());
+    };
+    let exec = Executor::new(Arc::new(jvm));
 
     let result = match start_arti_proxy(
         &cacheDir,
@@ -72,24 +88,23 @@ pub extern "system" fn Java_org_torproject_arti_ArtiJNI_startArtiProxyJNI<'local
         socks_port as u16,
         dns_port as u16,
         move |buf: &[u8]| {
-            let msg =
-                std::str::from_utf8(buf).expect("couldn't convert buffered log message to str");
-            exec.with_attached(|env| -> Result<(), jni::errors::Error> {
-                let jmsg: AutoLocal<JObject> = env.auto_local(
-                    env.new_string(msg)
-                        .expect("couldn't convert log message to jstring")
-                        .into(),
-                );
-                env.call_method(
+            // Soft-fail log path — never abort the process on a bad log line.
+            let Ok(msg) = std::str::from_utf8(buf) else {
+                return;
+            };
+            let _ = exec.with_attached(|env| -> Result<(), jni::errors::Error> {
+                let Ok(jstr) = env.new_string(msg) else {
+                    return Ok(());
+                };
+                let jmsg: AutoLocal<JObject> = env.auto_local(jstr.into());
+                let _ = env.call_method(
                     &log_cb_ref,
                     "log",
                     "(Ljava/lang/String;)V",
                     &[JValue::from(&jmsg)],
-                )
-                .expect("calling log callback method failed");
+                );
                 Ok(())
-            })
-            .expect("attaching to Executor failed: log callback");
+            });
         },
     ) {
         Ok(res) => format!("Output: {}", res),
@@ -97,8 +112,9 @@ pub extern "system" fn Java_org_torproject_arti_ArtiJNI_startArtiProxyJNI<'local
     };
 
     env.new_string(result)
-        .expect("Couldn't create Java string!")
-        .into_raw()
+        .ok()
+        .map(|s| s.into_raw())
+        .unwrap_or(std::ptr::null_mut())
 }
 
 // --- OnionVPN Ext control API (ArtiControlNative) ---

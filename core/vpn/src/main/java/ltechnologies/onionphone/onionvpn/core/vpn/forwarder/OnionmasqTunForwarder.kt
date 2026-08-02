@@ -95,77 +95,94 @@ class OnionmasqTunForwarder(
             runCatching { OnionMasq.bindVPNService(OnionVpnService::class.java) }
                 .onFailure { Timber.w(it, "OnionMasq.bindVPNService after init failed") }
 
-            val pair = HevSocks5TunForwarder.createPacketSocketPair()
-            val onionEnd = pair[0]
-            val muxEnd = pair[1]
-            omEnd = onionEnd
+            try {
+                val pair = HevSocks5TunForwarder.createPacketSocketPair()
+                val onionEnd = pair[0]
+                val muxEnd = pair[1]
+                omEnd = onionEnd
 
-            val divertDns = true
-            val mux = TunDnsMux(
-                context = context,
-                tunFd = tunFd.dup(),
-                hevFd = muxEnd,
-                dnsCryptHost = TunnelEndpoints.LOOPBACK,
-                dnsCryptPort = dnsCryptPort,
-                vpnDnsAddress = TunnelEndpoints.VPN_DNS_ADDRESS,
-                divertDnsToDnsCrypt = divertDns,
-                torDnsHost = TunnelEndpoints.LOOPBACK,
-                torDnsPort = torDnsPort,
-                synthesizeOnionAutomap = synthesizeOnionAutomap,
-                onFatal = { error ->
-                    Timber.e(error, "TunDnsMux died (onionmasq path)")
-                    onFatal?.invoke(error)
-                },
-            )
-            dnsMux = mux
-            mux.start()
+                val divertDns = true
+                val mux = TunDnsMux(
+                    context = context,
+                    tunFd = tunFd.dup(),
+                    hevFd = muxEnd,
+                    dnsCryptHost = TunnelEndpoints.LOOPBACK,
+                    dnsCryptPort = dnsCryptPort,
+                    vpnDnsAddress = TunnelEndpoints.VPN_DNS_ADDRESS,
+                    divertDnsToDnsCrypt = divertDns,
+                    torDnsHost = TunnelEndpoints.LOOPBACK,
+                    torDnsPort = torDnsPort,
+                    synthesizeOnionAutomap = synthesizeOnionAutomap,
+                    onFatal = { error ->
+                        Timber.e(error, "TunDnsMux died (onionmasq path)")
+                        onFatal?.invoke(error)
+                    },
+                )
+                dnsMux = mux
+                mux.start()
 
-            // Must observe before OnionMasq.start — BootstrapEvent can fire immediately;
-            // a post{} race would miss ready-for-traffic and fail-closed after ~20s.
-            attachEventObserver()
-            exitCountryCode?.takeIf { it.isNotBlank() }?.let { cc ->
-                runCatching { OnionMasq.setCountryCode(cc) }
-                    .onFailure { Timber.w(it, "setCountryCode($cc) failed") }
-            }
-            runCatching {
-                val uids = TorNativeAppUids.resolve(context)
-                if (uids.isNotEmpty()) {
-                    OnionMasq.setExcludedUids(uids)
-                    Timber.i("onionmasq setExcludedUids count=%d", uids.size)
+                // Must observe before OnionMasq.start — BootstrapEvent can fire immediately;
+                // a post{} race would miss ready-for-traffic and fail-closed after ~20s.
+                attachEventObserver()
+                exitCountryCode?.takeIf { it.isNotBlank() }?.let { cc ->
+                    runCatching { OnionMasq.setCountryCode(cc) }
+                        .onFailure { Timber.w(it, "setCountryCode($cc) failed") }
                 }
-            }.onFailure { Timber.w(it, "setExcludedUids failed") }
+                runCatching {
+                    val uids = TorNativeAppUids.resolve(context)
+                    if (uids.isNotEmpty()) {
+                        OnionMasq.setExcludedUids(uids)
+                        Timber.i("onionmasq setExcludedUids count=%d", uids.size)
+                    }
+                }.onFailure { Timber.w(it, "setExcludedUids failed") }
 
-            running.set(true)
-            val bridges = bridgeLines?.takeIf { it.isNotBlank() }
-            val job = scope.launch {
-                try {
-                    // Transfer ownership of the socketpair end to native — do not close after.
-                    val fd = onionEnd.detachFd()
-                    omEnd = null
-                    proxyOwned.set(true)
-                    Timber.i(
-                        "Starting OnionMasq on mux fd=%d bridges=%s",
-                        fd,
-                        bridges != null,
-                    )
-                    // Blocking until closeProxy — Tor VPN pattern.
-                    OnionMasq.start(fd, bridges)
-                } catch (error: Exception) {
-                    Timber.e(error, "OnionMasq exited")
-                    onFatal?.invoke(
-                        TunnelFailure.ForwarderDead(
-                            "onionmasq exited: ${error.message}",
-                            error,
-                        ),
-                    )
-                } finally {
-                    running.set(false)
-                    // start() has returned (drop_command_sender already ran). Clear ownership
-                    // so a later stop() on this instance does not re-enter closeProxy needlessly.
-                    proxyOwned.set(false)
+                running.set(true)
+                val bridges = bridgeLines?.takeIf { it.isNotBlank() }
+                val job = scope.launch {
+                    var detachedFd = -1
+                    try {
+                        // Transfer ownership of the socketpair end to native — do not close after
+                        // a successful handoff. If start() throws before runProxy, reclaim the fd.
+                        val fd = onionEnd.detachFd()
+                        detachedFd = fd
+                        omEnd = null
+                        proxyOwned.set(true)
+                        Timber.i(
+                            "Starting OnionMasq on mux fd=%d bridges=%s",
+                            fd,
+                            bridges != null,
+                        )
+                        // Blocking until closeProxy — Tor VPN pattern.
+                        OnionMasq.start(fd, bridges)
+                        detachedFd = -1 // native owns fd for the lifetime of runProxy
+                    } catch (error: Exception) {
+                        if (detachedFd >= 0) {
+                            runCatching {
+                                ParcelFileDescriptor.adoptFd(detachedFd).close()
+                            }.onFailure { Timber.w(it, "close orphaned onionmasq fd") }
+                            detachedFd = -1
+                            proxyOwned.set(false)
+                        }
+                        Timber.e(error, "OnionMasq exited")
+                        onFatal?.invoke(
+                            TunnelFailure.ForwarderDead(
+                                "onionmasq exited: ${error.message}",
+                                error,
+                            ),
+                        )
+                    } finally {
+                        running.set(false)
+                        // start() has returned (drop_command_sender already ran). Clear ownership
+                        // so a later stop() on this instance does not re-enter closeProxy needlessly.
+                        proxyOwned.set(false)
+                    }
                 }
+                worker.set(job)
+            } catch (error: Throwable) {
+                Timber.e(error, "onionmasq start failed — rolling back")
+                runCatching { stop() }
+                throw error
             }
-            worker.set(job)
         }
     }
 

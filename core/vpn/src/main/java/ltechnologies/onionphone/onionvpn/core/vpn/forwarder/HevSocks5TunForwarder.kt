@@ -78,61 +78,68 @@ class HevSocks5TunForwarder(
         synthesizeOnionAutomap: Boolean = false,
     ) {
         // Bridge before hev so the first SOCKS CONNECT never hits a closed port.
-        val bridge = SocksUidBridge(
-            context = context,
-            protectSocket = protectSocket,
-            onFatal = onFatal,
-        )
-        bridge.start(torSocks = torSocksPort)
-        uidBridge = bridge
-
-        val pair = createPacketSocketPair()
-        val hevEnd = pair[0]
-        val muxEnd = pair[1]
-        tunDup = hevEnd
-
-        val bridgeHost = TunnelEndpoints.LOOPBACK
-        val bridgePort = TunnelEndpoints.SOCKS_UID_BRIDGE_PORT
-        val job = scope.launch {
-            val configFile = File(context.filesDir, "hev-socks5-tunnel.yaml")
-            configFile.writeText(buildConfig(bridgeHost, bridgePort, useMapDns = useMapDns))
-            Timber.i(
-                "Starting hev-socks5-tunnel (mux/dgram) on fd=${hevEnd.fd} " +
-                    "bridge=$bridgeHost:$bridgePort torSocks=$torSocksPort " +
-                    "dnscrypt=$dnsCryptPort torDns=$torDnsPort mapdns=$useMapDns divertDns=$divertDns",
+        // Any failure after bridge/socketpair must tear down via stop() to avoid FD leaks.
+        try {
+            val bridge = SocksUidBridge(
+                context = context,
+                protectSocket = protectSocket,
+                onFatal = onFatal,
             )
-            try {
-                hev.sockstun.TProxyService.TProxyStartService(configFile.absolutePath, hevEnd.fd)
-            } catch (error: Exception) {
-                Timber.e(error, "hev-socks5-tunnel (mux) exited")
-                onFatal?.invoke(
-                    TunnelFailure.ForwarderDead(
-                        "hev-socks5-tunnel exited: ${error.message}",
-                        error,
-                    ),
-                )
-            }
-        }
-        worker.set(job)
+            bridge.start(torSocks = torSocksPort)
+            uidBridge = bridge
 
-        val mux = TunDnsMux(
-            context = context,
-            tunFd = tunFd.dup(),
-            hevFd = muxEnd,
-            dnsCryptHost = TunnelEndpoints.LOOPBACK,
-            dnsCryptPort = dnsCryptPort,
-            vpnDnsAddress = TunnelEndpoints.VPN_DNS_ADDRESS,
-            divertDnsToDnsCrypt = divertDns,
-            torDnsHost = TunnelEndpoints.LOOPBACK,
-            torDnsPort = torDnsPort,
-            synthesizeOnionAutomap = synthesizeOnionAutomap,
-            onFatal = { error ->
-                Timber.e(error, "TunDnsMux died")
-                onFatal?.invoke(error)
-            },
-        )
-        dnsMux = mux
-        mux.start()
+            val pair = createPacketSocketPair()
+            val hevEnd = pair[0]
+            val muxEnd = pair[1]
+            tunDup = hevEnd
+
+            val bridgeHost = TunnelEndpoints.LOOPBACK
+            val bridgePort = TunnelEndpoints.SOCKS_UID_BRIDGE_PORT
+            val job = scope.launch {
+                val configFile = File(context.filesDir, "hev-socks5-tunnel.yaml")
+                configFile.writeText(buildConfig(bridgeHost, bridgePort, useMapDns = useMapDns))
+                Timber.i(
+                    "Starting hev-socks5-tunnel (mux/dgram) on fd=${hevEnd.fd} " +
+                        "bridge=$bridgeHost:$bridgePort torSocks=$torSocksPort " +
+                        "dnscrypt=$dnsCryptPort torDns=$torDnsPort mapdns=$useMapDns divertDns=$divertDns",
+                )
+                try {
+                    hev.sockstun.TProxyService.TProxyStartService(configFile.absolutePath, hevEnd.fd)
+                } catch (error: Exception) {
+                    Timber.e(error, "hev-socks5-tunnel (mux) exited")
+                    onFatal?.invoke(
+                        TunnelFailure.ForwarderDead(
+                            "hev-socks5-tunnel exited: ${error.message}",
+                            error,
+                        ),
+                    )
+                }
+            }
+            worker.set(job)
+
+            val mux = TunDnsMux(
+                context = context,
+                tunFd = tunFd.dup(),
+                hevFd = muxEnd,
+                dnsCryptHost = TunnelEndpoints.LOOPBACK,
+                dnsCryptPort = dnsCryptPort,
+                vpnDnsAddress = TunnelEndpoints.VPN_DNS_ADDRESS,
+                divertDnsToDnsCrypt = divertDns,
+                torDnsHost = TunnelEndpoints.LOOPBACK,
+                torDnsPort = torDnsPort,
+                synthesizeOnionAutomap = synthesizeOnionAutomap,
+                onFatal = { error ->
+                    Timber.e(error, "TunDnsMux died")
+                    onFatal?.invoke(error)
+                },
+            )
+            dnsMux = mux
+            mux.start()
+        } catch (error: Throwable) {
+            Timber.e(error, "hev startWithMux failed — rolling back")
+            runCatching { stop() }
+            throw error
+        }
     }
 
     /**
@@ -205,20 +212,33 @@ class HevSocks5TunForwarder(
                     error,
                 )
             }
-            runCatching {
-                // 4 MiB each side — parallel CDN flows (Speedtest/OneTrust) need headroom
-                // so a full DGRAM queue does not drop TLS records.
-                val buf = 4 * 1024 * 1024
-                Os.setsockoptInt(fd0, OsConstants.SOL_SOCKET, OsConstants.SO_SNDBUF, buf)
-                Os.setsockoptInt(fd0, OsConstants.SOL_SOCKET, OsConstants.SO_RCVBUF, buf)
-                Os.setsockoptInt(fd1, OsConstants.SOL_SOCKET, OsConstants.SO_SNDBUF, buf)
-                Os.setsockoptInt(fd1, OsConstants.SOL_SOCKET, OsConstants.SO_RCVBUF, buf)
+            var left: ParcelFileDescriptor? = null
+            var right: ParcelFileDescriptor? = null
+            try {
+                runCatching {
+                    // 4 MiB each side — parallel CDN flows (Speedtest/OneTrust) need headroom
+                    // so a full DGRAM queue does not drop TLS records.
+                    val buf = 4 * 1024 * 1024
+                    Os.setsockoptInt(fd0, OsConstants.SOL_SOCKET, OsConstants.SO_SNDBUF, buf)
+                    Os.setsockoptInt(fd0, OsConstants.SOL_SOCKET, OsConstants.SO_RCVBUF, buf)
+                    Os.setsockoptInt(fd1, OsConstants.SOL_SOCKET, OsConstants.SO_SNDBUF, buf)
+                    Os.setsockoptInt(fd1, OsConstants.SOL_SOCKET, OsConstants.SO_RCVBUF, buf)
+                }
+                left = ParcelFileDescriptor.dup(fd0)
+                right = ParcelFileDescriptor.dup(fd1)
+                runCatching { Os.close(fd0) }
+                runCatching { Os.close(fd1) }
+                return arrayOf(left, right)
+            } catch (error: Throwable) {
+                runCatching { left?.close() }
+                runCatching { right?.close() }
+                runCatching { Os.close(fd0) }
+                runCatching { Os.close(fd1) }
+                throw TunnelFailure.ForwarderDead(
+                    "socketpair wrap failed: ${error.message}",
+                    error,
+                )
             }
-            val left = ParcelFileDescriptor.dup(fd0)
-            val right = ParcelFileDescriptor.dup(fd1)
-            runCatching { Os.close(fd0) }
-            runCatching { Os.close(fd1) }
-            return arrayOf(left, right)
         }
     }
 }

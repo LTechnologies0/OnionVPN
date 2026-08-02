@@ -1031,7 +1031,11 @@ fun SettingsScreen(
                     }
                     commit(local.copy(torExitNodes = next), restart = false)
                     // Live apply under onionmasq (Tor VPN ExitSelection pattern).
-                    if (local.tunDataPlane == TunDataPlane.ONIONMASQ) {
+                    // Never probe JNI before init — runCatching cannot catch SIGABRT.
+                    if (local.tunDataPlane == TunDataPlane.ONIONMASQ &&
+                        org.torproject.onionmasq.OnionMasq.isInitialized() &&
+                        org.torproject.onionmasq.OnionMasq.isRunning()
+                    ) {
                         val cc = TorCountryCatalog.parseNodeCodes(next).firstOrNull()
                         runCatching {
                             if (cc.isNullOrBlank()) {
