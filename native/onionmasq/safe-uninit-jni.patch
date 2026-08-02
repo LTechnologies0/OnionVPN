@@ -1,9 +1,31 @@
-diff --git a/crates/onionmasq-mobile/src/ffi.rs b/crates/onionmasq-mobile/src/ffi.rs
-index a0f18ab..b1c2d0e 100644
 --- a/crates/onionmasq-mobile/src/ffi.rs
 +++ b/crates/onionmasq-mobile/src/ffi.rs
-@@ -48,8 +48,11 @@ pub extern "C" fn Java_org_torproject_onionmasq_OnionMasqJni_closeProxy(
-     mut env: JNIEnv,
+@@ -9,7 +9,7 @@
+ use jni::JNIEnv;
+ use onion_tunnel::accounting::BandwidthCounter;
+ use onion_tunnel::scaffolding::TunnelCommand;
+-use tracing::{debug, error, info};
++use tracing::{debug, error, info, warn};
+ 
+ #[no_mangle]
+ pub extern "C" fn Java_org_torproject_onionmasq_OnionMasqJni_runProxy(
+@@ -23,7 +23,14 @@
+     bridge_lines: JString,
+ ) {
+     panic_handling::capture_unwind!(env, {
+-        let mobile = OnionmasqMobile::get();
++        let Some(mobile) = OnionmasqMobile::try_get() else {
++            error!("runProxy() called before init()");
++            let _ = env.throw_new(
++                "org/torproject/onionmasq/errors/OnionmasqException",
++                "OnionMasq not initialized",
++            );
++            return;
++        };
+         // SAFETY: runProxy has the same contract as run_proxy
+         if let Err(e) = unsafe {
+             mobile.run_proxy(
+@@ -48,7 +55,10 @@
      _: JClass,
  ) {
      panic_handling::capture_unwind!(env, {
@@ -15,14 +37,14 @@ index a0f18ab..b1c2d0e 100644
          if let Err(e) = mobile.stop_proxy() {
              error!("closeProxy() returned error: {e:?}");
              errors::throw_java_exception_for(&mut env, e).unwrap();
-@@ -62,14 +65,20 @@ pub extern "C" fn Java_org_torproject_onionmasq_OnionMasqJni_isRunning(
+@@ -62,8 +72,12 @@
      _: JClass,
  ) -> jboolean {
      panic_handling::capture_unwind!(env, {
 -        let mobile = OnionmasqMobile::get();
 -        anyhow::Ok(mobile.is_running()).expect("Could not determine running state")
-+        // Return false when uninitialised — callers (e.g. ConnectivityHandler, VPN
-+        // stop-before-start) probe isRunning before init. get().expect aborts the app.
++        // Return false when uninitialised — callers probe isRunning before init.
++        // get().expect aborts the app under panic=abort.
 +        match OnionmasqMobile::try_get() {
 +            Some(mobile) => mobile.is_running(),
 +            None => 0,
@@ -30,9 +52,7 @@ index a0f18ab..b1c2d0e 100644
      })
  }
  
- #[no_mangle]
- pub extern "C" fn Java_org_torproject_onionmasq_OnionMasqJni_getSocksSidecarPort(
-     mut env: JNIEnv,
+@@ -73,8 +87,10 @@
      _: JClass,
  ) -> jlong {
      panic_handling::capture_unwind!(env, {
@@ -44,16 +64,161 @@ index a0f18ab..b1c2d0e 100644
 +        }
      })
  }
-diff --git a/crates/onionmasq-mobile/src/lib.rs b/crates/onionmasq-mobile/src/lib.rs
-index 4a4cf12..c9e8f01 100644
+ 
+@@ -84,7 +100,9 @@
+     _: JClass,
+ ) {
+     panic_handling::capture_unwind!(env, {
+-        let mobile = OnionmasqMobile::get();
++        let Some(mobile) = OnionmasqMobile::try_get() else {
++            return;
++        };
+         if let Err(e) = mobile.send_command(TunnelCommand::RefreshCircuits) {
+             errors::throw_java_exception_for(&mut env, e).unwrap();
+         }
+@@ -98,7 +116,9 @@
+     aid: jlong,
+ ) {
+     panic_handling::capture_unwind!(env, {
+-        let mobile = OnionmasqMobile::get();
++        let Some(mobile) = OnionmasqMobile::try_get() else {
++            return;
++        };
+         if let Err(e) = mobile.send_command(TunnelCommand::RefreshCircuitsForApp {
+             isolation_key: aid as u64,
+         }) {
+@@ -125,7 +145,10 @@
+ ) {
+     panic_handling::capture_unwind!(env, {
+         debug!("setPcapPath()");
+-        let path = env.get_string(&path).expect("path is invalid");
++        let Ok(path) = env.get_string(&path) else {
++            warn!("setPcapPath: invalid path jstring");
++            return;
++        };
+         let path = path.to_string_lossy();
+         info!("enabling pcap logging to path: {}", path);
+         let path = if path.is_empty() {
+@@ -133,7 +156,9 @@
+         } else {
+             Some(path.to_string())
+         };
+-        OnionmasqMobile::get().set_pcap_path(path);
++        if let Some(mobile) = OnionmasqMobile::try_get() {
++            mobile.set_pcap_path(path);
++        }
+     })
+ }
+ 
+@@ -156,8 +181,11 @@
+     aid: jlong,
+ ) -> jlong {
+     panic_handling::capture_unwind!(env, {
+-        let rx = OnionmasqMobile::get().app_rx_counter(aid as u64);
+-        rx.try_into().expect("wow, large bandwidth counter")
++        let Some(mobile) = OnionmasqMobile::try_get() else {
++            return 0;
++        };
++        let rx = mobile.app_rx_counter(aid as u64);
++        rx.try_into().unwrap_or(jlong::MAX)
+     })
+ }
+ 
+@@ -179,8 +207,11 @@
+     aid: jlong,
+ ) -> jlong {
+     panic_handling::capture_unwind!(env, {
+-        let tx = OnionmasqMobile::get().app_tx_counter(aid as u64);
+-        tx.try_into().expect("wow, large bandwidth counter")
++        let Some(mobile) = OnionmasqMobile::try_get() else {
++            return 0;
++        };
++        let tx = mobile.app_tx_counter(aid as u64);
++        tx.try_into().unwrap_or(jlong::MAX)
+     })
+ }
+ 
+@@ -189,7 +220,11 @@
+     mut env: JNIEnv,
+     _: JClass,
+ ) {
+-    panic_handling::capture_unwind!(env, { OnionmasqMobile::get().reset_counters() })
++    panic_handling::capture_unwind!(env, {
++        if let Some(mobile) = OnionmasqMobile::try_get() {
++            mobile.reset_counters();
++        }
++    })
+ }
+ 
+ #[no_mangle]
+@@ -199,7 +234,10 @@
+     country_code: JString<'_>,
+ ) {
+     panic_handling::capture_unwind!(env, {
+-        if let Err(e) = OnionmasqMobile::get().set_country_code(country_code) {
++        let Some(mobile) = OnionmasqMobile::try_get() else {
++            return;
++        };
++        if let Err(e) = mobile.set_country_code(country_code) {
+             errors::throw_java_exception_for(&mut env, e).unwrap();
+         }
+     })
+@@ -212,7 +250,10 @@
+     uids: JLongArray,
+ ) {
+     panic_handling::capture_unwind!(env, {
+-        if let Err(e) = OnionmasqMobile::get().set_excluded_uids(uids) {
++        let Some(mobile) = OnionmasqMobile::try_get() else {
++            return;
++        };
++        if let Err(e) = mobile.set_excluded_uids(uids) {
+             errors::throw_java_exception_for(&mut env, e).unwrap();
+         }
+     })
+@@ -225,7 +266,10 @@
+     available: jboolean,
+ ) {
+     panic_handling::capture_unwind!(env, {
+-        if let Err(e) = OnionmasqMobile::get().set_internet_connectivity(available) {
++        let Some(mobile) = OnionmasqMobile::try_get() else {
++            return;
++        };
++        if let Err(e) = mobile.set_internet_connectivity(available) {
+             errors::throw_java_exception_for(&mut env, e).unwrap();
+         }
+     })
+@@ -241,7 +285,10 @@
+ ) {
+     panic_handling::capture_unwind!(env, {
+         let p = port as u64;
+-        if let Err(e) = OnionmasqMobile::get().set_turn_server_config(host, p, auth) {
++        let Some(mobile) = OnionmasqMobile::try_get() else {
++            return;
++        };
++        if let Err(e) = mobile.set_turn_server_config(host, p, auth) {
+             errors::throw_java_exception_for(&mut env, e).unwrap();
+         }
+     })
+@@ -254,7 +301,10 @@
+     lines: JString<'_>,
+ ) {
+     panic_handling::capture_unwind!(env, {
+-        if let Err(e) = OnionmasqMobile::get().set_bridge_lines(lines) {
++        let Some(mobile) = OnionmasqMobile::try_get() else {
++            return;
++        };
++        if let Err(e) = mobile.set_bridge_lines(lines) {
+             errors::throw_java_exception_for(&mut env, e).unwrap();
+         }
+     })
 --- a/crates/onionmasq-mobile/src/lib.rs
 +++ b/crates/onionmasq-mobile/src/lib.rs
-@@ -169,6 +169,12 @@ impl OnionmasqMobile {
+@@ -172,6 +172,12 @@
              .expect("OnionmasqMobile::get() called without being initialised (did you forget to call init?)")
      }
  
 +    /// Like [`Self::get`], but returns `None` when `init()` has not run yet.
-+    /// Prefer this for probe/stop JNI entry points that must not abort the process.
++    /// Prefer this for probe/stop/config JNI entry points that must not abort.
 +    pub fn try_get() -> Option<&'static Self> {
 +        ONIONMASQ_MOBILE_SINGLETON.get()
 +    }

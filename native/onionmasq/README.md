@@ -36,7 +36,7 @@ git apply ../../native/onionmasq/socks-sidecar.patch
 git apply ../../native/onionmasq/safe-uninit-jni.patch
 ```
 
-`safe-uninit-jni.patch` makes `isRunning` / `closeProxy` / `getSocksSidecarPort`
-return safely when `init()` has not run (upstream `get().expect` + `panic=abort`
-otherwise SIGABRTs the app). The Java/Kotlin layers also gate these calls; rebuild
-the `.so` so the native side matches.
+`safe-uninit-jni.patch` converts **all** probe/stop/config/command JNI entry points
+to `try_get()` (no-op / 0 / Java exception) when `init()` has not run. Upstream
+`get().expect` + `panic=abort` otherwise SIGABRTs the app. Java/Kotlin layers also
+gate these calls; rebuild the `.so` so the native side matches.

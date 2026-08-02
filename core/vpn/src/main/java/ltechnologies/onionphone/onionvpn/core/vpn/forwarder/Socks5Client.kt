@@ -55,14 +55,12 @@ class Socks5Client(
             val ver = input.readUnsignedByte()
             val method = input.readUnsignedByte()
             if (ver != 0x05 || method != 0x02) {
-                socket.close()
                 throw IOException("SOCKS5 auth method rejected ver=$ver method=$method")
             }
 
             val userBytes = username.toByteArray(StandardCharsets.UTF_8)
             val passBytes = password.toByteArray(StandardCharsets.UTF_8)
             if (userBytes.size > 255 || passBytes.size > 255) {
-                socket.close()
                 throw IOException("SOCKS5 credentials too long")
             }
             output.writeByte(0x01)
@@ -74,13 +72,11 @@ class Socks5Client(
             val authVer = input.readUnsignedByte()
             val authStatus = input.readUnsignedByte()
             if (authVer != 0x01 || authStatus != 0x00) {
-                socket.close()
                 throw IOException("SOCKS5 username/password rejected")
             }
 
             // CONNECT — IPv4 literal, IPv6 literal, or hostname (SOCKS5A via Tor).
             if (!TorNetPolicy.isValidSocksDestination(destHost) || !TorNetPolicy.isValidPort(destPort)) {
-                socket.close()
                 throw IOException("SOCKS5 invalid destination")
             }
             val hostBytes = destHost.toByteArray(StandardCharsets.UTF_8)
@@ -97,7 +93,6 @@ class Socks5Client(
                 isIpv6 -> {
                     val addr = InetAddress.getByName(destHost).address
                     if (addr.size != 16) {
-                        socket.close()
                         throw IOException("SOCKS5 IPv6 address length ${addr.size}")
                     }
                     output.writeByte(0x04)
@@ -105,7 +100,6 @@ class Socks5Client(
                 }
                 else -> {
                     if (hostBytes.size > 255) {
-                        socket.close()
                         throw IOException("SOCKS5 hostname too long")
                     }
                     output.writeByte(0x03)
@@ -127,26 +121,26 @@ class Socks5Client(
                     input.skipBytes(n)
                 }
                 0x04 -> input.skipBytes(16)
-                else -> {
-                    socket.close()
-                    throw IOException("SOCKS5 bad atyp=$atyp")
-                }
+                else -> throw IOException("SOCKS5 bad atyp=$atyp")
             }
             input.skipBytes(2) // bind port
             if (respVer != 0x05 || respStatus != 0x00) {
-                socket.close()
                 val signal = TorStabilityCodes.SocksReply.signalFor(respStatus)
                 throw IOException(
                     "SOCKS5 CONNECT failed status=$respStatus (${signal.detail.ifBlank { signal.code }})",
                 )
             }
-        } catch (e: java.net.SocketTimeoutException) {
+        } catch (e: Exception) {
             runCatching { socket.close() }
-            throw IOException(
-                "SOCKS5 handshake timed out after ${handshakeTimeoutMs}ms " +
-                    "(cold circuit / congested Tor)",
-                e,
-            )
+            if (e is java.net.SocketTimeoutException) {
+                throw IOException(
+                    "SOCKS5 handshake timed out after ${handshakeTimeoutMs}ms " +
+                        "(cold circuit / congested Tor)",
+                    e,
+                )
+            }
+            if (e is IOException) throw e
+            throw IOException("SOCKS5 handshake failed: ${e.message}", e)
         }
         // Streaming payload — no idle read deadline on the tunnel pipe.
         socket.soTimeout = 0

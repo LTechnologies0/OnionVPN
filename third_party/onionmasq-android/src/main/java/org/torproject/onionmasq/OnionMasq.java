@@ -295,17 +295,24 @@ public class OnionMasq {
     }
 
     public static void refreshCircuits() throws ProxyStoppedException {
+        // Gate before JNI — native get().expect aborts when init has not run.
+        if (instance == null) {
+            throw new ProxyStoppedException("OnionMasq not initialized");
+        }
         OnionMasqJni.refreshCircuits();
         getInstance().circuitStore.reset();
     }
 
     public static void refreshCircuitsForApp(long appId) throws ProxyStoppedException {
+        if (instance == null) {
+            throw new ProxyStoppedException("OnionMasq not initialized");
+        }
         OnionMasqJni.refreshCircuitsForApp(appId);
         getInstance().circuitStore.removeCircuitCountryCodes((int) appId);
     }
 
     static boolean protect(int socket) {
-        if (getInstance().serviceBinder == null) {
+        if (instance == null || getInstance().serviceBinder == null) {
             LogObservable.getInstance().addLog("Cannot protect Socket " + socket + ". VpnService is not registered.");
             return false;
         }
@@ -318,15 +325,23 @@ public class OnionMasq {
     }
 
     static void handleEvent(OnionmasqEvent event) {
+        if (instance == null) {
+            Log.w(TAG, "handleEvent skipped — not initialized");
+            return;
+        }
         getInstance().circuitStore.handleEvent(event);
         getInstance().eventObservable.update(event);
     }
 
     public static long getBytesReceived() {
+        // Global counter — safe without singleton, but still guard for consistency.
         return OnionMasqJni.getBytesReceived();
     }
 
     public static long getBytesReceivedForApp(long appId) {
+        if (instance == null) {
+            return 0L;
+        }
         return OnionMasqJni.getBytesReceivedForApp(appId);
     }
 
@@ -335,26 +350,47 @@ public class OnionMasq {
     }
 
     public static long getBytesSentForApp(long appId) {
+        if (instance == null) {
+            return 0L;
+        }
         return OnionMasqJni.getBytesSentForApp(appId);
     }
 
     public static void resetCounters() {
+        if (instance == null) {
+            return;
+        }
         OnionMasqJni.resetCounters();
     }
 
     public static void setCountryCode(String cc) throws CountryCodeException {
+        if (instance == null) {
+            throw new CountryCodeException("OnionMasq not initialized");
+        }
         OnionMasqJni.setCountryCode(cc);
     }
 
     public static void setTurnServerConfig(String host, long port, String auth) {
+        if (instance == null) {
+            Log.d(TAG, "setTurnServerConfig skipped — not initialized");
+            return;
+        }
         OnionMasqJni.setTurnServerConfig(host, port, auth);
     }
 
     public static void setBridgeLines(String bridgeLines) {
+        if (instance == null) {
+            Log.d(TAG, "setBridgeLines skipped — not initialized");
+            return;
+        }
         OnionMasqJni.setBridgeLines(bridgeLines);
     }
 
     public static void setExcludedUids(long[] uids) {
+        if (instance == null) {
+            Log.d(TAG, "setExcludedUids skipped — not initialized");
+            return;
+        }
         OnionMasqJni.setExcludedUids(uids);
     }
 

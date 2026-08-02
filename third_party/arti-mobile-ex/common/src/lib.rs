@@ -218,36 +218,44 @@ fn build_client_config(params: &RuntimeParams) -> Result<TorClientConfig> {
         TorClientConfigBuilder::from_directories(&params.state_dir, &params.cache_dir);
 
     let ptn: Result<PtTransportName, TransportIdError> = "snowflake".parse();
-    ptn.unwrap_or_else(|err| {
-        panic!("err snowflake fuckup {:?}", err);
-    });
+    if let Err(err) = ptn {
+        // Never panic — Android panic=abort. Soft-fail config build instead.
+        anyhow::bail!("invalid snowflake PtTransportName: {err:?}");
+    }
+
+    let loopback: std::net::IpAddr = "127.0.0.1"
+        .parse()
+        .map_err(|e| anyhow!("loopback parse: {e}"))?;
 
     if params.obfs4_port > 0 {
         let mut transport = TransportConfigBuilder::default();
+        let proto: PtTransportName = "obfs4"
+            .parse()
+            .map_err(|e| anyhow!("obfs4 PtTransportName: {e:?}"))?;
         transport
-            .protocols(vec!["obfs4".parse().unwrap()])
-            .proxy_addr(SocketAddr::new(
-                "127.0.0.1".parse().unwrap(),
-                params.obfs4_port,
-            ));
+            .protocols(vec![proto])
+            .proxy_addr(SocketAddr::new(loopback, params.obfs4_port));
         client_config_builder.bridges().transports().push(transport);
     }
 
     if params.snowflake_port > 0 {
         let mut transport = TransportConfigBuilder::default();
+        let proto: PtTransportName = "snowflake"
+            .parse()
+            .map_err(|e| anyhow!("snowflake PtTransportName: {e:?}"))?;
         transport
-            .protocols(vec!["snowflake".parse().unwrap()])
-            .proxy_addr(SocketAddr::new(
-                "127.0.0.1".parse().unwrap(),
-                params.snowflake_port,
-            ));
+            .protocols(vec![proto])
+            .proxy_addr(SocketAddr::new(loopback, params.snowflake_port));
         client_config_builder.bridges().transports().push(transport);
     }
 
     if let Some(o4p) = params.obfs4proxy_path.as_deref() {
         let mut transport = TransportConfigBuilder::default();
+        let proto: PtTransportName = "obfs4"
+            .parse()
+            .map_err(|e| anyhow!("obfs4 PtTransportName: {e:?}"))?;
         transport
-            .protocols(vec!["obfs4".parse().unwrap()])
+            .protocols(vec![proto])
             .path(CfgPath::new(o4p.into()))
             .run_on_startup(true);
         client_config_builder.bridges().transports().push(transport);
@@ -255,8 +263,11 @@ fn build_client_config(params: &RuntimeParams) -> Result<TorClientConfig> {
 
     if let Some(conjure) = params.conjure_path.as_deref() {
         let mut transport = TransportConfigBuilder::default();
+        let proto: PtTransportName = "conjure"
+            .parse()
+            .map_err(|e| anyhow!("conjure PtTransportName: {e:?}"))?;
         transport
-            .protocols(vec!["conjure".parse().unwrap()])
+            .protocols(vec![proto])
             .path(CfgPath::new(conjure.into()))
             .run_on_startup(true);
         if let Some(url) = params.conjure_register_url.as_deref() {
@@ -271,10 +282,12 @@ fn build_client_config(params: &RuntimeParams) -> Result<TorClientConfig> {
             if bridge_line.is_empty() {
                 continue;
             }
-            client_config_builder
-                .bridges()
-                .bridges()
-                .push(bridge_line.parse().unwrap());
+            match bridge_line.parse() {
+                Ok(line) => client_config_builder.bridges().bridges().push(line),
+                Err(err) => {
+                    warn!("AMEx: skipping invalid bridge line: {err:?}");
+                }
+            }
         }
     }
 
@@ -343,7 +356,16 @@ fn _configure_and_run_arti_proxy(
         return;
     }
 
-    let runtime = PreferredRuntime::create().expect("Could not create Tor runtime.");
+    let runtime = match PreferredRuntime::create() {
+        Ok(rt) => rt,
+        Err(e) => {
+            warn!("AMEx: could not create Tor runtime: {e}");
+            if let Ok(mut state) = STATE.lock() {
+                *state = AMExState::Stopped;
+            }
+            return;
+        }
+    };
     let config_sources = ConfigurationSources::default();
     let arti_config = ArtiConfig::default();
 
@@ -391,17 +413,20 @@ fn _configure_and_run_arti_proxy(
     );
 
     thread::spawn(move || {
-        runtime
-            .clone()
-            .block_on(_run(
-                runtime,
-                Listen::new_localhost(socks_port),
-                Listen::new_localhost(dns_port),
-                config_sources,
-                arti_config,
-                client_config,
-            ))
-            .expect("Could not start Arti.");
+        // Soft-fail — never expect()/panic under panic=abort.
+        if let Err(e) = runtime.clone().block_on(_run(
+            runtime,
+            Listen::new_localhost(socks_port),
+            Listen::new_localhost(dns_port),
+            config_sources,
+            arti_config,
+            client_config,
+        )) {
+            warn!("AMEx: Arti _run exited with error: {e:#}");
+        }
+        if let Ok(mut state) = STATE.lock() {
+            *state = AMExState::Stopped;
+        }
     });
 }
 

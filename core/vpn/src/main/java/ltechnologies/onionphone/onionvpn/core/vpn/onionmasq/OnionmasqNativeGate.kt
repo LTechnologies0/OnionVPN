@@ -10,6 +10,10 @@ package ltechnologies.onionphone.onionvpn.core.vpn.onionmasq
  * Tombstone (0.3.46 / versionCode 53): `startForwarder` → `stop` →
  * `OnionMasqJni.isRunning` → `unwrap_failed` → SIGABRT, because `start()` called
  * `stop()` before `OnionMasq.init()`.
+ *
+ * Blind spots hardened in 0.3.48: refreshCircuits*, getBytes*ForApp, setCountryCode,
+ * setExcludedUids, setInternetConnectivity — all require init; Java API + call sites
+ * must gate before JNI (native patch covers future .so rebuilds).
  */
 object OnionmasqNativeGate {
     /**
@@ -24,4 +28,16 @@ object OnionmasqNativeGate {
      * Prefer Kotlin ownership flags over probing JNI before init.
      */
     fun mayProbeNativeRunning(javaInitialized: Boolean): Boolean = javaInitialized
+
+    /**
+     * Commands that need a live control channel (`refreshCircuits*`, live exit apply).
+     * Requires both Java init and a running proxy.
+     */
+    fun mayCommandRunningProxy(javaInitialized: Boolean, nativeRunning: Boolean): Boolean =
+        javaInitialized && nativeRunning
+
+    /**
+     * Read-only probes that need the singleton (`getBytes*ForApp`) but not a live proxy.
+     */
+    fun mayReadAppCounters(javaInitialized: Boolean): Boolean = javaInitialized
 }
