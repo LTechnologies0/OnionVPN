@@ -9,6 +9,10 @@ import timber.log.Timber
  * to avoid Tor-over-Tor.
  */
 object TorNativeAppUids {
+    /**
+     * Orbot [BYPASS_VPN_PACKAGES] + Tor VPN Tor-powered set + OnionVPN extras.
+     * Package-name match only (no signature pinning yet — Tor VPN AppManager does pin).
+     */
     private val PACKAGES = listOf(
         "org.briarproject.briar.android",
         "org.briarproject.mailbox",
@@ -23,6 +27,7 @@ object TorNativeAppUids {
         "org.torproject.torbrowser_nightly",
         "org.torproject.torservices",
         "org.torproject.vpn",
+        "im.cwtch.flwtch", // Orbot BYPASS_VPN_PACKAGES — Tor-over-Tor
     )
 
     fun resolve(context: Context): LongArray {

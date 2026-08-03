@@ -92,10 +92,10 @@ index fdbc78d..4a4cf12 100644
          if let Some(sender) = self.command_sender.lock().unwrap().as_mut() {
 diff --git a/crates/onionmasq-mobile/src/socks_sidecar.rs b/crates/onionmasq-mobile/src/socks_sidecar.rs
 new file mode 100644
-index 0000000..77867d4
+index 0000000..1111111
 --- /dev/null
 +++ b/crates/onionmasq-mobile/src/socks_sidecar.rs
-@@ -0,0 +1,208 @@
+@@ -0,0 +1,224 @@
 +//! Loopback SOCKS5 sidecar on the same TorClient as onionmasq TUN traffic.
 +//!
 +//! DNSCrypt / probe clients authenticate with username/password; each username maps to a
@@ -212,7 +212,12 @@ index 0000000..77867d4
 +    let mut passwd = vec![0u8; plen[0] as usize];
 +    stream.read_exact(&mut passwd).await?;
 +    let username = String::from_utf8_lossy(&uname).into_owned();
-+    let _password = passwd;
++    // OnionVPN role secrets (TunnelEndpoints SOCKS_*_PASS). Username may be
++    // `dnscrypt-nN` after IsolationToken rotate on NEWNYM.
++    if !socks_auth_ok(&username, &passwd) {
++        stream.write_all(&[0x01, 0x01]).await?;
++        anyhow::bail!("SOCKS auth rejected for user {username}");
++    }
 +    stream.write_all(&[0x01, 0x00]).await?;
 +
 +    // Request
@@ -296,6 +301,17 @@ index 0000000..77867d4
 +        r = &mut a2c => { let _ = r; }
 +    }
 +    Ok(())
++}
++
++fn socks_auth_ok(username: &str, password: &[u8]) -> bool {
++    let expected: &[u8] = if username == "probe" {
++        b"check"
++    } else if username == "dnscrypt" || username.starts_with("dnscrypt-n") {
++        b"resolver"
++    } else {
++        return false;
++    };
++    expected.len() == password.len() && expected.iter().zip(password).all(|(a, b)| a == b)
 +}
 +
 +async fn reply_socks_error(stream: &mut TcpStream, rep: u8) -> anyhow::Result<()> {

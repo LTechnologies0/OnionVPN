@@ -14,6 +14,7 @@ import kotlinx.coroutines.withContext
 import ltechnologies.onionphone.onionvpn.core.dnscrypt.config.DnsCryptConfigWriter
 import ltechnologies.onionphone.onionvpn.core.dnscrypt.config.DnsCryptPublicResolvers
 import ltechnologies.onionphone.onionvpn.core.dnscrypt.lifecycle.DnsCryptReadiness
+import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
 import ltechnologies.onionphone.onionvpn.core.model.TunnelFailure
 import ltechnologies.onionphone.onionvpn.core.model.TunnelPreferences
 import ltechnologies.onionphone.onionvpn.core.model.TunnelRuntimePorts
@@ -44,6 +45,8 @@ class DnsCryptProcessManager(
     private var listenPort: Int? = null
     private var preferences: TunnelPreferences = TunnelPreferences()
     private var lastPorts: TunnelRuntimePorts? = null
+    private var lastSocksOverride: Int? = null
+    private var lastSocksUser: String? = null
     private var lastServerName: String = "cloudflare"
     private val lifecycleMutex = Mutex()
     private val lastClearCacheMs = AtomicLong(0L)
@@ -60,15 +63,24 @@ class DnsCryptProcessManager(
     /** Optional sink for UI log buffers (set by app layer). */
     var onLogLine: ((String) -> Unit)? = null
 
+    /**
+     * @param socksPortOverride when set (onionmasq SOCKS sidecar), proxy line uses this
+     *   instead of [TunnelRuntimePorts.torDnsCryptSocksPort].
+     * @param socksUserOverride IsolationToken username (NEWNYM rotates `dnscrypt-nN`).
+     */
     suspend fun start(
         serverName: String = "cloudflare",
         ports: TunnelRuntimePorts,
         preferences: TunnelPreferences = TunnelPreferences(),
+        socksPortOverride: Int? = null,
+        socksUserOverride: String? = null,
     ): Result<Unit> = withContext(Dispatchers.IO) {
         lifecycleMutex.withLock {
             OpTrace.stepSuspending("dnscrypt", "start", ProcessLogLevel.INFO) {
                 this@DnsCryptProcessManager.preferences = preferences
                 lastPorts = ports
+                lastSocksOverride = socksPortOverride
+                lastSocksUser = socksUserOverride
                 lastServerName = serverName.ifBlank { preferences.dnsCryptServerName }
                 listenPort = ports.dnsCryptListenPort
                 OpTrace.debug("dnscrypt", "stop_prior")
@@ -79,7 +91,7 @@ class DnsCryptProcessManager(
                 try {
                     OpTrace.step("dnscrypt", "ensure_binary") { ensureExecutable(binaryFile) }
                     OpTrace.step("dnscrypt", "write_config") {
-                        writeConfig(lastServerName, ports)
+                        writeConfig(lastServerName, ports, socksPortOverride, socksUserOverride)
                     }
                     OpTrace.step("dnscrypt", "spawn") { spawnProcess() }
                     OpTrace.stepSuspending("dnscrypt", "wait_listener") {
@@ -107,11 +119,30 @@ class DnsCryptProcessManager(
             OpTrace.stepSuspending("dnscrypt", "stop") {
                 stopInternal()
                 lastPorts = null
+                lastSocksOverride = null
+                lastSocksUser = null
             }
         }
     }
 
     fun isRunning(): Boolean = process?.isAlive == true
+
+    /** Soft reconfigure while Connected — rewrite toml + restart with last SOCKS override. */
+    suspend fun applyPreferences(
+        serverName: String,
+        preferences: TunnelPreferences,
+    ): Result<Unit> {
+        val ports = lastPorts ?: return Result.failure(
+            TunnelFailure.DnsCrypt("reconfigure", "DNSCrypt has no runtime ports"),
+        )
+        return start(
+            serverName,
+            ports,
+            preferences,
+            socksPortOverride = lastSocksOverride,
+            socksUserOverride = lastSocksUser,
+        )
+    }
 
     /**
      * Tor CLEARDNSCACHE / NEWNYM parity for dnscrypt-proxy.
@@ -135,7 +166,13 @@ class DnsCryptProcessManager(
             return@withContext Result.success(Unit)
         }
         Timber.i("DNSCrypt clearQueryCache — soft restart (flush in-memory DNS cache)")
-        start(lastServerName, ports, preferences)
+        start(
+            lastServerName,
+            ports,
+            preferences,
+            socksPortOverride = lastSocksOverride,
+            socksUserOverride = lastSocksUser,
+        )
     }
 
     private fun spawnProcess() {
@@ -257,16 +294,23 @@ class DnsCryptProcessManager(
         }
     }
 
-    private fun writeConfig(serverName: String, ports: TunnelRuntimePorts) {
+    private fun writeConfig(
+        serverName: String,
+        ports: TunnelRuntimePorts,
+        socksPortOverride: Int? = null,
+        socksUserOverride: String? = null,
+    ) {
         seedPublicResolversCache()
+        val socks = socksPortOverride?.takeIf { it > 0 } ?: ports.torDnsCryptSocksPort
         configFile.writeText(
             DnsCryptConfigWriter.write(
                 configDirectory = configDirectory.absolutePath,
                 serverName = serverName,
                 listenPort = ports.dnsCryptListenPort,
-                torSocksPort = ports.torDnsCryptSocksPort,
+                torSocksPort = socks,
                 torDnsPort = ports.torDnsPort,
                 preferences = preferences,
+                socksUser = socksUserOverride ?: TunnelEndpoints.SOCKS_DNSCRYPT_USER,
             ),
         )
         File(configDirectory, DnsCryptConfigWriter.BLOCKED_NAMES_FILE).writeText(

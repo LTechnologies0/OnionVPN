@@ -16,6 +16,15 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  # Prefer the Gradle Daemon across steps in this job (faster than --no-daemon).
+  # setup-gradle caches ~/.gradle between runs (see GitHub Actions + Gradle docs).
+  GRADLE_OPTS: >-
+    -Dorg.gradle.daemon=true
+    -Dorg.gradle.parallel=true
+    -Dorg.gradle.caching=true
+    -Dkotlin.compiler.execution.strategy=daemon
+
 jobs:
   build:
     if: github.event_name == 'push' || github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
@@ -31,7 +40,13 @@ jobs:
         with:
           distribution: temurin
           java-version: 21
-          cache: gradle
+
+      # Caches Gradle user home (deps, wrappers, build-cache) between workflow runs.
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@4d9f0ba0025fe599b4ebab900eb7f3a1d93ef4c2 # v5.0.0
+        with:
+          cache-read-only: ${{ github.event_name == 'pull_request' }}
+          add-job-summary: always
 
       - uses: android-actions/setup-android@v3
 
@@ -45,11 +60,21 @@ jobs:
             ./scripts/fetch-native-binaries.sh
           fi
 
-      - name: Unit tests
-        run: ./gradlew test --stacktrace --no-daemon
+      # Instrument before the only compile pass so CodeQL sees kotlinc/javac
+      # without a second clean --rerun-tasks rebuild.
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4
+        with:
+          languages: java-kotlin
+          build-mode: manual
 
-      - name: Assemble debug APK (arm64-v8a)
-        run: ./gradlew :app:assembleDebug -Ponionphone.devAbi=arm64-v8a --stacktrace --no-daemon
+      - name: Test and assemble debug (arm64-v8a)
+        run: >
+          ./gradlew test :app:assembleDebug
+          -Ponionphone.devAbi=arm64-v8a
+          -x lint
+          --stacktrace
+          --build-cache
 
       - name: Upload debug APK artifact
         uses: actions/upload-artifact@v4
@@ -58,18 +83,6 @@ jobs:
           path: app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
           retention-days: 14
-
-      - name: Initialize CodeQL
-        uses: github/codeql-action/init@v4
-        with:
-          languages: java-kotlin
-          build-mode: manual
-
-      - name: Build for CodeQL
-        run: |
-          ./gradlew --stop || true
-          ./gradlew clean :app:assembleDebug -Ponionphone.devAbi=arm64-v8a \
-            --no-daemon --no-build-cache --rerun-tasks
 
       - name: Analyze
         uses: github/codeql-action/analyze@v4

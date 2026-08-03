@@ -1,11 +1,15 @@
 package ltechnologies.onionphone.onionvpn.core.vpn
 
+import android.content.Context
 import android.content.Intent
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.net.VpnService
 import android.os.Build
 import android.os.IBinder
 import android.os.ParcelFileDescriptor
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -151,18 +155,31 @@ class OnionVpnService : VpnService() {
                 // bind the new forwarder — SocksUidBridge listen port is process-global.
                 previousForwarder?.stop()
                 if (tunForwarder === previousForwarder) tunForwarder = null
+                var forwarderOk = true
                 if (startForwarder && mode == VpnProfileMode.Connected) {
-                    startForwarder(
-                        torSocksPort,
-                        dnsCryptPort,
-                        torDnsPort,
-                        dnsMode,
-                        synthesizeOnionAutomap,
-                        tunDataPlane = tunDataPlane,
-                        bridgeLines = bridgeLines,
-                        exitCountry = exitCountry,
-                    )
+                    // Bind uplink BEFORE onionmasq/hev runProxy — empty underlying nets
+                    // fail-closed and starve Arti guard connects (Tor VPN order).
                     startUnderlyingTracking()
+                    try {
+                        startForwarder(
+                            torSocksPort,
+                            dnsCryptPort,
+                            torDnsPort,
+                            dnsMode,
+                            synthesizeOnionAutomap,
+                            tunDataPlane = tunDataPlane,
+                            bridgeLines = bridgeLines,
+                            exitCountry = exitCountry,
+                        )
+                    } catch (error: Exception) {
+                        // Previous forwarder already stopped — fail-closed blackhole TUN,
+                        // never leave isRebinding=true (watchdog/validation would freeze).
+                        forwarderOk = false
+                        forwarderAlive.value = false
+                        stopUnderlyingTracking()
+                        Timber.e(error, "startForwarder failed after TUN establish — blackhole fail-closed")
+                        OpTrace.error("vpn", "startForwarder failed", error)
+                    }
                 } else {
                     stopUnderlyingTracking()
                     tunForwarder = null
@@ -183,12 +200,12 @@ class OnionVpnService : VpnService() {
                 Timber.i(
                     "VPN established mode=$mode killSwitch=${preferences.killSwitchEnabled} " +
                         "socks=$torSocksPort dnscrypt=$dnsCryptPort torDns=$torDnsPort gen=$generation " +
-                        "alwaysOn=${alwaysOnActive.value} lockdown=${lockdownActive.value}",
+                        "forwarderOk=$forwarderOk alwaysOn=${alwaysOnActive.value} lockdown=${lockdownActive.value}",
                 )
                 OpTrace.info(
                     "vpn",
                     "established mode=$mode socks=$torSocksPort dnscrypt=$dnsCryptPort " +
-                        "torDns=$torDnsPort gen=$generation",
+                        "torDns=$torDnsPort gen=$generation forwarderOk=$forwarderOk",
                 )
             }
             is VpnEstablishResult.Failure -> {
@@ -285,6 +302,15 @@ class OnionVpnService : VpnService() {
         }
     }
 
+    /** Match ConnectivityHandler.onCapabilitiesChanged — VALIDATED, not forced true. */
+    private fun currentValidatedUplink(): Boolean {
+        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+            ?: return false
+        val network = cm.activeNetwork ?: return false
+        val caps = cm.getNetworkCapabilities(network) ?: return false
+        return caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+    }
+
     private fun startForwarder(
         torSocksPort: Int,
         dnsCryptPort: Int,
@@ -322,6 +348,8 @@ class OnionVpnService : VpnService() {
         val forwarder: TunForwarder = if (effective == TunDataPlane.ONIONMASQ) {
             circuitRepository.reset()
             onionmasqBootstrapReady.value = false
+            onionmasqSawReadyForTraffic.set(false)
+            onionmasqSawBootstrap100.set(false)
             OnionmasqTunForwarder(
                 context = applicationContext,
                 dnsMode = dnsMode,
@@ -332,10 +360,26 @@ class OnionVpnService : VpnService() {
                     forwarderAlive.value = false
                 },
                 onBootstrap = { event: BootstrapEvent ->
-                    // Tor VPN / Arti: ready_for_traffic is the CONNECTED gate.
-                    // Also accept 100% — some builds emit percent before the boolean flips.
-                    if (event.isReadyForTraffic || event.bootstrapPercent >= 100) {
+                    // Tor VPN: CONNECTED when ready_for_traffic AND pct==100 (same event).
+                    // Sticky across events so split emissions still converge.
+                    if (event.isReadyForTraffic) onionmasqSawReadyForTraffic.set(true)
+                    if (event.bootstrapPercent >= 100) onionmasqSawBootstrap100.set(true)
+                    if (onionmasqSawReadyForTraffic.get() && onionmasqSawBootstrap100.get()) {
                         onionmasqBootstrapReady.value = true
+                    } else {
+                        Timber.d(
+                            "onionmasq bootstrap partial ready=%s pct=%d — waiting for both",
+                            event.isReadyForTraffic,
+                            event.bootstrapPercent,
+                        )
+                    }
+                    // ConnectivityHandler may have fired while isRunning==false; seed uplink
+                    // from real VALIDATED state — never force true while offline (Tor VPN parity).
+                    if (OnionMasq.isInitialized() && OnionMasq.isRunning()) {
+                        val online = currentValidatedUplink()
+                        runCatching {
+                            org.torproject.onionmasq.OnionMasqJni.setInternetConnectivity(online)
+                        }.onFailure { Timber.d(it, "seed setInternetConnectivity($online)") }
                     }
                     onOnionmasqBootstrap?.invoke(event)
                 },
@@ -408,6 +452,11 @@ class OnionVpnService : VpnService() {
         profileMode.value = null
         alwaysOnActive.value = false
         lockdownActive.value = false
+        onionmasqBootstrapReady.value = false
+        activeDataPlane.value = TunDataPlane.HEV_SOCKS
+        forwarderSocksPort.value = -1
+        forwarderDnsCryptPort.value = -1
+        forwarderAlive.value = false
         if (destroyService) {
             stopSelf()
         }
@@ -423,13 +472,19 @@ class OnionVpnService : VpnService() {
             ACTION_ALWAYS_ON -> "ltechnologies.onionphone.onionvpn.tunnel.ALWAYS_ON"
             else -> return
         }
+        val intent = Intent().setClassName(
+            packageName,
+            "ltechnologies.onionphone.onionvpn.service.TunnelForegroundService",
+        ).setAction(coordinatorAction)
         runCatching {
-            startService(
-                Intent().setClassName(
-                    packageName,
-                    "ltechnologies.onionphone.onionvpn.service.TunnelForegroundService",
-                ).setAction(coordinatorAction),
-            )
+            // Coordinator is a foreground service — startService from background can be
+            // dropped on Android 8+ / OEM always-on restart paths.
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                startForegroundService(intent)
+            } else {
+                @Suppress("DEPRECATION")
+                startService(intent)
+            }
         }.onFailure { error ->
             Timber.w(error, "Could not notify tunnel coordinator ($coordinatorAction)")
         }
@@ -514,6 +569,8 @@ class OnionVpnService : VpnService() {
 
         private val onionmasqBootstrapReady = MutableStateFlow(false)
         val onionmasqReady: StateFlow<Boolean> = onionmasqBootstrapReady.asStateFlow()
+        private val onionmasqSawReadyForTraffic = AtomicBoolean(false)
+        private val onionmasqSawBootstrap100 = AtomicBoolean(false)
 
         val circuitRepository = OnionmasqCircuitRepository()
 

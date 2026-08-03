@@ -10,15 +10,16 @@ import timber.log.Timber
  * `onionmasq-mobile` to listen on loopback SOCKS using the *same* `TorClient`, mapping
  * SOCKS user/pass → `StreamPrefs` IsolationToken (`dnscrypt` / `probe`).
  *
- * **Cold-start ordering:** DNSCrypt starts before the TUN/onionmasq bootstrap in the
- * tunnel orchestrator, so the first DNSCrypt config still uses arti-mobile SOCKS +
- * DNSPort ([INTERIM_USES_ARTI_MOBILE]). After onionmasq is ready, call
- * [socksPortOrZero] — when non-zero, DNSCrypt may be restarted against the sidecar
- * (single TorClient cutover).
+ * **Cold-start ordering (single TorClient):** Blocking TUN → onionmasq Connected TUN →
+ * wait ready + sidecar → [SocksDnsBootstrapRelay] on allocated DNSPort → DNSCrypt
+ * proxy=@sidecar (no arti-mobile).
  */
 object OnionmasqSocksSidecar {
-    /** Until orchestrator reorders DNSCrypt after onionmasq ready, keep arti-mobile for bootstrap. */
-    const val INTERIM_USES_ARTI_MOBILE = true
+    /**
+     * Always false after cutover — arti-mobile must not run on the ONIONMASQ plane.
+     * Kept as a named constant so NEWNYM / docs can branch explicitly.
+     */
+    const val INTERIM_USES_ARTI_MOBILE = false
 
     /** Bound sidecar port, or 0 if onionmasq is not running / sidecar down. */
     fun socksPortOrZero(): Int {
@@ -29,5 +30,16 @@ object OnionmasqSocksSidecar {
             .onFailure { Timber.w(it, "getSocksSidecarPort") }
             .getOrDefault(0)
             .coerceAtLeast(0)
+    }
+
+    /** Wait until sidecar binds (OnionMasq.start publishes port after listen). */
+    suspend fun awaitPort(timeoutMs: Long = 30_000L, pollMs: Long = 200L): Int {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            val p = socksPortOrZero()
+            if (p > 0) return p
+            kotlinx.coroutines.delay(pollMs)
+        }
+        return 0
     }
 }

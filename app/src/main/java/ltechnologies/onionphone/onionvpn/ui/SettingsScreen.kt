@@ -699,7 +699,7 @@ fun SettingsScreen(
                     label = { Text("Paranoid") },
                 )
             }
-        } else if (caps.liveCircuitTiming) {
+        } else if (caps.liveCircuitTiming && local.tunDataPlane != TunDataPlane.ONIONMASQ) {
             Row(
                 modifier = Modifier.horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -744,6 +744,13 @@ fun SettingsScreen(
                     label = { Text("Paranoid dirtiness") },
                 )
             }
+        } else if (local.tunDataPlane == TunDataPlane.ONIONMASQ) {
+            Text(
+                text = "onionmasq: no live MaxCircuitDirtiness API (Tor VPN same). " +
+                    "Use New Identity / exit country; Arti Ext timing applies only on hev+arti-mobile.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
         Text(
             text = "Tor bridges",
@@ -1063,7 +1070,9 @@ fun SettingsScreen(
             )
         }
         }
-        if (caps.liveSetConf || caps.torrcConfig || caps.liveCircuitTiming) {
+        val showCircuitTimingFields = caps.liveSetConf || caps.torrcConfig ||
+            (caps.liveCircuitTiming && local.tunDataPlane != TunDataPlane.ONIONMASQ)
+        if (showCircuitTimingFields) {
             val artiTiming = caps.liveCircuitTiming && !caps.torrcConfig
             OutlinedTextField(
                 value = local.torNewCircuitPeriodSec.toString(),

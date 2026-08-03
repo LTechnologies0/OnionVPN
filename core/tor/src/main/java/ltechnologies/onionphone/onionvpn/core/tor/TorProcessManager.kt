@@ -56,7 +56,9 @@ import timber.log.Timber
  * 6. [waitForBootstrap] (GETINFO + [TorReadiness] listeners)
  * 7. SIGNAL ACTIVE
  *
- * **Arti start pipeline:** stop → JNI start → wait SOCKS/DNS listeners → synthetic status.
+ * **Arti start pipeline:** stop → JNI start → wait SOCKS accept → wait
+ * `ready_for_traffic` (+ DNSPort) → synthetic status. DNSCrypt must not start until this
+ * returns — upstream SOCKS + bootstrap DNSPort need a fully bootstrapped TorClient.
  *
  * Control-plane ops go through Arti-aware wrappers mapped by [TorControlCompat]
  * (doc-backed little-t ↔ Arti 1:1 matrix). Prefer those over raw [control] from app
@@ -128,11 +130,19 @@ class TorProcessManager(
             if (pausedBridges) {
                 runCatching { onTorDowntimeChanged?.invoke(true) }
                     .onFailure { Timber.w(it, "onTorDowntimeChanged(true) failed") }
+                // Stop DNSCrypt before Tor listeners die — avoids bootstrap_resolvers /
+                // SOCKS spam against a restarting Arti / DisableNetwork bounce.
+                runCatching { onDnsDependentPause?.invoke() }
+                    .onFailure { Timber.w(it, "onDnsDependentPause failed") }
             }
             try {
                 block()
             } finally {
                 if (pauseUpstreamSocks && bridgePauseDepth.decrementAndGet() == 0) {
+                    // Resume DNSCrypt only after block waited for traffic-ready (Arti)
+                    // or SocksPort settle (C Tor), then unpause hev SOCKS bridges.
+                    runCatching { onDnsDependentResume?.invoke() }
+                        .onFailure { Timber.w(it, "onDnsDependentResume failed") }
                     runCatching { onTorDowntimeChanged?.invoke(false) }
                         .onFailure { Timber.w(it, "onTorDowntimeChanged(false) failed") }
                 }
@@ -153,8 +163,23 @@ class TorProcessManager(
     /**
      * App-layer CLEARDNSCACHE / NEWNYM hook — clear DnsHostnameCache + OnionAutomap
      * (vpn module) so Arti Automap store matches control-spec client DNS clear.
+     *
+     * May also soft-restart DNSCrypt when it is still running (little-t NEWNYM /
+     * soft CLEARDNSCACHE). Hard Arti/C-Tor downtime uses [onDnsDependentPause] /
+     * [onDnsDependentResume] instead so DNSCrypt never races a dead SOCKS.
      */
     var onClientDnsCacheClear: (() -> Unit)? = null
+
+    /**
+     * Pause DNSCrypt (and any Tor-SOCKS DNS dependent) while Tor listeners are down.
+     * Invoked only when [withTorDowntime] pauses upstream SOCKS bridges.
+     */
+    var onDnsDependentPause: (suspend () -> Unit)? = null
+
+    /**
+     * Resume DNSCrypt after Tor is traffic-ready again (Arti: post-[waitForArtiBootstrap]).
+     */
+    var onDnsDependentResume: (suspend () -> Unit)? = null
 
     val configDirectory: File
         get() = File(context.filesDir, "tor").also { it.mkdirs() }
@@ -239,10 +264,16 @@ class TorProcessManager(
             OpTrace.stepSuspending("tor", "arti.jni_start", ProcessLogLevel.INFO) {
                 arti.start(ports, preferences)
             }
+            // Listeners alone are not enough: DNSCrypt bootstrap_resolvers + proxy need
+            // ready_for_traffic (parity with little-t waitForBootstrap before DNSCrypt).
+            OpTrace.stepSuspending("tor", "arti.bootstrap", ProcessLogLevel.INFO) {
+                waitForArtiBootstrap(ports)
+            }
             publishArtiReadyStatus()
             OpTrace.info(
                 "tor",
-                "Arti ready socks=${ports.torSocksPort} dns=${ports.torDnsPort}",
+                "Arti ready socks=${ports.torSocksPort} dns=${ports.torDnsPort} " +
+                    "frac=${arti.bootstrapFractionOrNull()} readyTraffic=${arti.readyForTrafficNative()}",
             )
             Result.success(Unit)
         } catch (error: Exception) {
@@ -354,6 +385,7 @@ class TorProcessManager(
                 runCatching {
                     withTorDowntime {
                         arti.restartForNewIdentity()
+                        runtimePorts?.let { waitForArtiBootstrap(it) }
                         clearAppDnsCaches()
                         publishArtiReadyStatus()
                     }
@@ -440,7 +472,7 @@ class TorProcessManager(
      */
     fun clearDnsCache(): Result<Unit> {
         if (activeEngine == TorEngine.ARTI) {
-            clearAppDnsCaches()
+            // Soft path: wake / re-probe first; only flush DNSCrypt when upstream is ready.
             return onNetworkChanged()
         }
         if (!control.isConnected) return Result.failure(IOException("control not connected"))
@@ -568,12 +600,19 @@ class TorProcessManager(
         if (activeEngine == TorEngine.ARTI) {
             // Orbot #1471: after net flip Tor must wake; Arti has no DROPTIMEOUTS —
             // set_dormant(Normal) + re-probe listeners is the soft equivalent.
+            // Do NOT restart DNSCrypt until SOCKS + ready_for_traffic — otherwise
+            // bootstrap_resolvers race a waking TorClient.
             arti.setDormantNative(soft = false)
-            clearAppDnsCaches()
             publishArtiReadyStatus()
-            val ok = runtimePorts?.let { TorReadiness.isPrimarySocksReady(it) } == true
-            Timber.i("Arti network change soft recovery socksReady=%s", ok)
-            return if (ok) Result.success(Unit) else Result.failure(IOException("Arti SOCKS not ready"))
+            val ok = isReadyForDnsCryptUpstream()
+            Timber.i(
+                "Arti network change soft recovery ready=%s socks=%s",
+                ok,
+                runtimePorts?.let { TorReadiness.isPrimarySocksReady(it) },
+            )
+            if (!ok) return Result.failure(IOException("Arti not ready for DNSCrypt upstream"))
+            clearAppDnsCaches()
+            return Result.success(Unit)
         }
         if (!control.isConnected) return Result.failure(IOException("control not connected"))
         control.dropTimeouts().onFailure { Timber.w(it, "DROPTIMEOUTS failed") }
@@ -598,6 +637,7 @@ class TorProcessManager(
                 runCatching {
                     withTorDowntime {
                         arti.restartHard()
+                        runtimePorts?.let { waitForArtiBootstrap(it) }
                         clearAppDnsCaches()
                         publishArtiReadyStatus()
                     }
@@ -622,10 +662,18 @@ class TorProcessManager(
                     control.dropTimeouts().onFailure { Timber.w(it, "DROPTIMEOUTS failed") }
                     control.setDisableNetwork(true).onFailure { Timber.w(it, "DisableNetwork=1 failed") }
                     control.setDisableNetwork(false).onFailure { Timber.w(it, "DisableNetwork=0 failed") }
-                    // Let SocksPort listeners return before unpausing bridges (finally).
+                    // Let SocksPort listeners return before DNSCrypt resume + bridge unpause.
                     delay(SOCKS_AFTER_DISABLE_NETWORK_MS)
+                    runtimePorts?.let { ports ->
+                        repeat(30) {
+                            if (TorReadiness.isPrimarySocksReady(ports)) return@let
+                            delay(100)
+                        }
+                    }
                     val active = control.setActive()
                     control.clearDnsCache().onFailure { Timber.w(it, "CLEARDNSCACHE failed") }
+                    // Automap / DNSCrypt sticky IPs (DNSCrypt itself resumed in finally).
+                    clearAppDnsCaches()
                     control.refreshHealthLite()
                     active
                 }.also {
@@ -679,6 +727,7 @@ class TorProcessManager(
             return@withContext runCatching {
                 withTorDowntime {
                     arti.restartWithPreferences(preferences)
+                    runtimePorts?.let { waitForArtiBootstrap(it) }
                     clearAppDnsCaches()
                     publishArtiReadyStatus()
                 }
@@ -792,6 +841,34 @@ class TorProcessManager(
             .onFailure { Timber.w(it, "onClientDnsCacheClear failed") }
     }
 
+    /**
+     * True when DNSCrypt may dial Tor SOCKS / DNSPort without racing bootstrap.
+     * Little-t: process alive + primary SOCKS. Arti: [publishArtiReadyStatus] ready gate.
+     */
+    fun isReadyForDnsCryptUpstream(): Boolean {
+        val ports = runtimePorts ?: return false
+        return when (activeEngine) {
+            TorEngine.LITTLE_T ->
+                process?.isAlive == true && TorReadiness.isPrimarySocksReady(ports)
+            TorEngine.ARTI -> isArtiTrafficReady(ports)
+        }
+    }
+
+    private fun isArtiTrafficReady(ports: TunnelRuntimePorts): Boolean {
+        if (artiDormant || !arti.isRunning()) return false
+        if (!TorReadiness.isPrimarySocksReady(ports)) return false
+        val frac = arti.bootstrapFractionOrNull()
+        val nativeReady = arti.readyForTrafficNative()
+        return when {
+            nativeReady -> true
+            frac != null && frac >= 0.99f -> true
+            // Stock AAR without Ext: SOCKS accept after waitForListeners is best-effort;
+            // DNSCrypt start path still waits via [waitForArtiBootstrap] (DNSPort).
+            frac == null && !ArtiControlNative.isAvailable() -> true
+            else -> false
+        }
+    }
+
     private fun publishArtiReadyStatus() {
         // Primary Arti SOCKS only — role-mux DNSCrypt/probe ports are app-layer relays.
         val socksUp = runtimePorts?.let { TorReadiness.isPrimarySocksReady(it) } == true
@@ -799,15 +876,7 @@ class TorProcessManager(
         val nativeReady = arti.readyForTrafficNative()
         // Prefer Ext JNI ready_for_traffic / bootstrap frac — never treat SOCKS accept alone
         // as "bootstrapped 100%" (listeners can be up before consensus).
-        val ready = when {
-            artiDormant -> false
-            !arti.isRunning() || !socksUp -> false
-            nativeReady -> true
-            frac != null && frac >= 0.99f -> true
-            // Stock AAR without Ext: DNSPort answer is the bootstrap proxy (waitForListeners).
-            frac == null && !ArtiControlNative.isAvailable() -> socksUp
-            else -> false
-        }
+        val ready = runtimePorts?.let { isArtiTrafficReady(it) } == true
         val bootPct = when {
             ready -> 100
             frac != null -> (frac * 100f).toInt().coerceIn(0, 99)
@@ -975,6 +1044,80 @@ class TorProcessManager(
         val cookie = cookieFile.exists() && cookieFile.length() > 0
         throw TunnelFailure.TorControl(
             "Tor control plane not ready (socket=$sock cookie=$cookie) after ${timeoutMs}ms",
+        )
+    }
+
+    /**
+     * Arti equivalent of [waitForBootstrap]: SOCKS accept is not enough for DNSCrypt.
+     *
+     * With Ext JNI: wait for `ready_for_traffic` (or as_frac ≥ 0.99), then DNSPort.
+     * Stock AAR (no Ext): DNSPort answering is the bootstrap proxy (needs dir info).
+     */
+    private suspend fun waitForArtiBootstrap(
+        ports: TunnelRuntimePorts,
+        timeoutMs: Long = 240_000,
+        pollMs: Long = 500,
+    ) {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        var lastLogMs = 0L
+        var dnsReady = false
+        val hasExt = ArtiControlNative.isAvailable()
+        while (System.currentTimeMillis() < deadline) {
+            if (!arti.isRunning()) {
+                throw TunnelFailure.TorBinary("Arti stopped before bootstrap completed")
+            }
+            publishArtiReadyStatus()
+            val frac = arti.bootstrapFractionOrNull()
+            val nativeReady = arti.readyForTrafficNative()
+            val bootDone = when {
+                nativeReady -> true
+                frac != null && frac >= 0.99f -> true
+                // No Ext API: cannot read BootstrapStatus — DNSPort reply ≈ enough dir info.
+                !hasExt -> TorReadiness.isDnsPortReady(ports.torDnsPort, timeoutMs = 1_500)
+                else -> false
+            }
+            if (bootDone) {
+                // Probe DNSPort only after bootstrap (same rule as little-t waitForBootstrap).
+                if (!dnsReady) {
+                    dnsReady = TorReadiness.isDnsPortReady(ports.torDnsPort, timeoutMs = 2_000)
+                }
+                if (dnsReady) {
+                    Timber.i(
+                        "Arti bootstrap complete readyTraffic=%s frac=%s dnsPort=%d",
+                        nativeReady,
+                        frac,
+                        ports.torDnsPort,
+                    )
+                    return
+                }
+            }
+            val now = System.currentTimeMillis()
+            if (now - lastLogMs >= 15_000L) {
+                lastLogMs = now
+                val block = arti.bootstrapBlockageOrEmpty()
+                Timber.i(
+                    "Arti waiting for ready_for_traffic (frac=%s ready=%s dns=%s block=%s elapsed=%ds)",
+                    frac,
+                    nativeReady,
+                    dnsReady,
+                    block.ifBlank { "-" },
+                    (timeoutMs - (deadline - now)) / 1000,
+                )
+            }
+            delay(pollMs)
+        }
+        val frac = arti.bootstrapFractionOrNull()
+        val pct = when {
+            frac != null -> (frac * 100f).toInt().coerceIn(0, 99)
+            else -> control.status.value.bootstrapProgress
+        }
+        throw TunnelFailure.TorBootstrap(
+            progress = pct,
+            detail = "Arti bootstrap timed out at ~$pct% " +
+                "(readyTraffic=${arti.readyForTrafficNative()} frac=$frac dnsReady=$dnsReady " +
+                "socks=${ports.torSocksPort} dns=${ports.torDnsPort}" +
+                arti.bootstrapBlockageOrEmpty().let { if (it.isNotEmpty()) " block=$it" else "" } +
+                ") — DNSCrypt requires ready_for_traffic",
         )
     }
 

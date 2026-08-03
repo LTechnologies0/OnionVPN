@@ -39,6 +39,8 @@ import java.net.InetSocketAddress;
 import java.net.URL;
 import java.net.UnknownHostException;
 import java.util.ArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 import IPtProxy.Controller;
 import IPtProxy.OnTransportEvents;
@@ -51,6 +53,8 @@ public class OnionMasq {
     private final ConnectivityManager connectivityManager;
     private final Context appContext;
     private ISocketProtect serviceBinder;
+    /** Signalled when [serviceBinder] is set; replaced on disconnect for rebind waits. */
+    private volatile CountDownLatch protectBoundLatch = new CountDownLatch(1);
     private final OnionmasqEventObservable eventObservable;
     private final CircuitStore circuitStore;
     private final static Object BRIDGE_CONFIG_LOCK = new Object();
@@ -62,6 +66,7 @@ public class OnionMasq {
                                        IBinder service) {
             if (service instanceof ISocketProtect) {
                 serviceBinder = (ISocketProtect) service;
+                protectBoundLatch.countDown();
             } else {
                 throw new IllegalArgumentException("Bound service needs to implement ISocketProtect interface");
             }
@@ -71,6 +76,7 @@ public class OnionMasq {
         @Override
         public void onServiceDisconnected(ComponentName arg0) {
             serviceBinder = null;
+            protectBoundLatch = new CountDownLatch(1);
         }
     };
 
@@ -112,15 +118,55 @@ public class OnionMasq {
     }
 
     public static void bindVPNService(Class vpnServiceClass) {
-        Intent intent = new Intent(getInstance().appContext, vpnServiceClass);
-        getInstance().appContext.bindService(intent, getInstance().connection, Context.BIND_AUTO_CREATE);
+        OnionMasq om = getInstance();
+        if (om.serviceBinder != null) {
+            return;
+        }
+        // Fresh wait latch for this bind attempt (prior unbind may have reset it).
+        om.protectBoundLatch = new CountDownLatch(1);
+        Intent intent = new Intent(om.appContext, vpnServiceClass);
+        boolean accepted = om.appContext.bindService(intent, om.connection, Context.BIND_AUTO_CREATE);
+        if (!accepted) {
+            Log.e(TAG, "bindService(VpnService) returned false — protect() will fail");
+        }
+    }
+
+    /**
+     * Wait until [ISocketProtect] binder is connected after [bindVPNService].
+     * OnionMasq.start() must not race an unbound protect() (returns false → Arti uplink fail).
+     */
+    public static boolean awaitProtectBinder(long timeoutMs) {
+        OnionMasq om = getInstance();
+        if (om.serviceBinder != null) {
+            return true;
+        }
+        try {
+            return om.protectBoundLatch.await(timeoutMs, TimeUnit.MILLISECONDS) && om.serviceBinder != null;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return om.serviceBinder != null;
+        }
+    }
+
+    public static boolean isProtectBound() {
+        return getInstance().serviceBinder != null;
     }
 
     public static void unbindVPNService() {
         try {
-            getInstance().appContext.unbindService(getInstance().connection);
-        } catch (IllegalArgumentException e) {
-            e.printStackTrace();
+            OnionMasq om = getInstance();
+            try {
+                om.appContext.unbindService(om.connection);
+            } catch (IllegalArgumentException e) {
+                // Already unbound — still clear binder/latch below.
+            } finally {
+                // Always reset so a later bindVPNService cannot early-return on a stale binder
+                // after a failed/double unbind.
+                om.serviceBinder = null;
+                om.protectBoundLatch = new CountDownLatch(1);
+            }
+        } catch (IllegalStateException e) {
+            // Not initialized — nothing to unbind.
         }
     }
 
@@ -334,7 +380,9 @@ public class OnionMasq {
     }
 
     public static long getBytesReceived() {
-        // Global counter — safe without singleton, but still guard for consistency.
+        if (instance == null) {
+            return 0L;
+        }
         return OnionMasqJni.getBytesReceived();
     }
 
@@ -346,6 +394,9 @@ public class OnionMasq {
     }
 
     public static long getBytesSent() {
+        if (instance == null) {
+            return 0L;
+        }
         return OnionMasqJni.getBytesSent();
     }
 

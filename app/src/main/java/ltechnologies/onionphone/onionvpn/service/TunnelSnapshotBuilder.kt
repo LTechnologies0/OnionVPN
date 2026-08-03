@@ -29,43 +29,67 @@ internal object TunnelSnapshotBuilder {
         liveStreamCount: Int = -1,
         torEngine: TorEngine = preferences.torEngine,
         identityRefreshing: Boolean = false,
+        /**
+         * Onionmasq plane: single TorClient readiness from [OnionVpnService.onionmasqReady].
+         * arti-mobile [TorControlStatus] stays cold — without this, NEWNYM stays disabled.
+         */
+        onionmasqReady: Boolean = false,
     ): TunnelSnapshot {
         val caps = torEngine.capabilities
         val proxiesLive = phase == TunnelPhase.Connected ||
             phase == TunnelPhase.Validating ||
             phase == TunnelPhase.StartingVpn
-        val ports = runtimePorts?.takeIf { proxiesLive && torRunning }
+        // On onionmasq, "torRunning" in the snapshot means the data-plane TorClient is live,
+        // not arti-mobile ProcessManager.
+        val engineLive = torRunning || onionmasqReady
+        val ports = runtimePorts?.takeIf { proxiesLive && engineLive }
         val built = if (liveBuiltCircuits >= 0) liveBuiltCircuits else torStatus.builtCircuits
         val streams = if (liveStreamCount >= 0) liveStreamCount else torStatus.streamCount
-        val runtimeReady = torRunning && (
-            torStatus.bootstrapProgress >= 100 ||
-                torStatus.circuitEstablished ||
-                torStatus.connected
-            )
+        val runtimeReady = when {
+            onionmasqReady -> true
+            else -> torRunning && (
+                torStatus.bootstrapProgress >= 100 ||
+                    torStatus.circuitEstablished ||
+                    torStatus.connected
+                )
+        }
         return TunnelSnapshot(
             phase = phase,
             killSwitchEnabled = true,
-            torRunning = torRunning,
+            torRunning = engineLive,
             dnsCryptRunning = dnsCryptRunning,
             vpnEstablished = vpnEstablished,
             validations = validations,
             lastError = lastError,
             throughputText = if (phase == TunnelPhase.Connected) throughputText else "",
             torEngine = torEngine,
-            torBootstrapProgress = torStatus.bootstrapProgress,
-            torBootstrapSummary = torStatus.bootstrapSummary,
+            torBootstrapProgress = if (onionmasqReady && torStatus.bootstrapProgress <= 0) {
+                100
+            } else {
+                torStatus.bootstrapProgress
+            },
+            torBootstrapSummary = torStatus.bootstrapSummary.ifBlank {
+                if (onionmasqReady) "onionmasq ready_for_traffic" else ""
+            },
             torControlConnected = caps.classicControlPlane && torStatus.connected,
             torRuntimeReady = runtimeReady,
             torControlPlaneAvailable = caps.classicControlPlane && torStatus.connected,
             torBuiltCircuits = if (caps.circuitInspection) built else 0,
             torCircuitEstablished = torStatus.circuitEstablished ||
                 (caps.circuitInspection && built > 0) ||
-                (torEngine == TorEngine.ARTI && runtimeReady),
+                (torEngine == TorEngine.ARTI && runtimeReady) ||
+                onionmasqReady,
             torVersion = torStatus.torVersion.ifBlank {
-                if (torEngine == TorEngine.ARTI) "arti-mobile" else ""
+                when {
+                    onionmasqReady -> "onionmasq"
+                    torEngine == TorEngine.ARTI -> "arti-mobile"
+                    else -> ""
+                }
             },
             torStreamCount = if (caps.circuitInspection) streams else 0,
-            torNetworkLive = torStatus.networkLive || (torEngine == TorEngine.ARTI && runtimeReady),
+            torNetworkLive = torStatus.networkLive ||
+                (torEngine == TorEngine.ARTI && runtimeReady) ||
+                onionmasqReady,
             torDormant = if (caps.dormantSignals) torStatus.dormant else false,
             torEntryGuards = if (caps.classicControlPlane) torStatus.entryGuardsSummary else "",
             torLastCircEvent = if (caps.circuitInspection) torStatus.lastCircEvent else "",

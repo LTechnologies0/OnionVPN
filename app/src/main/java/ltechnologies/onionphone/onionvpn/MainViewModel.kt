@@ -123,7 +123,20 @@ class MainViewModel @Inject constructor(
                         enqueueRestartLocked(prefs)
                     }
                     phase == TunnelPhase.Connected -> {
+                        // Live apply without full tunnel restart (Orbot-style SETCONF where possible).
                         orchestrator.applyCircuitTiming(prefs)
+                        withContext(Dispatchers.IO) {
+                            tor.setBridgesLive(prefs.torBridges)
+                            tor.setNodePrefsLive(
+                                prefs.torEntryNodes,
+                                prefs.torExitNodes,
+                                prefs.torExcludeNodes,
+                            )
+                            if (dnsCrypt.isRunning()) {
+                                dnsCrypt.applyPreferences(prefs.dnsCryptServerName, prefs)
+                                    .onFailure { Timber.w(it, "Live DNSCrypt prefs apply failed") }
+                            }
+                        }
                     }
                 }
             }

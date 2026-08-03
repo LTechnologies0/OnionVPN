@@ -7,6 +7,7 @@ import ltechnologies.onionphone.onionvpn.core.model.TunnelPreferences
 import ltechnologies.onionphone.onionvpn.core.model.TunnelRuntimePorts
 import ltechnologies.onionphone.onionvpn.core.model.VpnProfileMode
 import ltechnologies.onionphone.onionvpn.core.vpn.OnionVpnService
+import ltechnologies.onionphone.onionvpn.core.vpn.dns.DnsHostnameCache
 import ltechnologies.onionphone.onionvpn.core.vpn.dns.OnionAutomapAllocator
 import timber.log.Timber
 
@@ -72,6 +73,7 @@ internal class TunnelVpnBridge(
 
     fun destroy() {
         OnionAutomapAllocator.clear()
+        DnsHostnameCache.clear()
         context.startService(
             Intent(context, OnionVpnService::class.java).setAction(OnionVpnService.ACTION_DESTROY),
         )
@@ -79,6 +81,7 @@ internal class TunnelVpnBridge(
 
     fun stop() {
         OnionAutomapAllocator.clear()
+        DnsHostnameCache.clear()
         context.startService(
             Intent(context, OnionVpnService::class.java).setAction(OnionVpnService.ACTION_STOP),
         )

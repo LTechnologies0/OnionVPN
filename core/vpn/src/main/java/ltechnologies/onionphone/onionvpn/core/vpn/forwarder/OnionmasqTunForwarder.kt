@@ -1,6 +1,10 @@
 package ltechnologies.onionphone.onionvpn.core.vpn.forwarder
 
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.ParcelFileDescriptor
@@ -24,6 +28,7 @@ import ltechnologies.onionphone.onionvpn.core.vpn.OnionVpnService
 import ltechnologies.onionphone.onionvpn.core.vpn.profile.TunForwarder
 import ltechnologies.onionphone.onionvpn.core.vpn.onionmasq.OnionmasqNativeGate
 import ltechnologies.onionphone.onionvpn.core.vpn.onionmasq.TorNativeAppUids
+import org.torproject.onionmasq.ConnectivityHandler
 import org.torproject.onionmasq.OnionMasq
 import org.torproject.onionmasq.events.BootstrapEvent
 import org.torproject.onionmasq.events.ClosedConnectionEvent
@@ -67,6 +72,13 @@ class OnionmasqTunForwarder(
     private var omEnd: ParcelFileDescriptor? = null
     private val mainHandler = Handler(Looper.getMainLooper())
     private var eventObserver: Observer<OnionmasqEvent>? = null
+    /** Tor VPN parity: drives OnionMasqJni.setInternetConnectivity on uplink changes. */
+    private var connectivityHandler: ConnectivityHandler? = null
+    /**
+     * Tor VPN [AppQueryReceiver] parity: refresh Tor-over-Tor UID excludes when packages
+     * are installed/removed (setExcludedUids was previously one-shot at start).
+     */
+    private var packageReceiver: BroadcastReceiver? = null
 
     override fun start(
         tunFd: ParcelFileDescriptor,
@@ -92,8 +104,23 @@ class OnionmasqTunForwarder(
                 )
             }
             // Bind protect() after init — Tor VPN order (init then bindVPNService).
+            // Wait for binder: early protect() with null binder returns false → Arti uplink fail.
             runCatching { OnionMasq.bindVPNService(OnionVpnService::class.java) }
                 .onFailure { Timber.w(it, "OnionMasq.bindVPNService after init failed") }
+            if (!OnionMasq.awaitProtectBinder(5_000L)) {
+                Timber.e("OnionMasq protect binder not ready after 5s — aborting start")
+                throw TunnelFailure.ForwarderDead(
+                    "OnionMasq protect() binder not connected (VpnService bind timeout)",
+                )
+            }
+            // Tor VPN: ConnectivityHandler.register() while proxy lifetime is active.
+            runCatching {
+                connectivityHandler?.unregister()
+                val handler = ConnectivityHandler(context.applicationContext)
+                handler.register()
+                connectivityHandler = handler
+                Timber.i("onionmasq ConnectivityHandler registered")
+            }.onFailure { Timber.w(it, "ConnectivityHandler.register failed") }
 
             try {
                 val pair = HevSocks5TunForwarder.createPacketSocketPair()
@@ -128,13 +155,8 @@ class OnionmasqTunForwarder(
                     runCatching { OnionMasq.setCountryCode(cc) }
                         .onFailure { Timber.w(it, "setCountryCode($cc) failed") }
                 }
-                runCatching {
-                    val uids = TorNativeAppUids.resolve(context)
-                    if (uids.isNotEmpty()) {
-                        OnionMasq.setExcludedUids(uids)
-                        Timber.i("onionmasq setExcludedUids count=%d", uids.size)
-                    }
-                }.onFailure { Timber.w(it, "setExcludedUids failed") }
+                refreshExcludedUids()
+                registerPackageReceiver()
 
                 running.set(true)
                 val bridges = bridgeLines?.takeIf { it.isNotBlank() }
@@ -190,6 +212,10 @@ class OnionmasqTunForwarder(
         OpTrace.debug("onionmasq", "stop")
         running.set(false)
         detachEventObserver()
+        unregisterPackageReceiver()
+        runCatching { connectivityHandler?.unregister() }
+            .onFailure { Timber.w(it, "ConnectivityHandler.unregister failed") }
+        connectivityHandler = null
         // Ownership gate only — do NOT call OnionMasq.isRunning() here.
         // Pre-init isRunning/closeProxy → OnionmasqMobile::get expect → SIGABRT.
         val owned = proxyOwned.getAndSet(false)
@@ -199,6 +225,8 @@ class OnionmasqTunForwarder(
         } else {
             Timber.d("OnionMasq.stop skipped — proxy not owned (pre-init or never started)")
         }
+        runCatching { OnionMasq.unbindVPNService() }
+            .onFailure { Timber.w(it, "OnionMasq.unbindVPNService failed") }
         dnsMux?.stop()
         dnsMux = null
         worker.getAndSet(null)?.cancel()
@@ -209,6 +237,50 @@ class OnionmasqTunForwarder(
     }
 
     fun isRunning(): Boolean = running.get() && proxyOwned.get()
+
+    private fun refreshExcludedUids() {
+        runCatching {
+            if (!OnionMasq.isInitialized() || !OnionMasq.isRunning()) return
+            val uids = TorNativeAppUids.resolve(context)
+            OnionMasq.setExcludedUids(uids)
+            Timber.i("onionmasq setExcludedUids count=%d", uids.size)
+        }.onFailure { Timber.w(it, "setExcludedUids failed") }
+    }
+
+    private fun registerPackageReceiver() {
+        unregisterPackageReceiver()
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(ctx: Context?, intent: Intent?) {
+                when (intent?.action) {
+                    Intent.ACTION_PACKAGE_ADDED,
+                    Intent.ACTION_PACKAGE_REMOVED,
+                    -> refreshExcludedUids()
+                }
+            }
+        }
+        val filter = IntentFilter().apply {
+            addAction(Intent.ACTION_PACKAGE_ADDED)
+            addAction(Intent.ACTION_PACKAGE_REMOVED)
+            addDataScheme("package")
+        }
+        runCatching {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                context.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
+            } else {
+                @Suppress("UnspecifiedRegisterReceiverFlag")
+                context.registerReceiver(receiver, filter)
+            }
+            packageReceiver = receiver
+            Timber.i("onionmasq package exclude receiver registered")
+        }.onFailure { Timber.w(it, "package exclude receiver register failed") }
+    }
+
+    private fun unregisterPackageReceiver() {
+        val receiver = packageReceiver ?: return
+        packageReceiver = null
+        runCatching { context.unregisterReceiver(receiver) }
+            .onFailure { Timber.w(it, "package exclude receiver unregister failed") }
+    }
 
     private fun attachEventObserver() {
         val observer = Observer<OnionmasqEvent> { event ->
@@ -237,7 +309,9 @@ class OnionmasqTunForwarder(
             }
         }
         if (!attached.await(2, TimeUnit.SECONDS)) {
-            Timber.w("onionmasq event observer attach timed out — bootstrap may be missed")
+            throw TunnelFailure.ForwarderDead(
+                "onionmasq event observer attach timed out — BootstrapEvent would be missed",
+            )
         }
     }
 

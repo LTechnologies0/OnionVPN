@@ -12,23 +12,38 @@ Works with C Tor and Arti (arti-mobile). DNSCrypt divert on TunDnsMux; upstream 
 
 Tor Project **onionmasq**: TUN packets (via TunDnsMux socketpair) → smoltcp → **arti-client** in-process.
 
+**Single TorClient** (Tor VPN parity — no parallel arti-mobile):
+
+```
+Blocking TUN (kill-switch)
+  → Connected TUN → TunDnsMux → socketpair → OnionMasq.start(fd)
+       → wait BootstrapEvent ready_for_traffic ∧ pct≥100 (sticky; Tor VPN gate)
+       → SOCKS sidecar (same TorClient; IsolationToken by user; password allowlist)
+  → SocksDnsBootstrapRelay :torDnsPort → sidecar → 1.1.1.1:53 (TCP DNS, 4 workers)
+  → DNSCrypt proxy=@sidecar bootstrap=@relay
+  → Validating → Connected UI
+```
+
 ```
 Apps → TUN → TunDnsMux → DNSCrypt (UDP/53)
                       └→ socketpair → OnionMasq.start(fd) → Arti TorClient
-DNSCrypt upstream → SOCKS IsolationToken
-  • target: onionmasq SOCKS sidecar (same TorClient; getSocksSidecarPort)
-  • interim: arti-mobile SOCKS + DNSPort (dual TorClient until orchestrator cutover)
+DNSCrypt / probes → onionmasq SOCKS sidecar (dnscrypt[-nN] / probe + role passwords)
 ```
+
+No live MaxCircuitDirtiness on onionmasq (Tor VPN same gap) — UI hides Arti Ext timing;
+exit country via `setCountryCode` + NEWNYM via `refreshCircuits` (~10.5s rate limit).
 
 ### Requirements
 
 1. Settings → Tor engine = **Arti** (selecting Arti auto-picks onionmasq when the `.so` exists)
 2. Native `libonionmasq_mobile.so` under `jniLibs` (build: [native/onionmasq/README.md](../native/onionmasq/README.md))
 3. `OnionVpnService` implements `ISocketProtect` + `OnionMasq.bindVPNService` for `protect()`
+4. Patched SOCKS sidecar (`native/onionmasq/socks-sidecar.patch`)
 
 ### Observability (Tor VPN parity)
 
 - `BootstrapEvent` → tunnel ready (`OnionVpnService.onionmasqReady`)
+- `ConnectivityHandler` → `setInternetConnectivity` (uplink dormancy)
 - `NewConnectionEvent` / hops → `OnionmasqCircuitRepository` + Status → **App circuits (onionmasq)**
 - `refreshCircuits()` / `refreshCircuitsForApp(uid)` → New identity / per-app NEWNYM
 - `NewDirectoryEvent.relaysByCountry` → exit-country catalog hint in Settings
@@ -37,7 +52,7 @@ DNSCrypt upstream → SOCKS IsolationToken
 
 ### Anti-leak
 
-OnionVPN keeps fail-closed routing (no Tor VPN `allowFamily`). Own package stays disallowed from the VPN; onionmasq/Arti sockets use clearnet uplink via `protect`. Tor-native apps (Orbot, Tor Browser, …) are `setExcludedUids` so they are not double-proxied.
+OnionVPN keeps fail-closed routing (no Tor VPN `allowFamily`). Own package stays disallowed from the VPN; onionmasq/Arti sockets use clearnet uplink via `protect`. Tor-native apps (Orbot, Tor Browser, …) are `setExcludedUids` so they are not double-proxied. DNSCrypt bootstrap never uses system DNS (`SocksDnsBootstrapRelay` over sidecar).
 
 ### Lifecycle (native abort hazard)
 
@@ -55,6 +70,7 @@ Rules:
    `native/onionmasq/safe-uninit-jni.patch` for native-side try_get.
 4. TunDnsMux / UID forwarder must `Os.dup` before wrapping the same FD in both FIS and FOS.
 5. Arti JNI must never `.expect` / `panic!` on the boundary (source under `third_party/arti-mobile-ex`).
+6. `awaitProtectBinder` before `OnionMasq.start`; `ConnectivityHandler.register` for the proxy lifetime.
 
 ### Capability matrix
 
@@ -62,4 +78,4 @@ Rules:
 |----------------|-------------|--------|----------------|
 | C Tor + hev | ControlPort | SIGNAL NEWNYM | SessionGroup port |
 | Arti + hev | limited | arti-mobile restart | ArtiSocksRoleMux |
-| Arti + onionmasq | onionmasq events | `refreshCircuits*` | sidecar (interim: arti-mobile) |
+| Arti + onionmasq | onionmasq events | `refreshCircuits*` | SOCKS sidecar (single TorClient) |

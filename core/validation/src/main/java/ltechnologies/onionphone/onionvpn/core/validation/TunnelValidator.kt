@@ -6,6 +6,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import ltechnologies.onionphone.onionvpn.core.model.DnsResolverMode
 import ltechnologies.onionphone.onionvpn.core.model.TorEngine
+import ltechnologies.onionphone.onionvpn.core.model.TunDataPlane
 import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
 import ltechnologies.onionphone.onionvpn.core.model.TunnelRuntimePorts
 import ltechnologies.onionphone.onionvpn.core.model.ValidationCheck
@@ -19,6 +20,7 @@ import ltechnologies.onionphone.onionvpn.core.validation.path.ExitIpValidator
 import ltechnologies.onionphone.onionvpn.core.validation.path.TorPathValidator
 import ltechnologies.onionphone.onionvpn.core.vpn.OnionVpnService
 import ltechnologies.onionphone.onionvpn.core.vpn.forwarder.LeakPacketFilter
+import ltechnologies.onionphone.onionvpn.core.vpn.onionmasq.OnionmasqSocksSidecar
 import ltechnologies.onionphone.onionvpn.core.vpn.profile.VpnProfileBuilder
 
 /**
@@ -52,6 +54,7 @@ object TunnelValidator {
                     ),
                 )
                 if (runtimePorts != null) {
+                    val plane = OnionVpnService.vpnDataPlane.value
                     OpTrace.trace("validate", "tor_path")
                     addAll(
                         TorPathValidator.validate(
@@ -70,9 +73,14 @@ object TunnelValidator {
                     }
                     OpTrace.trace("validate", "dnscrypt_path")
                     addAll(DnsCryptPathValidator.validate(listenPort = runtimePorts.dnsCryptListenPort))
-                    add(validateUidForwarderWiring(runtimePorts))
+                    if (plane == TunDataPlane.ONIONMASQ) {
+                        add(validateOnionmasqPlane(runtimePorts))
+                    } else {
+                        add(validateUidForwarderWiring(runtimePorts))
+                        // HEV yaml only — stale mapdns must not hard-fail onionmasq.
+                        add(validateDnsModeLeakProperties(dnsResolverMode, hevConfigFile))
+                    }
                     add(validateDnsCryptTorWiring(dnsCryptConfigFile, runtimePorts, torEngine))
-                    add(validateDnsModeLeakProperties(dnsResolverMode, hevConfigFile))
                     add(validateUdpBlackholePolicy())
                 } else {
                     addAll(TorPathValidator.validate())
@@ -155,9 +163,13 @@ object TunnelValidator {
                 ),
             )
             addAll(DnsCryptPathValidator.validate(listenPort = runtimePorts.dnsCryptListenPort))
-            add(validateUidForwarderWiring(runtimePorts))
+            if (OnionVpnService.vpnDataPlane.value == TunDataPlane.ONIONMASQ) {
+                add(validateOnionmasqPlane(runtimePorts))
+            } else {
+                add(validateUidForwarderWiring(runtimePorts))
+                add(validateDnsModeLeakProperties(dnsResolverMode, hevConfigFile))
+            }
             add(validateDnsCryptTorWiring(dnsCryptConfigFile, runtimePorts))
-            add(validateDnsModeLeakProperties(dnsResolverMode, hevConfigFile))
             if (vpnEstablished) {
                 addAll(
                     AndroidVpnInspector.inspect(
@@ -216,6 +228,8 @@ object TunnelValidator {
             }
             // UID SOCKS / forwarder wiring broken → TUN packets won't reach Tor.
             "uid.forwarder.wiring", "hev.config.missing", "hev.forwarder.wiring" -> true
+            // onionmasq data plane not ready / sidecar missing.
+            "onionmasq.plane.wiring" -> true
             // DNSCrypt not actually over Tor → clearnet DNS from VPN-excluded process.
             "dnscrypt.tor.wiring",
             "dnscrypt.tor.wiring.missing",
@@ -242,12 +256,37 @@ object TunnelValidator {
             "android.vpn.always_on" -> true
             // VPN iface shows a public/ISP address (not OnionVPN virtual gateway).
             "vpn.address.not.public" -> true
+            // Hard-gate itself timed out / threw — never promote Connected on SOCKS TCP alone.
+            "validation.hard_gate" -> true
             // Soft: validation.timeout / DNSCrypt listener / DNSPort / SOCKS5A / Wi‑Fi blip.
             // Timeout alone must not Block when Tor SOCKS still answers (ExitIp can exceed budget).
             else -> false
         }
     }
 
+
+    /**
+     * onionmasq plane: BootstrapEvent ready + SOCKS sidecar == DNSCrypt/probe ports.
+     */
+    private fun validateOnionmasqPlane(ports: TunnelRuntimePorts): ValidationCheck {
+        val ready = OnionVpnService.onionmasqReady.value
+        val alive = OnionVpnService.tunForwarderAlive.value
+        val sidecar = OnionmasqSocksSidecar.socksPortOrZero()
+        val dnsOk = OnionVpnService.hevDnsCryptPort.value == ports.dnsCryptListenPort
+        val sidecarOk = sidecar > 0 &&
+            sidecar == ports.torDnsCryptSocksPort &&
+            sidecar == ports.torProbeSocksPort
+        val ok = ready && alive && dnsOk && sidecarOk
+        return ValidationCheck(
+            id = "onionmasq.plane.wiring",
+            label = "onionmasq TUN ↔ SOCKS sidecar (single TorClient)",
+            status = if (ok) ValidationStatus.Pass else ValidationStatus.Fail,
+            detail = "ready=$ready alive=$alive sidecar=$sidecar " +
+                "dnsCryptSocks=${ports.torDnsCryptSocksPort} probe=${ports.torProbeSocksPort} " +
+                "dnsListenOk=$dnsOk",
+            tripsKillSwitch = true,
+        )
+    }
 
     /**
      * Connected data plane: hev → SocksUidBridge → Tor apps SocksPort (per-UID auth).
@@ -299,22 +338,26 @@ object TunnelValidator {
                 tripsKillSwitch = true,
             )
 
-        val proxy =
-            "socks5://${TunnelEndpoints.SOCKS_DNSCRYPT_USER}:${TunnelEndpoints.SOCKS_DNSCRYPT_PASS}" +
-                "@${TunnelEndpoints.LOOPBACK}:${ports.torDnsCryptSocksPort}"
+        // Proxy user may be `dnscrypt` or `dnscrypt-nN` after onionmasq NEWNYM token rotate.
+        val proxyHostPort =
+            "@${TunnelEndpoints.LOOPBACK}:${ports.torDnsCryptSocksPort}"
         val bootstrap = "${TunnelEndpoints.LOOPBACK}:${ports.torDnsPort}"
         val listen = "${TunnelEndpoints.LOOPBACK}:${ports.dnsCryptListenPort}"
-        val proxyOk = config.contains("proxy = '$proxy'")
+        val proxyOk = config.contains("proxy = 'socks5://") &&
+            config.contains(proxyHostPort) &&
+            config.contains(":${TunnelEndpoints.SOCKS_DNSCRYPT_PASS}@")
         val bootstrapOk = config.contains("bootstrap_resolvers = ['$bootstrap']")
         val netprobeOk = config.contains("netprobe_address = '$bootstrap'")
         val listenOk = config.contains("listen_addresses = ['$listen']")
         val ignoreSystem = config.contains("ignore_system_dns = true")
         val forceTcp = config.contains("force_tcp = true")
         val ok = proxyOk && bootstrapOk && netprobeOk && listenOk && ignoreSystem && forceTcp
-        val socksLabel = if (torEngine.capabilities.multiSocksSessionGroups) {
-            "dedicated Tor SocksPort"
-        } else {
-            "Tor SOCKS (shared on Arti)"
+        val socksLabel = when {
+            OnionVpnService.vpnDataPlane.value == TunDataPlane.ONIONMASQ ->
+                "onionmasq SOCKS sidecar"
+            torEngine.capabilities.multiSocksSessionGroups ->
+                "dedicated Tor SocksPort"
+            else -> "Tor SOCKS (shared on Arti)"
         }
 
         return ValidationCheck(
@@ -355,6 +398,17 @@ object TunnelValidator {
                 )
             },
             when {
+                OnionVpnService.vpnDataPlane.value == TunDataPlane.ONIONMASQ -> {
+                    val ready = OnionVpnService.onionmasqReady.value
+                    ValidationCheck(
+                        id = "tor.arti.status",
+                        label = "onionmasq TorClient (no arti-mobile)",
+                        status = if (ready) ValidationStatus.Pass else ValidationStatus.Fail,
+                        detail = "single TorClient via onionmasq ready=$ready " +
+                            "sidecar=${OnionmasqSocksSidecar.socksPortOrZero()}",
+                        tripsKillSwitch = true,
+                    )
+                }
                 torEngine == TorEngine.ARTI && torConfig != null -> {
                     TorPathValidator.validateArtiStatusContent(
                         torConfig,

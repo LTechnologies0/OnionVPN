@@ -55,7 +55,11 @@ internal class ArtiRuntime(
     fun isRunning(): Boolean = running
 
     /**
-     * Starts Arti SOCKS+DNS on [ports], waits until listeners accept, then returns.
+     * Starts Arti SOCKS+DNS on [ports], waits until the primary SOCKS listener accepts.
+     *
+     * Does **not** wait for `ready_for_traffic` / directory bootstrap — callers that
+     * start DNSCrypt (TorProcessManager.startArti) must wait for that separately.
+     * SOCKS binds before consensus; DNSPort answers only after enough dir info.
      *
      * Bridge lines (when set) are passed to Arti with managed Lyrebird and/or Conjure
      * PT paths written under state_dir for native TransportConfig.

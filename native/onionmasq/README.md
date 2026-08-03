@@ -23,10 +23,12 @@ Java API is vendored as Gradle module `:third_party:onionmasq-android`.
 App DNS still goes TunDnsMux → DNSCrypt. Upstream SOCKS:
 
 1. **onionmasq SOCKS sidecar** (patched `onionmasq-mobile`) — same TorClient,
-   IsolationToken by SOCKS username (`dnscrypt` / `probe`). JNI:
-   `OnionMasq.getSocksSidecarPort()`.
-2. **Interim cold-start:** arti-mobile SOCKS + DNSPort until the orchestrator
-   starts DNSCrypt after onionmasq is ready (`OnionmasqSocksSidecar.INTERIM_USES_ARTI_MOBILE`).
+   IsolationToken by SOCKS username (`dnscrypt` / `dnscrypt-nN` / `probe`).
+   Password allowlist matches `TunnelEndpoints` (`resolver` / `check`); auth
+   failure returns RFC1929 status `0x01`. JNI: `OnionMasq.getSocksSidecarPort()`.
+2. **Cutover (single TorClient):** DNSCrypt starts after onionmasq ready against
+   the sidecar (`INTERIM_USES_ARTI_MOBILE = false`). Bootstrap DNS uses
+   `SocksDnsBootstrapRelay` over the sidecar — no parallel arti-mobile.
 
 Re-apply OnionVPN patches after a clean onionmasq clone:
 
