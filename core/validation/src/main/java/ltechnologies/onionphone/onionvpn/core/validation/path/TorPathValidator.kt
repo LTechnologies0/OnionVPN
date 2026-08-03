@@ -18,10 +18,21 @@ object TorPathValidator {
         socksHost: String = TunnelEndpoints.LOOPBACK,
         socksPort: Int = TunnelEndpoints.TOR_SOCKS_PORT,
         dnsPort: Int = TunnelEndpoints.TOR_DNS_PORT,
+        dnsPortIsBootstrapRelay: Boolean = false,
     ): List<ValidationCheck> = withContext(Dispatchers.IO) {
+        val dnsCheck = if (dnsPortIsBootstrapRelay) {
+            checkDnsPort(
+                "tor.dns.bootstrap_relay",
+                "DNSCrypt bootstrap relay (UDP→DoH via SOCKS)",
+                socksHost,
+                dnsPort,
+            )
+        } else {
+            checkDnsPort("tor.dnsport", "Tor DNSPort reachable (UDP)", socksHost, dnsPort)
+        }
         listOf(
             checkTcp("tor.socks", "Tor SOCKS reachable", socksHost, socksPort),
-            checkDnsPort("tor.dnsport", "Tor DNSPort reachable (UDP)", socksHost, dnsPort),
+            dnsCheck,
             checkRemoteDns(socksHost, socksPort),
         ).also { checks ->
             checks.filter { it.status == ValidationStatus.Fail }.forEach { check ->

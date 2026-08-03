@@ -177,10 +177,13 @@ object VpnProfileBuilder {
                     Timber.w("INCLUDE list empty — falling back to ALL (+ self-exclude + BYPASS)")
                     excludeOwnPackage(service, builder)
                     disallowTorNativeBypass(service, builder)
+                    maybeDisallowAdbClearnet(service, builder, preferences)
                     return
                 }
                 // Under lockdown this path is unreachable (establish hard-gates first).
                 // Omit BYPASS from allow-list (clearnet / own Tor) — do not also disallow.
+                // Shell/ADB is never on the allow-list (omitted ⇒ clearnet when lockdown off).
+                // Cannot mix addDisallowedApplication here — ADB opt-in is ALL/EXCLUDE only.
                 packages.filterNot { TorNativeAppUids.isBypassPackage(it) }.forEach { pkg ->
                     runCatching { builder.addAllowedApplication(pkg) }
                         .onFailure { Timber.w(it, "Skip allow VPN for $pkg") }
@@ -194,10 +197,12 @@ object VpnProfileBuilder {
                     runCatching { builder.addDisallowedApplication(pkg) }
                         .onFailure { Timber.w(it, "Skip disallow VPN for $pkg") }
                 }
+                maybeDisallowAdbClearnet(service, builder, preferences)
             }
             VpnAppRoutingMode.ALL -> {
                 excludeOwnPackage(service, builder)
                 disallowTorNativeBypass(service, builder)
+                maybeDisallowAdbClearnet(service, builder, preferences)
             }
         }
     }
@@ -207,6 +212,23 @@ object VpnProfileBuilder {
         TorNativeAppUids.installedBypassPackages(service).forEach { pkg ->
             runCatching { builder.addDisallowedApplication(pkg) }
                 .onFailure { Timber.w(it, "Skip disallow Tor-native BYPASS for $pkg") }
+        }
+    }
+
+    /**
+     * Opt-in only: exclude wireless ADB from the VPN. Default prefs leave shell on-tunnel.
+     * Never unconditional — that would be a permanent clearnet ADB leak.
+     */
+    private fun maybeDisallowAdbClearnet(
+        service: VpnService,
+        builder: VpnService.Builder,
+        preferences: TunnelPreferences,
+    ) {
+        if (!preferences.allowAdbClearnetLeak) return
+        AdbVpnBypass.disallowPackages(service.packageManager).forEach { pkg ->
+            runCatching { builder.addDisallowedApplication(pkg) }
+                .onFailure { Timber.w(it, "Skip disallow ADB clearnet for $pkg") }
+                .onSuccess { Timber.w("ADB clearnet leak enabled — disallowed %s from VPN", pkg) }
         }
     }
 

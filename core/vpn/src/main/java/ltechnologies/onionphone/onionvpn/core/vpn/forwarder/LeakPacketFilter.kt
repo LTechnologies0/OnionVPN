@@ -39,6 +39,8 @@ object LeakPacketFilter {
         NotUdp,
         Multicast,
         LinkLocal,
+        /** RFC1918 / CGNAT / loopback / VpnTun / documentation — never via Tor SOCKS. */
+        PrivateLan,
         Icmp,
         QuicHttp3,
         StunWebrtc,
@@ -198,6 +200,9 @@ object LeakPacketFilter {
         if (version != 4) return BlackholeReason.GenericUdp
         if (isMulticastOrBroadcastV4(packet)) return BlackholeReason.Multicast
         if (isLinkLocalV4(packet)) return BlackholeReason.LinkLocal
+        if (isPrivateLanBlackholeDest(packet) && !isDnsUdpPort53(packet, length)) {
+            return BlackholeReason.PrivateLan
+        }
         val proto = packet[9].toInt() and 0xff
         when (proto) {
             PROTO_ICMP, PROTO_IGMP, PROTO_ICMPV6 -> return BlackholeReason.Icmp
@@ -225,7 +230,8 @@ object LeakPacketFilter {
             BlackholeReason.QuicHttp3 -> dropQuic.incrementAndGet()
             BlackholeReason.StunWebrtc -> dropStun.incrementAndGet()
             BlackholeReason.Ipv6, BlackholeReason.Icmp, BlackholeReason.Multicast,
-            BlackholeReason.LinkLocal, BlackholeReason.NotUdp, BlackholeReason.TcpDns,
+            BlackholeReason.LinkLocal, BlackholeReason.PrivateLan,
+            BlackholeReason.NotUdp, BlackholeReason.TcpDns,
             -> dropNonUdp.incrementAndGet()
             else -> dropOtherUdp.incrementAndGet()
         }
@@ -240,6 +246,15 @@ object LeakPacketFilter {
      * @return null if the packet may continue toward hev; otherwise blackhole reason.
      */
     fun blackholeBeforeTorTcp(packet: ByteArray, length: Int): BlackholeReason? {
+        if (length >= 20) {
+            val version = (packet[0].toInt() ushr 4) and 0x0f
+            if (version == 4 &&
+                isPrivateLanBlackholeDest(packet) &&
+                !isDnsUdpPort53(packet, length)
+            ) {
+                return BlackholeReason.PrivateLan
+            }
+        }
         if (shouldDropEarly(packet, length)) {
             return if (length >= 20) classifyBlackholeReason(packet, length) else BlackholeReason.GenericUdp
         }
@@ -253,9 +268,10 @@ object LeakPacketFilter {
     }
 
     /**
-         * Early drop before DNS divert / firewall.
-         * IPv4/IPv6 UDP/53 is NOT dropped here (caller diverts via TunDnsMux).
-         */
+     * Early drop before DNS divert / firewall.
+     * IPv4/IPv6 UDP/53 is NOT dropped here (caller may divert via TunDnsMux first).
+     * Private / CGNAT / loopback / VpnTun / documentation IPv4 TCP and non-DNS UDP drop.
+     */
     fun shouldDropEarly(packet: ByteArray, length: Int): Boolean {
         if (length < 20) return true
         val version = (packet[0].toInt() ushr 4) and 0x0f
@@ -265,7 +281,14 @@ object LeakPacketFilter {
                 if (isLinkLocalV4(packet)) return true
                 val proto = packet[9].toInt() and 0xff
                 when (proto) {
-                    PROTO_TCP, PROTO_UDP -> false
+                    PROTO_TCP, PROTO_UDP -> {
+                        if (TorNetPolicy.mustBlackholeIpv4Destination(ipv4Int(packet, 16))) {
+                            // DivertDns UDP/53: caller may divert first — do not drop here.
+                            !(proto == PROTO_UDP && isDnsUdpPort53(packet, length))
+                        } else {
+                            false
+                        }
+                    }
                     PROTO_ICMP, PROTO_IGMP, PROTO_ICMPV6 -> true
                     else -> true
                 }
@@ -396,6 +419,18 @@ object LeakPacketFilter {
 
     private fun isLinkLocalV4(packet: ByteArray): Boolean =
         TorNetPolicy.classifyIpv4(ipv4Int(packet, 16)) == TorNetPolicy.IpClass.LinkLocal
+
+    /** RFC1918 / CGNAT / loopback / VpnTun / documentation (not multicast/link-local). */
+    private fun isPrivateLanBlackholeDest(packet: ByteArray): Boolean =
+        when (TorNetPolicy.classifyIpv4(ipv4Int(packet, 16))) {
+            TorNetPolicy.IpClass.PrivateRfc1918,
+            TorNetPolicy.IpClass.Cgnat,
+            TorNetPolicy.IpClass.Loopback,
+            TorNetPolicy.IpClass.VpnTun,
+            TorNetPolicy.IpClass.Documentation,
+            -> true
+            else -> false
+        }
 
     private fun ipv4Int(packet: ByteArray, offset: Int): Int =
         ((packet[offset].toInt() and 0xff) shl 24) or

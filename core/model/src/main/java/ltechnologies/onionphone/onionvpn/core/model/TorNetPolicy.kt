@@ -140,14 +140,18 @@ object TorNetPolicy {
     }
 
     /**
-     * Destinations that must never leave the device as clearnet (multicast, link-local).
-     * Globally routable / private / Automap still go through Tor SOCKS.
+     * Destinations that must never reach Tor SOCKS / hev / onionmasq (LAN, CGNAT,
+     * loopback, VPN TUN, documentation, multicast, link-local).
+     * Tor Automap virtuals and globally routable addresses still go through Tor SOCKS.
      */
     fun mustBlackholeIpv4Destination(ipInt: Int): Boolean =
         when (classifyIpv4(ipInt)) {
             IpClass.Multicast, IpClass.Broadcast, IpClass.LinkLocal, IpClass.Unspecified,
             IpClass.Invalid,
+            IpClass.PrivateRfc1918, IpClass.Cgnat, IpClass.Loopback, IpClass.VpnTun,
+            IpClass.Documentation,
             -> true
+            // TorAutomap + GloballyRoutable → false (torrify)
             else -> false
         }
 

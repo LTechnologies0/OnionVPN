@@ -877,7 +877,15 @@ class TunnelForegroundService : Service() {
         )
         if (effectivePlane != preferences.tunDataPlane) {
             preferences = preferences.copy(tunDataPlane = effectivePlane)
-            Timber.w("TUN data plane coerced to %s", effectivePlane)
+            // Persist so Settings / next start stay honest (e.g. LITTLE_T × ONIONMASQ → HEV).
+            runCatching {
+                preferencesStore.update { it.copy(tunDataPlane = effectivePlane) }
+            }.onFailure { Timber.w(it, "Failed to persist coerced TUN data plane") }
+            Timber.w(
+                "TUN data plane coerced to %s (engine=%s) — prefs updated",
+                effectivePlane,
+                preferences.torEngine,
+            )
         }
 
         // ONIONMASQ: single TorClient inside onionmasq — skip arti-mobile entirely.
@@ -1010,6 +1018,23 @@ class TunnelForegroundService : Service() {
                     listenPort = ports.torDnsPort,
                     socksPort = sidecar,
                 )
+            }
+            var relayReady = false
+            repeat(5) { attempt ->
+                if (socksDnsBootstrapRelay?.probeOnce(timeoutMs = 350) == true) {
+                    relayReady = true
+                    return@repeat
+                }
+                Timber.d("DoH bootstrap relay probe miss attempt=%d/5", attempt + 1)
+                delay(400)
+            }
+            if (!relayReady) {
+                failDuringStart(
+                    message = "DoH bootstrap relay not ready (UDP→SOCKS→DoH) — fail-closed",
+                    fromValidation = false,
+                    stopTorProcesses = false,
+                )
+                return
             }
             // Point DNSCrypt + probes at sidecar (same TorClient as TUN).
             activePorts = ports.copy(
@@ -1846,6 +1871,7 @@ class TunnelForegroundService : Service() {
         const val EXTRA_NO_LOGS = "no_logs"
         const val EXTRA_VPN_APP_MODE = "vpn_app_mode"
         const val EXTRA_VPN_APP_PACKAGES = "vpn_app_packages"
+        const val EXTRA_ALLOW_ADB_CLEARNET_LEAK = "allow_adb_clearnet_leak"
         const val EXTRA_TUN_DATA_PLANE = "tun_data_plane"
 
         /**
@@ -1912,6 +1938,7 @@ class TunnelForegroundService : Service() {
                 ?.filter { it.isNotEmpty() }
                 ?.toSet()
                 ?: emptySet(),
+            allowAdbClearnetLeak = intent.getBooleanExtra(EXTRA_ALLOW_ADB_CLEARNET_LEAK, false),
             tunDataPlane = TunDataPlane.fromPreference(intent.getStringExtra(EXTRA_TUN_DATA_PLANE)),
         )
     }

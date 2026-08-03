@@ -58,6 +58,7 @@ class TunnelPreferencesStore @Inject constructor(
         val noLogs = booleanPreferencesKey("no_logs")
         val vpnAppMode = stringPreferencesKey("vpn_app_mode")
         val vpnAppPackages = stringPreferencesKey("vpn_app_packages")
+        val allowAdbClearnetLeak = booleanPreferencesKey("allow_adb_clearnet_leak")
         val tunDataPlane = stringPreferencesKey("tun_data_plane")
     }
 
@@ -102,6 +103,7 @@ class TunnelPreferencesStore @Inject constructor(
             prefs[Keys.noLogs] = next.noLogsEnabled
             prefs[Keys.vpnAppMode] = next.vpnAppRoutingMode.name
             prefs[Keys.vpnAppPackages] = next.vpnAppPackages.sorted().joinToString("\n")
+            prefs[Keys.allowAdbClearnetLeak] = next.allowAdbClearnetLeak
             prefs[Keys.tunDataPlane] = next.tunDataPlane.name
         }
     }
@@ -148,6 +150,7 @@ class TunnelPreferencesStore @Inject constructor(
             ?.filter { it.isNotEmpty() }
             ?.toSet()
             ?: emptySet(),
+        allowAdbClearnetLeak = this[Keys.allowAdbClearnetLeak] ?: false,
         tunDataPlane = TunDataPlane.fromPreference(this[Keys.tunDataPlane]),
     )
 }

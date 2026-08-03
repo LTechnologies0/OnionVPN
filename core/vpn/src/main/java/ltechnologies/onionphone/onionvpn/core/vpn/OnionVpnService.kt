@@ -157,6 +157,7 @@ class OnionVpnService : VpnService() {
             ?: ltechnologies.onionphone.onionvpn.core.model.TorEngine.LITTLE_T
         val bridgeLines = intent.getStringExtra(EXTRA_BRIDGE_LINES)
         val exitCountry = intent.getStringExtra(EXTRA_EXIT_COUNTRY)
+        val allowAdbClearnetLeak = preferences.allowAdbClearnetLeak
 
         // Signal waiters that a rebind is in progress without dropping routes yet.
         isRebinding.value = true
@@ -193,6 +194,7 @@ class OnionVpnService : VpnService() {
                             torEngine = torEngine,
                             bridgeLines = bridgeLines,
                             exitCountry = exitCountry,
+                            allowAdbClearnetLeak = allowAdbClearnetLeak,
                         )
                     } catch (error: Exception) {
                         // Previous forwarder already stopped — fail-closed blackhole TUN,
@@ -419,6 +421,7 @@ class OnionVpnService : VpnService() {
             ltechnologies.onionphone.onionvpn.core.model.TorEngine.LITTLE_T,
         bridgeLines: String? = null,
         exitCountry: String? = null,
+        allowAdbClearnetLeak: Boolean = false,
     ) {
         OpTrace.debug(
             "vpn",
@@ -445,6 +448,7 @@ class OnionVpnService : VpnService() {
                 dnsMode = dnsMode,
                 bridgeLines = bridgeLines,
                 exitCountryCode = exitCountry,
+                allowAdbClearnetLeak = allowAdbClearnetLeak,
                 onFatal = { error ->
                     Timber.e(error, "onionmasq forwarder died — signalling fail-closed")
                     forwarderAlive.value = false
@@ -599,6 +603,7 @@ class OnionVpnService : VpnService() {
         const val EXTRA_DNS_MODE = "dns_mode"
         const val EXTRA_VPN_APP_MODE = "vpn_app_mode"
         const val EXTRA_VPN_APP_PACKAGES = "vpn_app_packages"
+        const val EXTRA_ALLOW_ADB_CLEARNET_LEAK = "allow_adb_clearnet_leak"
         const val EXTRA_TUN_DATA_PLANE = "tun_data_plane"
         const val EXTRA_TOR_ENGINE = "tor_engine"
         const val EXTRA_BRIDGE_LINES = "bridge_lines"
@@ -619,6 +624,7 @@ class OnionVpnService : VpnService() {
                 killSwitchEnabled = intent.getBooleanExtra(EXTRA_KILL_SWITCH, true),
                 vpnAppRoutingMode = mode,
                 vpnAppPackages = packages,
+                allowAdbClearnetLeak = intent.getBooleanExtra(EXTRA_ALLOW_ADB_CLEARNET_LEAK, false),
             )
         }
 

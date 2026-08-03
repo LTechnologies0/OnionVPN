@@ -336,6 +336,18 @@ fun SettingsScreen(
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+        PrefSwitch(
+            label = "Allow ADB clearnet leak (wireless)",
+            checked = local.allowAdbClearnetLeak,
+            onChecked = { commit(local.copy(allowAdbClearnetLeak = it), restart = true) },
+        )
+        Text(
+            text = "Off by default (fail-closed): wireless adbd / com.android.shell stays on the " +
+                "tunnel. On = exclude shell from VPN so network ADB / MCP Wi‑Fi can use clearnet. " +
+                "USB ADB is unaffected. Requires tunnel restart. Not available under INCLUDE+lockdown.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
         OutlinedButton(
             onClick = {
                 if (BatteryOptimization.needsWhitelisting(context)) {
@@ -658,7 +670,13 @@ fun SettingsScreen(
             FilterChip(
                 selected = local.torEngine == TorEngine.LITTLE_T,
                 onClick = {
-                    commit(local.copy(torEngine = TorEngine.LITTLE_T), restart = true)
+                    commit(
+                        local.copy(
+                            torEngine = TorEngine.LITTLE_T,
+                            tunDataPlane = TunDataPlane.HEV_SOCKS,
+                        ),
+                        restart = true,
+                    )
                 },
                 enabled = controlsEnabled,
                 label = { Text("C Tor") },

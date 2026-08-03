@@ -88,6 +88,57 @@ class AntiLeakVpnProfilePolicyTest {
             "INCLUDE×lockdown must be documented/gated",
             src.contains("includeConflictsWithLockdown"),
         )
+        assertTrue(
+            "ADB clearnet must be opt-in via maybeDisallowAdbClearnet / AdbVpnBypass",
+            src.contains("maybeDisallowAdbClearnet") && src.contains("AdbVpnBypass"),
+        )
+        assertTrue(
+            "ADB clearnet gated on allowAdbClearnetLeak",
+            src.contains("allowAdbClearnetLeak"),
+        )
+    }
+
+    @Test
+    fun adbClearnetLeakDefaultsOff() {
+        assertFalse(
+            "wireless ADB must not bypass VPN by default",
+            ltechnologies.onionphone.onionvpn.core.model.TunnelPreferences().allowAdbClearnetLeak,
+        )
+    }
+
+    @Test
+    fun adbVpnBypassShellPackageConstant() {
+        assertEquals(
+            "com.android.shell",
+            ltechnologies.onionphone.onionvpn.core.vpn.profile.AdbVpnBypass.SHELL_PACKAGE,
+        )
+        val adbSrc = java.io.File(
+            "src/main/java/ltechnologies/onionphone/onionvpn/core/vpn/profile/AdbVpnBypass.kt",
+        ).readText()
+        assertFalse(
+            "AdbVpnBypass must not call Builder.addDisallowedApplication",
+            Regex("""\.addDisallowedApplication\s*\(""").containsMatchIn(adbSrc),
+        )
+        val builderSrc = java.io.File(
+            "src/main/java/ltechnologies/onionphone/onionvpn/core/vpn/profile/VpnProfileBuilder.kt",
+        ).readText()
+        assertTrue(
+            "shell disallow only when allowAdbClearnetLeak",
+            builderSrc.contains("if (!preferences.allowAdbClearnetLeak) return"),
+        )
+    }
+
+    @Test
+    fun onionmasqDoesNotExcludeShellUnlessOptIn() {
+        val src = java.io.File(
+            "src/main/java/ltechnologies/onionphone/onionvpn/core/vpn/forwarder/OnionmasqTunForwarder.kt",
+        ).readText()
+        assertTrue(src.contains("allowAdbClearnetLeak"))
+        assertTrue(src.contains("AdbVpnBypass.extraExcludedUids"))
+        assertTrue(
+            "shell UID exclude must be gated",
+            src.contains("if (!allowAdbClearnetLeak) return torNative"),
+        )
     }
 
     @Test
@@ -131,6 +182,10 @@ class AntiLeakVpnProfilePolicyTest {
         )
         assertTrue(bypass.contains("org.torproject.android"))
         assertTrue(bypass.contains("org.torproject.vpn"))
+        assertFalse(
+            "com.android.shell must never be a Tor-native BYPASS (ADB is opt-in only)",
+            bypass.contains("com.android.shell"),
+        )
     }
 
     @Test

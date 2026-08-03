@@ -107,6 +107,44 @@ class LeakPacketFilterTest {
         )
         assertTrue(LeakPacketFilter.isTorrifiableIpv4Tcp(pkt, pkt.size))
         assertFalse(LeakPacketFilter.shouldDropEarly(pkt, pkt.size))
+        assertEquals(null, LeakPacketFilter.blackholeBeforeTorTcp(pkt, pkt.size))
+    }
+
+    @Test
+    fun privateLanTcp_blackholesBeforeTor() {
+        val pkt = ipv4TcpSyn(
+            srcIp = byteArrayOf(10, 8, 0, 2),
+            dstIp = byteArrayOf(192.toByte(), 168.toByte(), 1, 1),
+            srcPort = 40_000,
+            dstPort = 443,
+        )
+        assertTrue(LeakPacketFilter.shouldDropEarly(pkt, pkt.size))
+        assertEquals(
+            LeakPacketFilter.BlackholeReason.PrivateLan,
+            LeakPacketFilter.blackholeBeforeTorTcp(pkt, pkt.size),
+        )
+        assertEquals(
+            LeakPacketFilter.BlackholeReason.PrivateLan,
+            LeakPacketFilter.classifyBlackholeReason(pkt, pkt.size),
+        )
+    }
+
+    @Test
+    fun privateLanUdp53_notDroppedEarly_forDivert() {
+        val pkt = ipv4Udp(
+            srcIp = byteArrayOf(10, 8, 0, 2),
+            dstIp = byteArrayOf(192.toByte(), 168.toByte(), 1, 1),
+            srcPort = 53_000,
+            dstPort = 53,
+            payload = byteArrayOf(0x12, 0x34),
+        )
+        assertFalse(LeakPacketFilter.shouldDropEarly(pkt, pkt.size))
+        assertTrue(LeakPacketFilter.isDnsUdpPort53(pkt, pkt.size))
+        // UDP/53 is DivertDns — blackholeBeforeTorTcp must not force PrivateLan
+        assertTrue(
+            LeakPacketFilter.blackholeBeforeTorTcp(pkt, pkt.size) !=
+                LeakPacketFilter.BlackholeReason.PrivateLan,
+        )
     }
 
     @Test

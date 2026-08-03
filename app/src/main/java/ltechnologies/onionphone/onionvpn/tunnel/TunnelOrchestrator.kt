@@ -44,6 +44,10 @@ class TunnelOrchestrator @Inject constructor(
                     TunnelForegroundService.EXTRA_VPN_APP_PACKAGES,
                     preferences.vpnAppPackages.joinToString("\n"),
                 )
+                putExtra(
+                    TunnelForegroundService.EXTRA_ALLOW_ADB_CLEARNET_LEAK,
+                    preferences.allowAdbClearnetLeak,
+                )
                 putExtra(TunnelForegroundService.EXTRA_TUN_DATA_PLANE, preferences.tunDataPlane.name)
             },
         )

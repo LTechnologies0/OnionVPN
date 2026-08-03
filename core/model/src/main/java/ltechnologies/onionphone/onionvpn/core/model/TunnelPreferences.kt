@@ -100,6 +100,13 @@ data class TunnelPreferences(
      */
     val vpnAppPackages: Set<String> = emptySet(),
     /**
+     * When true, wireless ADB (`com.android.shell` / `adbd`) is excluded from the
+     * VPN so network ADB can use clearnet. **Default false (fail-closed)** — ADB
+     * must not bypass the tunnel unless the user opts in. USB ADB is unaffected.
+     * Changing this requires VPN rebind (restart tunnel).
+     */
+    val allowAdbClearnetLeak: Boolean = false,
+    /**
      * TUN forwarder stack. [TunDataPlane.ONIONMASQ] only with [TorEngine.ARTI] and
      * when native onionmasq is present; otherwise HEV is used.
      */

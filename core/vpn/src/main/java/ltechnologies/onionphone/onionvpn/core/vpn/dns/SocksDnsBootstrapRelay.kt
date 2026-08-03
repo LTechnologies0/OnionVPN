@@ -3,7 +3,6 @@ package ltechnologies.onionphone.onionvpn.core.vpn.dns
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
 import java.io.DataInputStream
-import java.io.DataOutputStream
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
@@ -18,11 +17,14 @@ import ltechnologies.onionphone.onionvpn.core.vpn.forwarder.Socks5Client
 import timber.log.Timber
 
 /**
- * Loopback UDP DNS → DNS-over-HTTPS via SOCKS5 (IP literal upstream on :443).
+ * Loopback UDP DNS → DNS-over-HTTPS via SOCKS5 (IP literal CONNECT on :443).
  *
  * Replaces Tor DNSPort for DNSCrypt `bootstrap_resolvers` / `netprobe_address` on the
  * onionmasq plane. Classic TCP/53 through Tor exits is routinely rejected (exit policy);
  * DoH on 443 matches what DNSCrypt itself uses once bootstrapped.
+ *
+ * SOCKS CONNECT uses [DEFAULT_DOH_CONNECT_HOST] (1.1.1.1); TLS SNI + HTTP Host use
+ * [DEFAULT_DOH_SNI_HOST] (dns.cloudflare.com) so the Cloudflare cert matches.
  *
  * Receive loop is single-threaded; DoH resolves run on a bounded pool so one slow
  * query cannot stall DNSCrypt bootstrap / netprobe.
@@ -33,7 +35,8 @@ class SocksDnsBootstrapRelay(
     private val socksPort: Int,
     private val socksUser: String = TunnelEndpoints.SOCKS_DNSCRYPT_USER,
     private val socksPass: String = TunnelEndpoints.SOCKS_DNSCRYPT_PASS,
-    private val dohHost: String = DEFAULT_DOH_HOST,
+    private val dohConnectHost: String = DEFAULT_DOH_CONNECT_HOST,
+    private val dohSniHost: String = DEFAULT_DOH_SNI_HOST,
     private val dohPort: Int = DEFAULT_DOH_PORT,
     private val dohPath: String = DEFAULT_DOH_PATH,
 ) {
@@ -51,10 +54,11 @@ class SocksDnsBootstrapRelay(
         running.set(true)
         thread = Thread({
             Timber.i(
-                "SocksDnsBootstrapRelay listen=:%d via socks=:%d → DoH https://%s:%d%s workers=%d",
+                "SocksDnsBootstrapRelay listen=:%d via socks=:%d → DoH https://%s(%s):%d%s workers=%d",
                 listenPort,
                 socksPort,
-                dohHost,
+                dohConnectHost,
+                dohSniHost,
                 dohPort,
                 dohPath,
                 WORKERS,
@@ -99,7 +103,41 @@ class SocksDnsBootstrapRelay(
         runCatching { pool.awaitTermination(2, TimeUnit.SECONDS) }
     }
 
+    /**
+     * Start-gate probe: minimal UDP DNS to this relay; true if any answer is received.
+     */
+    fun probeOnce(timeoutMs: Int = 3_000): Boolean {
+        if (!running.get()) return false
+        return try {
+            DatagramSocket().use { probe ->
+                probe.soTimeout = timeoutMs
+                val query = MINIMAL_DNS_QUERY
+                probe.send(
+                    DatagramPacket(
+                        query,
+                        query.size,
+                        InetAddress.getByName(TunnelEndpoints.LOOPBACK),
+                        listenPort,
+                    ),
+                )
+                val response = DatagramPacket(ByteArray(512), 512)
+                probe.receive(response)
+                response.length >= 12
+            }
+        } catch (_: Exception) {
+            false
+        }
+    }
+
     private fun resolveViaDoh(udpQuery: ByteArray): ByteArray? {
+        if (!running.get()) return null
+        resolveViaDohOnce(udpQuery)?.let { return it }
+        // One retry on transient SOCKS / TLS / DoH failure.
+        if (!running.get()) return null
+        return resolveViaDohOnce(udpQuery)
+    }
+
+    private fun resolveViaDohOnce(udpQuery: ByteArray): ByteArray? {
         if (!running.get()) return null
         return try {
             Socks5Client(
@@ -109,17 +147,18 @@ class SocksDnsBootstrapRelay(
                 password = socksPass,
                 connectTimeoutMs = 15_000,
                 handshakeTimeoutMs = 60_000,
-            ).connect(dohHost, dohPort).use { tcp ->
+            ).connect(dohConnectHost, dohPort).use { tcp ->
                 if (!running.get()) return null
                 val sslFactory = SSLSocketFactory.getDefault() as SSLSocketFactory
-                val ssl = sslFactory.createSocket(tcp, dohHost, dohPort, true) as javax.net.ssl.SSLSocket
+                // SNI + cert hostname = dns.cloudflare.com; TCP peer is still 1.1.1.1.
+                val ssl = sslFactory.createSocket(tcp, dohSniHost, dohPort, true) as javax.net.ssl.SSLSocket
                 ssl.soTimeout = 20_000
                 ssl.startHandshake()
                 val out = BufferedOutputStream(ssl.getOutputStream())
                 val inp = BufferedInputStream(ssl.getInputStream())
                 val headers = buildString {
                     append("POST $dohPath HTTP/1.1\r\n")
-                    append("Host: $dohHost\r\n")
+                    append("Host: $dohSniHost\r\n")
                     append("Content-Type: application/dns-message\r\n")
                     append("Accept: application/dns-message\r\n")
                     append("Content-Length: ${udpQuery.size}\r\n")
@@ -201,11 +240,31 @@ class SocksDnsBootstrapRelay(
     }
 
     companion object {
-        /** Cloudflare DoH anycast — port 443 survives Tor exit policies that block :53. */
-        const val DEFAULT_DOH_HOST = "1.1.1.1"
+        /** Cloudflare DoH anycast IP — SOCKS CONNECT target (port 443 survives exit policy). */
+        const val DEFAULT_DOH_CONNECT_HOST = "1.1.1.1"
+        /** TLS SNI + HTTP Host — must match Cloudflare cert (not the IP literal). */
+        const val DEFAULT_DOH_SNI_HOST = "dns.cloudflare.com"
+        /** @deprecated Use [DEFAULT_DOH_CONNECT_HOST]. */
+        const val DEFAULT_DOH_HOST = DEFAULT_DOH_CONNECT_HOST
         const val DEFAULT_DOH_PORT = 443
         const val DEFAULT_DOH_PATH = "/dns-query"
         private const val WORKERS = 4
+
+        /** A? example.com — used by [probeOnce]. */
+        private val MINIMAL_DNS_QUERY = byteArrayOf(
+            0x00, 0x01,
+            0x01, 0x00,
+            0x00, 0x01,
+            0x00, 0x00,
+            0x00, 0x00,
+            0x00, 0x00,
+            0x07, 'e'.code.toByte(), 'x'.code.toByte(), 'a'.code.toByte(),
+            'm'.code.toByte(), 'p'.code.toByte(), 'l'.code.toByte(), 'e'.code.toByte(),
+            0x03, 'c'.code.toByte(), 'o'.code.toByte(), 'm'.code.toByte(),
+            0x00,
+            0x00, 0x01,
+            0x00, 0x01,
+        )
 
         private fun newPool() = Executors.newFixedThreadPool(
             WORKERS,

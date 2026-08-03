@@ -25,6 +25,7 @@ import ltechnologies.onionphone.onionvpn.core.model.TunnelFailure
 import ltechnologies.onionphone.onionvpn.core.model.observability.OpTrace
 import ltechnologies.onionphone.onionvpn.core.model.stability.ProcessLogLevel
 import ltechnologies.onionphone.onionvpn.core.vpn.OnionVpnService
+import ltechnologies.onionphone.onionvpn.core.vpn.profile.AdbVpnBypass
 import ltechnologies.onionphone.onionvpn.core.vpn.profile.TunForwarder
 import ltechnologies.onionphone.onionvpn.core.vpn.onionmasq.OnionmasqNativeGate
 import ltechnologies.onionphone.onionvpn.core.vpn.onionmasq.TorNativeAppUids
@@ -49,6 +50,7 @@ class OnionmasqTunForwarder(
     private val dnsMode: DnsResolverMode = DnsResolverMode.DNSCRYPT_MUX,
     private val bridgeLines: String? = null,
     private val exitCountryCode: String? = null,
+    private val allowAdbClearnetLeak: Boolean = false,
     private val onFatal: ((Throwable) -> Unit)? = null,
     private val onBootstrap: ((BootstrapEvent) -> Unit)? = null,
     private val onOnionmasqEvent: ((OnionmasqEvent) -> Unit)? = null,
@@ -256,7 +258,7 @@ class OnionmasqTunForwarder(
     private fun applyExcludedUidsPreStart() {
         runCatching {
             if (!OnionMasq.isInitialized()) return
-            val uids = TorNativeAppUids.resolve(context)
+            val uids = resolveExcludedUids()
             OnionMasq.setExcludedUids(uids)
             Timber.i("onionmasq setExcludedUids (pre-start) count=%d", uids.size)
         }.onFailure { Timber.w(it, "setExcludedUids pre-start failed") }
@@ -267,10 +269,20 @@ class OnionmasqTunForwarder(
         runCatching {
             if (!OnionMasq.isInitialized()) return
             if (!OnionMasq.isRunning() && !proxyOwned.get()) return
-            val uids = TorNativeAppUids.resolve(context)
+            val uids = resolveExcludedUids()
             OnionMasq.setExcludedUids(uids)
             Timber.i("onionmasq setExcludedUids (refresh) count=%d", uids.size)
         }.onFailure { Timber.w(it, "setExcludedUids refresh failed") }
+    }
+
+    /** Tor-native BYPASS UIDs, plus shell UID only when ADB clearnet leak is opted in. */
+    private fun resolveExcludedUids(): LongArray {
+        val torNative = TorNativeAppUids.resolve(context)
+        if (!allowAdbClearnetLeak) return torNative
+        val adb = AdbVpnBypass.extraExcludedUids(context.packageManager)
+        if (adb.isEmpty()) return torNative
+        Timber.w("ADB clearnet leak enabled — excluding shell UIDs from onionmasq: %s", adb.contentToString())
+        return (torNative.toList() + adb.toList()).distinct().toLongArray()
     }
 
     private fun registerPackageReceiver() {
