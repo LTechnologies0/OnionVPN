@@ -36,6 +36,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Checkout kotlin-tor (composite includeBuild)
+        uses: actions/checkout@v4
+        with:
+          repository: LTechnologies0/kotlin-tor
+          path: kotlin-tor
+          # Public sibling; falls back to same-org default token on private forks.
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Link kotlin-tor for settings.gradle.kts
+        run: |
+          # settings looks for ../kotlin-tor relative to the OnionVPN checkout.
+          ln -sfn "$GITHUB_WORKSPACE/kotlin-tor" "$GITHUB_WORKSPACE/../kotlin-tor"
+
       - uses: actions/setup-java@v4
         with:
           distribution: temurin

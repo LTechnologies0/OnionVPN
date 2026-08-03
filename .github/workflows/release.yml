@@ -45,6 +45,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Checkout kotlin-tor (composite includeBuild)
+        uses: actions/checkout@v4
+        with:
+          repository: LTechnologies0/kotlin-tor
+          path: kotlin-tor
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Link kotlin-tor for settings.gradle.kts
+        run: |
+          ln -sfn "$GITHUB_WORKSPACE/kotlin-tor" "$GITHUB_WORKSPACE/../kotlin-tor"
+
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
