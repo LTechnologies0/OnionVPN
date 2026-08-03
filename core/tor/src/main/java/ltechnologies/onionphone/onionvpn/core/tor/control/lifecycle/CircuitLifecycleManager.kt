@@ -522,8 +522,10 @@ class CircuitLifecycleManager(
             // Per-UID app tokens + dedicated DNSCrypt / hev static tokens.
             if (TunnelEndpoints.uidFromSocksUser(username) != null) return true
             if (username == TunnelEndpoints.SOCKS_DNSCRYPT_USER) return true
+            if (username.startsWith("dnscrypt-n")) return true // onionmasq NEWNYM rotate
             if (username == TunnelEndpoints.SOCKS_ISOLATION_USER) return true
             if (username == TunnelEndpoints.SOCKS_PAC_USER) return true
+            if (username.startsWith("pac")) return true
             return false
         }
     }

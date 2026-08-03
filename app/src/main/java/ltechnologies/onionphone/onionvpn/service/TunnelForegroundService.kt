@@ -850,7 +850,7 @@ class TunnelForegroundService : Service() {
                 )
                 return
             }
-            // DNSCrypt bootstrap_resolvers → local UDP relay → sidecar SOCKS → 1.1.1.1:53
+            // DNSCrypt bootstrap_resolvers → local UDP relay → sidecar SOCKS → DoH :443
             OpTrace.step("tunnel", "socks_dns_bootstrap_relay") {
                 socksDnsBootstrapRelay?.stop()
                 val relay = ltechnologies.onionphone.onionvpn.core.vpn.dns.SocksDnsBootstrapRelay(
@@ -867,6 +867,7 @@ class TunnelForegroundService : Service() {
                 torSocksPort = sidecar,
             )
             runtimePorts = activePorts
+            tor.attachExternalRuntimePorts(activePorts)
             updateSnapshot(TunnelPhase.StartingDnsCrypt, torRunning = true)
             val dnsResult = OpTrace.stepSuspending("tunnel", "dnscrypt_start_sidecar", ProcessLogLevel.INFO) {
                 dnsCrypt.start(
@@ -1209,6 +1210,7 @@ class TunnelForegroundService : Service() {
         socksDnsBootstrapRelay = null
         onionmasqDnsNymEpoch = 0
         artiSocksRoleMux.stop()
+        tor.clearExternalRuntimePorts()
         tor.stop()
         releaseTunnelWakeLock()
         MemoryHygiene.afterHeavyWork("tunnel_teardown")

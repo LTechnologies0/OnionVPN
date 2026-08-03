@@ -14,6 +14,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import ltechnologies.onionphone.onionvpn.core.model.SocksJavaProxyAuth
 import ltechnologies.onionphone.onionvpn.core.model.TorEngine
 import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
 import ltechnologies.onionphone.onionvpn.core.model.TunnelFailure
@@ -72,6 +73,12 @@ class TorProcessManager(
     private var process: Process? = null
     private var logThread: Thread? = null
     private var runtimePorts: TunnelRuntimePorts? = null
+    /**
+     * True when [attachExternalRuntimePorts] published onionmasq sidecar ports without
+     * starting arti-mobile / little-t ([isRunning] stays false).
+     */
+    @Volatile
+    private var externalDataPlanePorts: Boolean = false
     private var preferences: TunnelPreferences = TunnelPreferences()
     private var activeEngine: TorEngine = TorEngine.LITTLE_T
     private val arti = ArtiRuntime(context)
@@ -345,9 +352,31 @@ class TorProcessManager(
         TorEngine.LITTLE_T -> process?.isAlive == true
     }
 
-    /** Probe SocksPort while Tor is up; used for reputation list downloads. */
+    /** Probe SocksPort while Tor / onionmasq sidecar path is published. */
     fun currentProbeSocksPort(): Int? =
-        runtimePorts?.torProbeSocksPort?.takeIf { isRunning() }
+        runtimePorts?.torProbeSocksPort?.takeIf { it > 0 && (isRunning() || externalDataPlanePorts) }
+
+    /**
+     * Onionmasq plane skips arti-mobile — orchestrator publishes remapped sidecar ports here
+     * so GeoIP / reputation / Moat can discover the probe SOCKS without [isRunning].
+     */
+    fun attachExternalRuntimePorts(ports: TunnelRuntimePorts) {
+        runtimePorts = ports
+        externalDataPlanePorts = true
+        Timber.i(
+            "TorProcessManager attached external ports socks=%d probe=%d dns=%d",
+            ports.torSocksPort,
+            ports.torProbeSocksPort,
+            ports.torDnsPort,
+        )
+    }
+
+    fun clearExternalRuntimePorts() {
+        if (!externalDataPlanePorts) return
+        externalDataPlanePorts = false
+        runtimePorts = null
+        Timber.i("TorProcessManager cleared external runtime ports")
+    }
 
     /** True when classic ControlSocket session is open (never true on Arti). */
     fun isClassicControlConnected(): Boolean =
@@ -1297,43 +1326,50 @@ class TorProcessManager(
         url: String,
         minBytes: Long,
         socksPort: Int?,
-    ): Boolean = runCatching {
+    ): Boolean {
         // Never clearnet DNS — VPN-excluded UID + Java SOCKS would resolve locally.
-        // OkHttp + SOCKS5h placeholder Dns (same as ExitIpValidator / TorSocksDns).
-        val port = socksPort ?: error("GeoIP download refused without Tor SOCKS")
-        val proxy = Proxy(Proxy.Type.SOCKS, InetSocketAddress(TunnelEndpoints.LOOPBACK, port))
-        val client = OkHttpClient.Builder()
-            .proxy(proxy)
-            .dns(GeoIpTorSocksDns)
-            .connectTimeout(20, TimeUnit.SECONDS)
-            .readTimeout(180, TimeUnit.SECONDS)
-            .followRedirects(true)
-            .build()
-        val request = Request.Builder()
-            .url(url)
-            .header("User-Agent", "OnionVPN/geoip")
-            .header("Accept", "text/plain,*/*")
-            .build()
-        client.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) {
-                error("HTTP ${response.code} for $url")
-            }
-            val body = response.body ?: error("empty body")
-            val tmp = File(configDirectory, "${dest.name}.part")
-            tmp.outputStream().use { output -> body.byteStream().copyTo(output) }
-            if (tmp.length() < minBytes) {
-                tmp.delete()
-                error("GeoIP download too small: ${tmp.length()}")
-            }
-            if (!tmp.renameTo(dest)) {
-                tmp.copyTo(dest, overwrite = true)
-                tmp.delete()
-            }
+        // OkHttp + SOCKS5h + Authenticator (onionmasq/Arti reject empty SOCKS tokens).
+        val port = socksPort ?: run {
+            Timber.d("GeoIP download refused without Tor SOCKS")
+            return false
         }
-        true
-    }.onFailure {
-        Timber.d(it, "GeoIP mirror failed %s", url)
-    }.getOrDefault(false)
+        val proxy = Proxy(Proxy.Type.SOCKS, InetSocketAddress(TunnelEndpoints.LOOPBACK, port))
+        return SocksJavaProxyAuth.withProbe {
+            runCatching {
+                val client = OkHttpClient.Builder()
+                    .proxy(proxy)
+                    .dns(GeoIpTorSocksDns)
+                    .connectTimeout(20, TimeUnit.SECONDS)
+                    .readTimeout(180, TimeUnit.SECONDS)
+                    .followRedirects(true)
+                    .build()
+                val request = Request.Builder()
+                    .url(url)
+                    .header("User-Agent", "OnionVPN/geoip")
+                    .header("Accept", "text/plain,*/*")
+                    .build()
+                client.newCall(request).execute().use { response ->
+                    if (!response.isSuccessful) {
+                        error("HTTP ${response.code} for $url")
+                    }
+                    val body = response.body ?: error("empty body")
+                    val tmp = File(configDirectory, "${dest.name}.part")
+                    tmp.outputStream().use { output -> body.byteStream().copyTo(output) }
+                    if (tmp.length() < minBytes) {
+                        tmp.delete()
+                        error("GeoIP download too small: ${tmp.length()}")
+                    }
+                    if (!tmp.renameTo(dest)) {
+                        tmp.copyTo(dest, overwrite = true)
+                        tmp.delete()
+                    }
+                }
+                true
+            }.onFailure {
+                Timber.d(it, "GeoIP mirror failed %s", url)
+            }.getOrDefault(false)
+        }
+    }
 
     private suspend fun stopInternal() {
         if (activeEngine == TorEngine.ARTI || arti.isRunning()) {
@@ -1348,7 +1384,9 @@ class TorProcessManager(
         process = null
         logThread?.interrupt()
         logThread = null
-        runtimePorts = null
+        if (!externalDataPlanePorts) {
+            runtimePorts = null
+        }
         runCatching { controlSocketFile.delete() }
         MemoryHygiene.afterHeavyWork("tor_stop")
     }

@@ -5,6 +5,7 @@ import java.net.Proxy
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import ltechnologies.onionphone.onionvpn.core.model.SocksJavaProxyAuth
 import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
 import ltechnologies.onionphone.onionvpn.core.validation.path.TorSocksDns
 import okhttp3.MediaType.Companion.toMediaType
@@ -187,12 +188,15 @@ object MoatCircumventionClient {
             .header("User-Agent", "OnionVPN/moat")
             .get()
             .build()
-        val raw = client.newCall(req).execute().use { resp ->
-            val text = resp.body?.string().orEmpty()
-            if (!resp.isSuccessful) {
-                error("Moat builtin HTTP ${resp.code}: ${text.take(200)}")
+        val raw = SocksJavaProxyAuth.withProbe {
+            // Clearnet Moat still fine — Authenticator unused without SOCKS challenge.
+            client.newCall(req).execute().use { resp ->
+                val text = resp.body?.string().orEmpty()
+                if (!resp.isSuccessful) {
+                    error("Moat builtin HTTP ${resp.code}: ${text.take(200)}")
+                }
+                text
             }
-            text
         }
         val root = JSONObject(raw)
         val want = transports.map { it.trim().lowercase() }.filter { it.isNotEmpty() }.toSet()
@@ -252,6 +256,7 @@ object MoatCircumventionClient {
                 ?: error("Tor SOCKS not ready — connect the tunnel or disable “Request via Tor”")
             b.proxy(Proxy(Proxy.Type.SOCKS, InetSocketAddress(TunnelEndpoints.LOOPBACK, port)))
             b.dns(TorSocksDns)
+            // Built once per call; Authenticator scoped around each Moat HTTP exchange.
         }
         return b.build()
     }
@@ -263,12 +268,14 @@ object MoatCircumventionClient {
             .header("User-Agent", "OnionVPN/moat")
             .post(json.toRequestBody(JSON))
             .build()
-        client.newCall(req).execute().use { resp ->
-            val text = resp.body?.string().orEmpty()
-            if (!resp.isSuccessful) {
-                error("Moat HTTP ${resp.code}: ${text.take(200)}")
+        return SocksJavaProxyAuth.withProbe {
+            client.newCall(req).execute().use { resp ->
+                val text = resp.body?.string().orEmpty()
+                if (!resp.isSuccessful) {
+                    error("Moat HTTP ${resp.code}: ${text.take(200)}")
+                }
+                text
             }
-            return text
         }
     }
 

@@ -4,14 +4,13 @@ import android.content.Context
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import androidx.core.content.getSystemService
-import java.net.Authenticator
 import java.net.InetAddress
 import java.net.InetSocketAddress
-import java.net.PasswordAuthentication
 import java.net.Proxy
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import ltechnologies.onionphone.onionvpn.core.model.SocksJavaProxyAuth
 import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
 import ltechnologies.onionphone.onionvpn.core.model.ValidationCheck
 import ltechnologies.onionphone.onionvpn.core.model.ValidationStatus
@@ -36,7 +35,6 @@ object ExitIpValidator {
     private const val TOR_CHECK_URL = "https://check.torproject.org/api/ip"
     private val IPV4_REGEX = Regex("""^(\d{1,3}\.){3}\d{1,3}$""")
     private val httpClients = java.util.concurrent.ConcurrentHashMap<Int, OkHttpClient>()
-    private val socksAuthLock = Any()
 
     suspend fun validate(
         context: Context,
@@ -81,7 +79,7 @@ object ExitIpValidator {
                 .followRedirects(true)
                 .build()
         }
-        return withSocksAuthenticator(socksUser, socksPass) {
+        return SocksJavaProxyAuth.withCredentials(socksUser, socksPass) {
             try {
                 val body = client.newCall(
                     Request.Builder().url(TOR_CHECK_URL).header("User-Agent", "OnionVPN").build(),
@@ -93,7 +91,7 @@ object ExitIpValidator {
                 }
                 val err = body.second
                 if (err != null) {
-                    return@withSocksAuthenticator TorCheckResult(null, null, err)
+                    return@withCredentials TorCheckResult(null, null, err)
                 }
                 val json = JSONObject(body.first.orEmpty())
                 TorCheckResult(
@@ -103,30 +101,6 @@ object ExitIpValidator {
             } catch (error: Exception) {
                 Timber.w(error, "Tor exit IP check failed")
                 TorCheckResult(null, null, error.message ?: "fetch failed")
-            }
-        }
-    }
-
-    /**
-     * Scope SOCKS5 USERNAME/PASSWORD for Java [Proxy] (OkHttp). Global Authenticator is
-     * process-wide — lock + restore so concurrent callers cannot steal wrong tokens.
-     */
-    private fun <T> withSocksAuthenticator(user: String, pass: String, block: () -> T): T {
-        synchronized(socksAuthLock) {
-            // Android stubs omit Authenticator.getDefault() on some API levels — replace + clear.
-            Authenticator.setDefault(
-                object : Authenticator() {
-                    override fun getPasswordAuthentication(): PasswordAuthentication? {
-                        val proto = requestingProtocol ?: return null
-                        if (!proto.startsWith("SOCKS", ignoreCase = true)) return null
-                        return PasswordAuthentication(user, pass.toCharArray())
-                    }
-                },
-            )
-            try {
-                return block()
-            } finally {
-                Authenticator.setDefault(null)
             }
         }
     }

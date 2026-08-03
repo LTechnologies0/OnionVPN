@@ -38,6 +38,10 @@ git apply ../../native/onionmasq/socks-sidecar.patch
 git apply ../../native/onionmasq/safe-uninit-jni.patch
 ```
 
+SOCKS sidecar auth allowlist (must match `TunnelEndpoints`):
+`probe`/`check`, `dnscrypt`|`dnscrypt-nN`/`resolver`, `pac`/`dnscrypt`,
+`pac{uid}`/`p{uid}`, `u{uid}`/`p{uid}`, `onionvpn`/`stream`.
+
 `safe-uninit-jni.patch` converts **all** probe/stop/config/command JNI entry points
 to `try_get()` (no-op / 0 / Java exception) when `init()` has not run. Upstream
 `get().expect` + `panic=abort` otherwise SIGABRTs the app. Java/Kotlin layers also

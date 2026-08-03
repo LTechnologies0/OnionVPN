@@ -92,10 +92,10 @@ index fdbc78d..4a4cf12 100644
          if let Some(sender) = self.command_sender.lock().unwrap().as_mut() {
 diff --git a/crates/onionmasq-mobile/src/socks_sidecar.rs b/crates/onionmasq-mobile/src/socks_sidecar.rs
 new file mode 100644
-index 0000000..1111111
+index 0000000..3333333
 --- /dev/null
 +++ b/crates/onionmasq-mobile/src/socks_sidecar.rs
-@@ -0,0 +1,224 @@
+@@ -0,0 +1,244 @@
 +//! Loopback SOCKS5 sidecar on the same TorClient as onionmasq TUN traffic.
 +//!
 +//! DNSCrypt / probe clients authenticate with username/password; each username maps to a
@@ -304,14 +304,34 @@ index 0000000..1111111
 +}
 +
 +fn socks_auth_ok(username: &str, password: &[u8]) -> bool {
-+    let expected: &[u8] = if username == "probe" {
-+        b"check"
++    // Mirror TunnelEndpoints role secrets (OnionVPN).
++    let expected: Option<Vec<u8>> = if username == "probe" {
++        Some(b"check".to_vec())
 +    } else if username == "dnscrypt" || username.starts_with("dnscrypt-n") {
-+        b"resolver"
++        Some(b"resolver".to_vec())
++    } else if username == "pac" {
++        // SOCKS_PAC_PASS historically "dnscrypt"; also accept resolver.
++        return password == b"dnscrypt" || password == b"resolver";
++    } else if let Some(uid) = username.strip_prefix("pac") {
++        if uid.is_empty() {
++            return false;
++        }
++        // pac{uid} / p{uid} — DnsCryptSocksBridge per-client isolation.
++        Some(format!("p{uid}").into_bytes())
++    } else if username == "onionvpn" {
++        Some(b"stream".to_vec())
++    } else if let Some(uid) = username.strip_prefix('u') {
++        if uid.is_empty() || uid == "unknown" {
++            return password == b"punknown";
++        }
++        Some(format!("p{uid}").into_bytes())
 +    } else {
-+        return false;
++        None
 +    };
-+    expected.len() == password.len() && expected.iter().zip(password).all(|(a, b)| a == b)
++    match expected {
++        Some(exp) => exp.len() == password.len() && exp.iter().zip(password).all(|(a, b)| a == b),
++        None => false,
++    }
 +}
 +
 +async fn reply_socks_error(stream: &mut TcpStream, rep: u8) -> anyhow::Result<()> {

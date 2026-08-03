@@ -27,6 +27,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import ltechnologies.onionphone.onionvpn.core.model.DomainThreatCategory
+import ltechnologies.onionphone.onionvpn.core.model.SocksJavaProxyAuth
 import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
 import ltechnologies.onionphone.onionvpn.core.model.observability.MemoryHygiene
 import ltechnologies.onionphone.onionvpn.core.tor.TorProcessManager
@@ -121,10 +122,10 @@ class DomainReputationRepository @Inject constructor(
         delayMs: Long = PROBE_WAIT_DELAY_MS,
     ): Boolean {
         repeat(attempts) {
-            if (tor.currentProbeSocksPort() != null && tor.isRunning()) return true
+            if (tor.currentProbeSocksPort() != null) return true
             delay(delayMs)
         }
-        return tor.currentProbeSocksPort() != null && tor.isRunning()
+        return tor.currentProbeSocksPort() != null
     }
 
     private suspend fun maybeAutoUpdate() {
@@ -215,7 +216,7 @@ class DomainReputationRepository @Inject constructor(
                     throw IllegalStateException("Domain reputation update cancelled")
                 }
                 val liveProbe = tor.currentProbeSocksPort()
-                if (liveProbe == null || !tor.isRunning() || liveProbe != expectedProbe) {
+                if (liveProbe == null || liveProbe != expectedProbe) {
                     throw IllegalStateException("Tor probe SOCKS lost mid-update")
                 }
                 try {
@@ -229,7 +230,7 @@ class DomainReputationRepository @Inject constructor(
                     fetched++
                     Timber.d("Domain source ok id=%s bytes=%d", source.id, dest.length())
                 } catch (error: Exception) {
-                    if (isProbeGone(error) || !tor.isRunning() || tor.currentProbeSocksPort() == null) {
+                    if (isProbeGone(error) || tor.currentProbeSocksPort() == null) {
                         Timber.i(
                             "Domain source aborted id=%s (Tor SOCKS gone): %s",
                             source.id,
@@ -330,25 +331,27 @@ class DomainReputationRepository @Inject constructor(
                 .build(),
         )
         activeCall.set(call)
-        val response = try {
-            call.execute()
-        } finally {
-            activeCall.compareAndSet(call, null)
-        }
-        return response.use {
-            if (!it.isSuccessful) {
-                throw IllegalStateException("HTTP ${it.code} for $url")
+        SocksJavaProxyAuth.withProbe {
+            val response = try {
+                call.execute()
+            } finally {
+                activeCall.compareAndSet(call, null)
             }
-            val body = it.body ?: throw IllegalStateException("empty body for $url")
-            body.byteStream().use { input ->
-                dest.outputStream().use { output -> input.copyTo(output) }
+            response.use {
+                if (!it.isSuccessful) {
+                    throw IllegalStateException("HTTP ${it.code} for $url")
+                }
+                val body = it.body ?: throw IllegalStateException("empty body for $url")
+                body.byteStream().use { input ->
+                    dest.outputStream().use { output -> input.copyTo(output) }
+                }
             }
         }
     }
 
     private fun buildClient(): HttpTransport {
         val probePort = tor.currentProbeSocksPort()
-        if (probePort == null || !tor.isRunning()) {
+        if (probePort == null) {
             Timber.i("Domain reputation: Tor probe SOCKS unavailable — cache only (no clearnet)")
             throw IllegalStateException("Tor probe SOCKS not ready — refusing clearnet download")
         }
