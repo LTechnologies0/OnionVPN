@@ -6,16 +6,20 @@ package ltechnologies.onionphone.onionvpn.core.model
  * - [LITTLE_T]: classic C Tor (`libtor.so` + torrc + ControlSocket).
  * - [ARTI]: Rust Arti via Guardian Project / Tor Project `arti-mobile`
  *   (in-process SOCKS + DNS proxy; embeds arti-client 0.36.0; no classic control port).
+ * - [KOTLIN_TOR]: pure-Kotlin Tor (`org.kotlintor`) on HEV_SOCKS + DNSCrypt
+ *   (SOCKS+DNSPort+protect+NEWNYM; not onionmasq JNI / not a new TunDataPlane).
  */
 enum class TorEngine {
     LITTLE_T,
     ARTI,
+    KOTLIN_TOR,
     ;
 
     val displayName: String
         get() = when (this) {
             LITTLE_T -> "C Tor (libtor)"
             ARTI -> "Arti (Rust)"
+            KOTLIN_TOR -> "Kotlin Tor"
         }
 
     /** Feature matrix used to gate UI, validation, and recovery paths. */
@@ -23,6 +27,7 @@ enum class TorEngine {
         get() = when (this) {
             LITTLE_T -> TorEngineCapabilities.LITTLE_T
             ARTI -> TorEngineCapabilities.ARTI
+            KOTLIN_TOR -> TorEngineCapabilities.KOTLIN_TOR
         }
 
     /**
@@ -204,6 +209,28 @@ data class TorEngineCapabilities(
             nodePrefs = false,
             exitCountryPrefs = true,
             bridgesAtStart = true,
+        )
+
+        /**
+         * kotlin-tor on HEV_SOCKS: multi SocksPort + DNSPort + IsolateSOCKSAuth;
+         * control plane is kotlin-tor ControlServer (not classic torrc ControlSocket).
+         */
+        val KOTLIN_TOR = TorEngineCapabilities(
+            classicControlPlane = true,
+            multiSocksSessionGroups = true,
+            socksAuthIsolation = true,
+            nativeAutomapDnsPort = true,
+            synthesizeOnionAutomap = false,
+            newIdentity = true,
+            circuitInspection = true,
+            liveCircuitTiming = false,
+            liveSetConf = false,
+            dormantSignals = true,
+            torrcConfig = false,
+            conjureBridges = false,
+            nodePrefs = false,
+            exitCountryPrefs = false,
+            bridgesAtStart = false,
         )
     }
 }

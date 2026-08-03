@@ -119,6 +119,18 @@ class OnionmasqTunForwarder(
                 val handler = ConnectivityHandler(context.applicationContext)
                 handler.register()
                 connectivityHandler = handler
+                // Handler.register() seeds INTERNET-only; reseed VALIDATED (Tor sample parity).
+                if (OnionMasq.isInitialized()) {
+                    val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE)
+                        as? android.net.ConnectivityManager
+                    val caps = cm?.activeNetwork?.let { cm.getNetworkCapabilities(it) }
+                    val validated = caps?.hasCapability(
+                        android.net.NetworkCapabilities.NET_CAPABILITY_VALIDATED,
+                    ) == true
+                    runCatching {
+                        org.torproject.onionmasq.OnionMasqJni.setInternetConnectivity(validated)
+                    }.onFailure { Timber.d(it, "reseed VALIDATED connectivity after register") }
+                }
                 Timber.i("onionmasq ConnectivityHandler registered")
             }.onFailure { Timber.w(it, "ConnectivityHandler.register failed") }
 
@@ -155,7 +167,9 @@ class OnionmasqTunForwarder(
                     runCatching { OnionMasq.setCountryCode(cc) }
                         .onFailure { Timber.w(it, "setCountryCode($cc) failed") }
                 }
-                refreshExcludedUids()
+                // Sample ArtiVpnService: setExcludedUids immediately before start while
+                // isRunning() is still false — do not gate on isRunning() here.
+                applyExcludedUidsPreStart()
                 registerPackageReceiver()
 
                 running.set(true)
@@ -238,13 +252,25 @@ class OnionmasqTunForwarder(
 
     fun isRunning(): Boolean = running.get() && proxyOwned.get()
 
-    private fun refreshExcludedUids() {
+    /** Pre-start: init required, running not required (sample Tor VPN pattern). */
+    private fun applyExcludedUidsPreStart() {
         runCatching {
-            if (!OnionMasq.isInitialized() || !OnionMasq.isRunning()) return
+            if (!OnionMasq.isInitialized()) return
             val uids = TorNativeAppUids.resolve(context)
             OnionMasq.setExcludedUids(uids)
-            Timber.i("onionmasq setExcludedUids count=%d", uids.size)
-        }.onFailure { Timber.w(it, "setExcludedUids failed") }
+            Timber.i("onionmasq setExcludedUids (pre-start) count=%d", uids.size)
+        }.onFailure { Timber.w(it, "setExcludedUids pre-start failed") }
+    }
+
+    /** Post-start refresh when packages are installed/updated/removed. */
+    private fun refreshExcludedUids() {
+        runCatching {
+            if (!OnionMasq.isInitialized()) return
+            if (!OnionMasq.isRunning() && !proxyOwned.get()) return
+            val uids = TorNativeAppUids.resolve(context)
+            OnionMasq.setExcludedUids(uids)
+            Timber.i("onionmasq setExcludedUids (refresh) count=%d", uids.size)
+        }.onFailure { Timber.w(it, "setExcludedUids refresh failed") }
     }
 
     private fun registerPackageReceiver() {
@@ -254,13 +280,32 @@ class OnionmasqTunForwarder(
                 when (intent?.action) {
                     Intent.ACTION_PACKAGE_ADDED,
                     Intent.ACTION_PACKAGE_REMOVED,
-                    -> refreshExcludedUids()
+                    Intent.ACTION_PACKAGE_REPLACED,
+                    -> {
+                        refreshExcludedUids()
+                        if (intent.action == Intent.ACTION_PACKAGE_REMOVED ||
+                            intent.action == Intent.ACTION_PACKAGE_REPLACED
+                        ) {
+                            val uid = intent.getIntExtra(Intent.EXTRA_UID, -1)
+                            if (uid >= 0) {
+                                OnionVpnService.circuitRepository.dropApp(uid)
+                                runCatching {
+                                    if (OnionMasq.isInitialized() && OnionMasq.isRunning()) {
+                                        OnionMasq.refreshCircuitsForApp(uid.toLong())
+                                    }
+                                }.onFailure {
+                                    Timber.w(it, "onionmasq refreshCircuitsForApp on package remove")
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
         val filter = IntentFilter().apply {
             addAction(Intent.ACTION_PACKAGE_ADDED)
             addAction(Intent.ACTION_PACKAGE_REMOVED)
+            addAction(Intent.ACTION_PACKAGE_REPLACED)
             addDataScheme("package")
         }
         runCatching {
@@ -291,6 +336,7 @@ class OnionmasqTunForwarder(
                 is ClosedConnectionEvent,
                 is NewDirectoryEvent,
                 -> Unit
+                else -> Unit // DNSConnectivityEvent / ConnectivityEvent → app observer
             }
             onOnionmasqEvent?.invoke(event)
         }

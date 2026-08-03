@@ -43,6 +43,10 @@ class TunnelPreferencesStore @Inject constructor(
         val requireNoFilter = booleanPreferencesKey("dns_nofilter")
         val forceTcp = booleanPreferencesKey("dns_force_tcp")
         val requireDnssec = booleanPreferencesKey("dns_dnssec")
+        val dnsAnonymized = booleanPreferencesKey("dns_anonymized")
+        val dnsQueryPadding = booleanPreferencesKey("dns_query_padding")
+        val dnsBlockEcs = booleanPreferencesKey("dns_block_ecs")
+        val requireOsLockdown = booleanPreferencesKey("require_os_lockdown")
         val firewallEnabled = booleanPreferencesKey("firewall_enabled")
         val firewallDefault = stringPreferencesKey("firewall_default")
         val firewallTempMin = intPreferencesKey("firewall_temp_min")
@@ -83,6 +87,10 @@ class TunnelPreferencesStore @Inject constructor(
             prefs[Keys.requireNoFilter] = next.dnsCryptRequireNoFilter
             prefs[Keys.forceTcp] = next.dnsCryptForceTcp
             prefs[Keys.requireDnssec] = next.dnsCryptRequireDnssec
+            prefs[Keys.dnsAnonymized] = next.dnsCryptAnonymized
+            prefs[Keys.dnsQueryPadding] = next.dnsCryptQueryPadding
+            prefs[Keys.dnsBlockEcs] = next.dnsCryptBlockEcs
+            prefs[Keys.requireOsLockdown] = next.requireOsLockdown
             prefs[Keys.firewallEnabled] = next.firewallEnabled
             prefs[Keys.firewallDefault] = next.firewallDefaultAction.name
             prefs[Keys.firewallTempMin] = next.firewallTempMinutes
@@ -116,6 +124,10 @@ class TunnelPreferencesStore @Inject constructor(
         dnsCryptRequireNoFilter = this[Keys.requireNoFilter] ?: false,
         dnsCryptForceTcp = this[Keys.forceTcp] ?: true,
         dnsCryptRequireDnssec = this[Keys.requireDnssec] ?: true,
+        dnsCryptAnonymized = this[Keys.dnsAnonymized] ?: false,
+        dnsCryptQueryPadding = this[Keys.dnsQueryPadding] ?: true,
+        dnsCryptBlockEcs = this[Keys.dnsBlockEcs] ?: true,
+        requireOsLockdown = this[Keys.requireOsLockdown] ?: false,
         firewallEnabled = this[Keys.firewallEnabled] ?: false,
         firewallDefaultAction = this[Keys.firewallDefault]
             ?.let { runCatching { FirewallDefaultAction.valueOf(it) }.getOrNull() }

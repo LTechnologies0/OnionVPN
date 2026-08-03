@@ -21,7 +21,7 @@ object TunDataPlaneFactory {
                 return TunDataPlane.HEV_SOCKS
             }
             if (!isOnionmasqNativePresent(context)) {
-                Timber.w("libonionmasq.so missing — falling back to HEV_SOCKS")
+                Timber.w("libonionmasq_mobile.so missing — falling back to HEV_SOCKS")
                 return TunDataPlane.HEV_SOCKS
             }
             return TunDataPlane.ONIONMASQ

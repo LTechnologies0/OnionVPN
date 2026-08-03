@@ -25,7 +25,7 @@ class TorConfigWriterTest {
         assertTrue(torrc.contains("SessionGroup=${TunnelEndpoints.SESSION_GROUP_APPS}"))
         assertTrue(torrc.contains("SessionGroup=${TunnelEndpoints.SESSION_GROUP_DNSCRYPT}"))
         assertTrue(torrc.contains("SessionGroup=${TunnelEndpoints.SESSION_GROUP_PROBE}"))
-        assertTrue(torrc.contains("IsolateClientAddr"))
+        assertTrue(torrc.contains("IsolateClientAddr")) // DNSCrypt / probe SessionGroups
         assertTrue(torrc.contains("IsolateClientProtocol"))
         assertTrue(torrc.contains("IsolateDestAddr"))
         assertTrue(torrc.contains("IsolateSOCKSAuth"))
@@ -43,6 +43,10 @@ class TorConfigWriterTest {
         assertTrue(
             "KeepAliveIsolateSOCKSAuth required for per-UID strong isolation tokens",
             appLine.contains("KeepAliveIsolateSOCKSAuth"),
+        )
+        assertFalse(
+            "Apps SocksPort: IsolateClientAddr is a dead axis (all clients are 127.0.0.1)",
+            appLine.contains("IsolateClientAddr"),
         )
         assertTrue(
             "IPv6Traffic required for onion/IPv6; PreferIPv6 must stay off (exit AAAA SSL stalls)",

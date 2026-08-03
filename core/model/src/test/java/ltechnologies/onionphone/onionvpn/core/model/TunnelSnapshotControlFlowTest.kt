@@ -44,8 +44,9 @@ class TunnelSnapshotControlFlowTest {
         )
         assertFalse(
             TunnelSnapshot(
-                phase = TunnelPhase.Blocking,
+                phase = TunnelPhase.Connected,
                 torRuntimeReady = true,
+                newNymCooldownUntilMs = System.currentTimeMillis() + 60_000L,
             ).canNewNym,
         )
     }

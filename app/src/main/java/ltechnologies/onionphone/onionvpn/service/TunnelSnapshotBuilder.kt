@@ -34,6 +34,7 @@ internal object TunnelSnapshotBuilder {
          * arti-mobile [TorControlStatus] stays cold — without this, NEWNYM stays disabled.
          */
         onionmasqReady: Boolean = false,
+        newNymCooldownUntilMs: Long = 0L,
     ): TunnelSnapshot {
         val caps = torEngine.capabilities
         val proxiesLive = phase == TunnelPhase.Connected ||
@@ -78,17 +79,20 @@ internal object TunnelSnapshotBuilder {
             torCircuitEstablished = torStatus.circuitEstablished ||
                 (caps.circuitInspection && built > 0) ||
                 (torEngine == TorEngine.ARTI && runtimeReady) ||
+                (torEngine == TorEngine.KOTLIN_TOR && runtimeReady) ||
                 onionmasqReady,
             torVersion = torStatus.torVersion.ifBlank {
                 when {
                     onionmasqReady -> "onionmasq"
                     torEngine == TorEngine.ARTI -> "arti-mobile"
+                    torEngine == TorEngine.KOTLIN_TOR -> "kotlin-tor"
                     else -> ""
                 }
             },
             torStreamCount = if (caps.circuitInspection) streams else 0,
             torNetworkLive = torStatus.networkLive ||
                 (torEngine == TorEngine.ARTI && runtimeReady) ||
+                (torEngine == TorEngine.KOTLIN_TOR && runtimeReady) ||
                 onionmasqReady,
             torDormant = if (caps.dormantSignals) torStatus.dormant else false,
             torEntryGuards = if (caps.classicControlPlane) torStatus.entryGuardsSummary else "",
@@ -97,6 +101,7 @@ internal object TunnelSnapshotBuilder {
             socksProxy = ports?.let { TunnelEndpoints.pacSocksBridge() }.orEmpty(),
             httpProxy = "", // HTTPTunnelPort disabled — use PAC bridge (DNSCrypt), not Tor exit DNS
             identityRefreshing = identityRefreshing,
+            newNymCooldownUntilMs = newNymCooldownUntilMs,
         )
     }
 

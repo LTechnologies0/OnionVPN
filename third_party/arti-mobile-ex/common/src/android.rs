@@ -230,19 +230,20 @@ pub extern "system" fn Java_org_torproject_arti_ArtiControlNative_resolveHostnam
     let host: String = match env.get_string(&hostname) {
         Ok(v) => v.to_string_lossy().into_owned(),
         Err(_) => {
-            return env
-                .new_string("Error: invalid hostname")
-                .expect("jstring")
-                .into_raw();
+            return match env.new_string("Error: invalid hostname") {
+                Ok(s) => s.into_raw(),
+                Err(_) => std::ptr::null_mut(),
+            };
         }
     };
     let result = match arti_resolve_hostname(&host) {
         Ok(ips) => format!("OK:{ips}"),
         Err(e) => format!("Error: {e}"),
     };
-    env.new_string(result)
-        .expect("Couldn't create Java string!")
-        .into_raw()
+    match env.new_string(result) {
+        Ok(s) => s.into_raw(),
+        Err(_) => std::ptr::null_mut(),
+    }
 }
 
 #[no_mangle]
@@ -252,9 +253,10 @@ pub extern "system" fn Java_org_torproject_arti_ArtiControlNative_bootstrapBlock
     _class: JClass<'local>,
 ) -> jstring {
     let msg = arti_bootstrap_blockage().unwrap_or_default();
-    env.new_string(msg)
-        .expect("Couldn't create Java string!")
-        .into_raw()
+    match env.new_string(msg) {
+        Ok(s) => s.into_raw(),
+        Err(_) => std::ptr::null_mut(),
+    }
 }
 
 #[no_mangle]

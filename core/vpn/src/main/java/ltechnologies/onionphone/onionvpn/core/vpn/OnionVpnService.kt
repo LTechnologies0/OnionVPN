@@ -63,22 +63,27 @@ class OnionVpnService : VpnService() {
 
     override fun onCreate() {
         super.onCreate()
-        // Do not bind here: OnionMasq.init() has not run yet (getInstance throws).
+        bindInstanceProtect { fd -> protect(fd) }
+        // Do not bind onionmasq here: OnionMasq.init() has not run yet (getInstance throws).
         // OnionmasqTunForwarder rebinds after init.
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        // Always-on / sticky restart: OS may deliver null action — fail-closed Blocking TUN
-        // then ask the coordinator to bring Tor up (Orbot/Mullvad pattern).
-        if (intent?.action.isNullOrEmpty()) {
+        // Always-on / sticky restart: OS may deliver null/empty action, or the sample Tor VPN
+        // action "android.net.VpnService" (not SERVICE_INTERFACE bind — that is onBind only).
+        val action = intent?.action
+        if (action.isNullOrEmpty() || action == SERVICE_INTERFACE || action == "android.net.VpnService") {
             executor.execute {
-                Timber.i("VPN started with empty action — establishing Blocking profile (always-on/sticky)")
+                Timber.i(
+                    "VPN system/always-on start action=%s — Blocking profile + coordinator",
+                    action ?: "null",
+                )
                 applyBlockingDefaults()
+                // Promote coordinator FGS immediately (VPN guide API 26+).
                 notifyCoordinator(ACTION_ALWAYS_ON)
             }
             return START_STICKY
         }
-        val action = intent?.action ?: return START_STICKY
         executor.execute {
             when (action) {
                 ACTION_START -> applyProfile(intent, startForwarder = true)
@@ -92,6 +97,7 @@ class OnionVpnService : VpnService() {
     }
 
     override fun onDestroy() {
+        clearInstanceProtect()
         runCatching { OnionMasq.unbindVPNService() }
         // Run teardown on the VPN thread and wait — shutdown() alone can drop stopTunnel.
         try {
@@ -104,10 +110,21 @@ class OnionVpnService : VpnService() {
         super.onDestroy()
     }
 
+    /**
+     * VPN interface is already deactivated when this runs (Android docs). Tear down
+     * synchronously before [super.onRevoke] (default stopSelf) — Orbot ordering.
+     * [protect] returns false after revoke; do not assume Arti uplink still works.
+     */
     override fun onRevoke() {
-        Timber.w("VPN permission revoked — tearing down and notifying coordinator")
-        executor.execute {
-            stopTunnel(destroyService = false)
+        Timber.w("VPN permission revoked — synchronous teardown then super.onRevoke")
+        try {
+            executor.submit {
+                stopTunnel(destroyService = false)
+                notifyCoordinator(ACTION_REVOKED)
+            }.get(8, java.util.concurrent.TimeUnit.SECONDS)
+        } catch (e: Exception) {
+            Timber.w(e, "onRevoke stopTunnel wait failed — forcing local cleanup")
+            runCatching { stopTunnel(destroyService = false) }
             notifyCoordinator(ACTION_REVOKED)
         }
         super.onRevoke()
@@ -133,6 +150,13 @@ class OnionVpnService : VpnService() {
         val tunDataPlane = intent.getStringExtra(EXTRA_TUN_DATA_PLANE)
             ?.let { runCatching { TunDataPlane.valueOf(it) }.getOrNull() }
             ?: TunDataPlane.HEV_SOCKS
+        val torEngine = intent.getStringExtra(EXTRA_TOR_ENGINE)
+            ?.let {
+                runCatching {
+                    ltechnologies.onionphone.onionvpn.core.model.TorEngine.valueOf(it)
+                }.getOrNull()
+            }
+            ?: ltechnologies.onionphone.onionvpn.core.model.TorEngine.LITTLE_T
         val bridgeLines = intent.getStringExtra(EXTRA_BRIDGE_LINES)
         val exitCountry = intent.getStringExtra(EXTRA_EXIT_COUNTRY)
 
@@ -168,6 +192,7 @@ class OnionVpnService : VpnService() {
                             dnsMode,
                             synthesizeOnionAutomap,
                             tunDataPlane = tunDataPlane,
+                            torEngine = torEngine,
                             bridgeLines = bridgeLines,
                             exitCountry = exitCountry,
                         )
@@ -269,6 +294,54 @@ class OnionVpnService : VpnService() {
     ): VpnEstablishResult {
         return OpTrace.step("vpn", "establish mode=$mode", ProcessLogLevel.INFO) {
             try {
+                // Tor sample: fail-closed Connected establish when Private DNS hostname/DoT active.
+                // Opportunistic-only is soft (inspector); hard gate matches SystemLeakInspector.
+                if (mode == VpnProfileMode.Connected && isStrictPrivateDnsEnforced()) {
+                    return@step VpnEstablishResult.Failure(
+                        TunnelFailure.VpnEstablish(
+                            "Private DNS (DoT) is enforced — set Private DNS → Off before connecting",
+                        ).userMessage,
+                    )
+                }
+                // Always-on owned by another app → refuse (cannot establish under their VPN).
+                if (mode == VpnProfileMode.Connected) {
+                    val foreign = foreignAlwaysOnOwner()
+                    if (foreign != null) {
+                        return@step VpnEstablishResult.Failure(
+                            TunnelFailure.VpnEstablish(
+                                "Always-on VPN is owned by $foreign — switch it to OnionVPN first",
+                            ).userMessage,
+                        )
+                    }
+                }
+                // Strict OS lockdown pref: fail Connected unless lockdown is on (API 29+).
+                if (mode == VpnProfileMode.Connected &&
+                    preferences.requireOsLockdown &&
+                    Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
+                    !isLockdownEnabled
+                ) {
+                    return@step VpnEstablishResult.Failure(
+                        TunnelFailure.VpnEstablish(
+                            "Strict OS lockdown required — enable Always-on VPN + " +
+                                "“Block connections without VPN” for OnionVPN",
+                        ).userMessage,
+                    )
+                }
+                // INCLUDE × lockdown: cannot mix allow-list with Tor-native BYPASS disallow;
+                // under lockdown omitted apps are offline (never Orbot #774 skip-BYPASS).
+                if (mode == VpnProfileMode.Connected &&
+                    Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
+                    VpnProfileBuilder.includeConflictsWithLockdown(
+                        preferences,
+                        lockdownEnabled = isLockdownEnabled,
+                    )
+                ) {
+                    return@step VpnEstablishResult.Failure(
+                        TunnelFailure.VpnEstablish(
+                            VpnProfileBuilder.INCLUDE_LOCKDOWN_BLOCK_REASON,
+                        ).userMessage,
+                    )
+                }
                 val builder = VpnProfileBuilder.configure(this, preferences, mode)
                 val tun = builder.establish()
                     ?: return@step VpnEstablishResult.Failure(
@@ -311,6 +384,32 @@ class OnionVpnService : VpnService() {
         return caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
     }
 
+    /**
+     * Strict Private DNS: DoT active on any network (incl. non-VPN) or mode=hostname.
+     * Opportunistic alone is not hard-fail (matches SystemLeakInspector).
+     */
+    private fun isStrictPrivateDnsEnforced(): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) return false
+        val mode = runCatching {
+            android.provider.Settings.Global.getString(contentResolver, "private_dns_mode")
+        }.getOrNull().orEmpty()
+        if (mode.equals("hostname", ignoreCase = true)) return true
+        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+            ?: return false
+        return cm.allNetworks.any { network ->
+            val lp = cm.getLinkProperties(network) ?: return@any false
+            lp.isPrivateDnsActive && !lp.privateDnsServerName.isNullOrBlank()
+        }
+    }
+
+    /** Package that owns Always-on VPN if it is not us; null if unset or ours. */
+    private fun foreignAlwaysOnOwner(): String? {
+        val pkg = runCatching {
+            android.provider.Settings.Secure.getString(contentResolver, "always_on_vpn_app")
+        }.getOrNull()?.takeIf { it.isNotBlank() && it.contains('.') } ?: return null
+        return pkg.takeIf { it != packageName }
+    }
+
     private fun startForwarder(
         torSocksPort: Int,
         dnsCryptPort: Int,
@@ -318,32 +417,25 @@ class OnionVpnService : VpnService() {
         dnsMode: DnsResolverMode,
         synthesizeOnionAutomap: Boolean = false,
         tunDataPlane: TunDataPlane = TunDataPlane.HEV_SOCKS,
+        torEngine: ltechnologies.onionphone.onionvpn.core.model.TorEngine =
+            ltechnologies.onionphone.onionvpn.core.model.TorEngine.LITTLE_T,
         bridgeLines: String? = null,
         exitCountry: String? = null,
     ) {
         OpTrace.debug(
             "vpn",
-            "startForwarder plane=$tunDataPlane socks=$torSocksPort dnscrypt=$dnsCryptPort torDns=$torDnsPort",
+            "startForwarder plane=$tunDataPlane engine=$torEngine socks=$torSocksPort " +
+                "dnscrypt=$dnsCryptPort torDns=$torDnsPort",
         )
         val tun = tunInterface ?: return
-        val plane = TunDataPlaneFactory.resolve(
+        val effective = TunDataPlaneFactory.resolve(
             context = applicationContext,
             requested = tunDataPlane,
-            engine = when (tunDataPlane) {
-                TunDataPlane.ONIONMASQ -> ltechnologies.onionphone.onionvpn.core.model.TorEngine.ARTI
-                else -> ltechnologies.onionphone.onionvpn.core.model.TorEngine.LITTLE_T
-            },
+            engine = torEngine,
         )
-        // Caller already gated Arti+onionmasq; resolve again for fail-closed.
-        val effective = if (
-            tunDataPlane == TunDataPlane.ONIONMASQ &&
-            TunDataPlaneFactory.isOnionmasqNativePresent(applicationContext)
-        ) {
-            TunDataPlane.ONIONMASQ
-        } else {
-            TunDataPlane.HEV_SOCKS
-        }
-        Timber.i("VPN forwarder effectivePlane=$effective (requested=$tunDataPlane resolved=$plane)")
+        Timber.i(
+            "VPN forwarder effectivePlane=$effective (requested=$tunDataPlane engine=$torEngine)",
+        )
 
         val forwarder: TunForwarder = if (effective == TunDataPlane.ONIONMASQ) {
             circuitRepository.reset()
@@ -510,6 +602,7 @@ class OnionVpnService : VpnService() {
         const val EXTRA_VPN_APP_MODE = "vpn_app_mode"
         const val EXTRA_VPN_APP_PACKAGES = "vpn_app_packages"
         const val EXTRA_TUN_DATA_PLANE = "tun_data_plane"
+        const val EXTRA_TOR_ENGINE = "tor_engine"
         const val EXTRA_BRIDGE_LINES = "bridge_lines"
         const val EXTRA_EXIT_COUNTRY = "exit_country"
 
@@ -586,6 +679,23 @@ class OnionVpnService : VpnService() {
          */
         @Volatile
         private var torSocksUpstreamUpdater: ((Int) -> Unit)? = null
+
+        /**
+         * Best-effort [VpnService.protect] for kotlin-tor OR dials while this service is alive.
+         * Set from onCreate; cleared onDestroy.
+         */
+        @Volatile
+        private var instanceProtect: ((Int) -> Boolean)? = null
+
+        fun protectFd(fd: Int): Boolean = instanceProtect?.invoke(fd) ?: false
+
+        internal fun bindInstanceProtect(protect: (Int) -> Boolean) {
+            instanceProtect = protect
+        }
+
+        internal fun clearInstanceProtect() {
+            instanceProtect = null
+        }
 
         /**
          * Pause (0) or restore Tor SocksPort on the UID bridge without restarting hev.

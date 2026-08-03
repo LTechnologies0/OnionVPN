@@ -28,6 +28,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import ltechnologies.onionphone.onionvpn.core.vpn.onionmasq.TorNativeAppUids
 
 data class InstalledAppRow(
     val packageName: String,
@@ -43,7 +44,9 @@ fun PerAppVpnDialog(
     val context = LocalContext.current
     var query by remember { mutableStateOf("") }
     var apps by remember { mutableStateOf<List<InstalledAppRow>>(emptyList()) }
-    var draft by remember { mutableStateOf(selected) }
+    var draft by remember {
+        mutableStateOf(selected.filterNot { TorNativeAppUids.isBypassPackage(it) }.toSet())
+    }
 
     LaunchedEffect(Unit) {
         apps = withContext(Dispatchers.Default) {
@@ -53,6 +56,7 @@ fun PerAppVpnDialog(
             pm.getInstalledApplications(PackageManager.GET_META_DATA)
                 .asSequence()
                 .filter { it.packageName != own }
+                .filterNot { TorNativeAppUids.isBypassPackage(it.packageName) }
                 .filter {
                     (it.flags and ApplicationInfo.FLAG_SYSTEM) == 0 ||
                         pm.getLaunchIntentForPackage(it.packageName) != null
@@ -131,7 +135,11 @@ fun PerAppVpnDialog(
             }
         },
         confirmButton = {
-            TextButton(onClick = { onConfirm(draft) }) { Text(text = "OK") }
+            TextButton(
+                onClick = {
+                    onConfirm(draft.filterNot { TorNativeAppUids.isBypassPackage(it) }.toSet())
+                },
+            ) { Text(text = "OK") }
         },
         dismissButton = {
             TextButton(onClick = onDismiss) { Text(text = "Cancel") }

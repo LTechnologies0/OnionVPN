@@ -1,5 +1,6 @@
 package ltechnologies.onionphone.onionvpn.core.model
 
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -42,6 +43,24 @@ class TorEngineCapabilitiesCopyTest {
     }
 
     @Test
+    fun kotlinTor_capabilityMatrix_mirrorsLittleTHevSocksFlags() {
+        val k = TorEngine.KOTLIN_TOR.capabilities
+        val little = TorEngine.LITTLE_T.capabilities
+        // HEV_SOCKS plane parity with little-t (ports / isolation / Automap / NEWNYM).
+        assertEquals(little.classicControlPlane, k.classicControlPlane)
+        assertEquals(little.multiSocksSessionGroups, k.multiSocksSessionGroups)
+        assertEquals(little.socksAuthIsolation, k.socksAuthIsolation)
+        assertEquals(little.nativeAutomapDnsPort, k.nativeAutomapDnsPort)
+        assertEquals(little.synthesizeOnionAutomap, k.synthesizeOnionAutomap)
+        assertEquals(little.newIdentity, k.newIdentity)
+        assertTrue(k.dormantSignals)
+        // kotlin-tor ControlServer is not full torrc SETCONF / Conjure yet.
+        assertFalse(k.liveSetConf)
+        assertFalse(k.torrcConfig)
+        assertFalse(k.conjureBridges)
+    }
+
+    @Test
     fun arti_settingsSubtitle_mentionsRealCapabilities() {
         val text = TorEngine.ARTI.settingsSubtitle()
         assertTrue(text, text.contains("prediction_lifetime", ignoreCase = true))
@@ -80,5 +99,19 @@ class TorEngineCapabilitiesCopyTest {
         assertTrue(text, text.contains("ControlPort", ignoreCase = true))
         assertTrue(text, text.contains("Conjure supported", ignoreCase = true))
         assertFalse(text, text.contains("shared SocksPort", ignoreCase = true))
+    }
+
+    @Test
+    fun kotlinTor_enginePickerHint_mentionsControlSurface() {
+        val text = TorEngine.KOTLIN_TOR.enginePickerHint()
+        assertTrue(text, text.contains("Kotlin Tor", ignoreCase = true))
+        assertFalse(text, text.contains("shared SocksPort", ignoreCase = true))
+        assertTrue(text, text.contains("no Conjure", ignoreCase = true))
+    }
+
+    @Test
+    fun fromPreference_acceptsKotlinTor() {
+        assertEquals(TorEngine.KOTLIN_TOR, TorEngine.fromPreference("KOTLIN_TOR"))
+        assertEquals(TorEngine.KOTLIN_TOR, TorEngine.fromPreference("kotlin_tor"))
     }
 }

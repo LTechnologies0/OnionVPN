@@ -53,9 +53,12 @@ object TorConfigWriter {
      * isolation axis (Tor Browser model). Do **not** add IsolateDestAddr here —
      * same-UID multi-host pages (CDNs, Obtainium→api.github.com, …) would open
      * one circuit per destination and feel bandwidth-capped on mobile.
+     *
+     * IsolateClientAddr is omitted: every VPN stream arrives from 127.0.0.1
+     * (SocksUidBridge / PAC bridge) so ClientAddr is a dead path-spec axis.
      */
     const val SOCKS_ISOLATION_APPS =
-        "IsolateClientAddr IsolateClientProtocol IsolateSOCKSAuth"
+        "IsolateClientProtocol IsolateSOCKSAuth"
 
     /**
      * @param dataDirectory absolute Tor DataDirectory path

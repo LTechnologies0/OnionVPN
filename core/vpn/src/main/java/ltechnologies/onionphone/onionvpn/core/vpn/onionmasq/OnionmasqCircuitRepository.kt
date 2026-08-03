@@ -70,6 +70,14 @@ class OnionmasqCircuitRepository {
         countryCodesByApp.remove(uid)
     }
 
+    /** Drop open + sticky UI state when an app UID is uninstalled / force-stopped. */
+    fun dropApp(uid: Int) {
+        if (uid < 0) return
+        val keys = openByApp.remove(uid).orEmpty()
+        keys.forEach { connections.remove(it) }
+        countryCodesByApp.remove(uid)
+    }
+
     private fun onNew(event: NewConnectionEvent) {
         val key = ProxyKey(event.proxySrc, event.proxyDst)
         val conn = OpenConnection(

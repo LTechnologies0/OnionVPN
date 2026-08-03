@@ -40,9 +40,14 @@ git apply ../../native/onionmasq/safe-uninit-jni.patch
 
 SOCKS sidecar auth allowlist (must match `TunnelEndpoints`):
 `probe`/`check`, `dnscrypt`|`dnscrypt-nN`/`resolver`, `pac`/`dnscrypt`,
-`pac{uid}`/`p{uid}`, `u{uid}`/`p{uid}`, `onionvpn`/`stream`.
+`pac{uid}`|`pac{uid}-nN`/`p{uid}`|`p{uid}-nN`, `u{uid}`|`u{uid}-nN`/`p{uid}`|`p{uid}-nN`,
+`onionvpn`/`stream`.
 
 `safe-uninit-jni.patch` converts **all** probe/stop/config/command JNI entry points
 to `try_get()` (no-op / 0 / Java exception) when `init()` has not run. Upstream
-`get().expect` + `panic=abort` otherwise SIGABRTs the app. Java/Kotlin layers also
-gate these calls; rebuild the `.so` so the native side matches.
+`get().expect` + `panic=abort` otherwise SIGABRTs the app. Hot-path
+`scaffolding::get_connection_owner_uid` also uses `try_get` + soft UID errors.
+Java/Kotlin layers also gate these calls; rebuild the `.so` so the native side matches.
+
+`OnionMasq.setTurnServerConfig` is **WebRTC unsupported** on OnionVPN (UDP blackhole) —
+do not wire prefs; document-only soft-gate.

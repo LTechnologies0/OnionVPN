@@ -47,6 +47,9 @@ class AntiLeakHardKillSwitchIdsTest(private val id: String) {
             // Private DNS hostname|active). Missing Lockdown / opportunistic are Soft.
             "android.vpn.always_on",
             "vpn.address.not.public",
+            "tor.arti.status",
+            "tor.config.content",
+            "tor.config.missing",
         ).map { arrayOf(it) }
     }
 }

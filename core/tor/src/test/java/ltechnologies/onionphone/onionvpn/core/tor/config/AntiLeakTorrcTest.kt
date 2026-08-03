@@ -86,6 +86,10 @@ class AntiLeakTorrcIsolationTest {
         }
         assertFalse(apps.contains("IsolateDestPort"))
         assertFalse(apps.contains("IsolateDestAddr"))
+        assertFalse(
+            "IsolateClientAddr is dead on apps SocksPort (all clients 127.0.0.1)",
+            apps.contains("IsolateClientAddr"),
+        )
         assertTrue(apps.contains("KeepAliveIsolateSOCKSAuth"))
         assertTrue(apps.contains("IPv6Traffic"))
         assertFalse(apps.contains("PreferIPv6"))

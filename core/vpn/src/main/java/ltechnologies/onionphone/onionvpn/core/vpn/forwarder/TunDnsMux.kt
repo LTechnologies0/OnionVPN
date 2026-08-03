@@ -30,11 +30,12 @@ import timber.log.Timber
 
 /**
  * Splits VPN TUN traffic:
- * - When [divertDnsToDnsCrypt]: UDP/53 clearnet → DNSCrypt; `.onion`/`.exit` → Tor DNSPort
+ * - When [divertDnsToDnsCrypt]: UDP/53 clearnet (IPv4+IPv6 ULA) → DNSCrypt;
+ *   `.onion`/`.exit` → Tor DNSPort
  *   (AutomapHostsOnResolve → virtual IPs in [TunnelEndpoints.VIRTUAL_ADDR_NETWORK]/10),
  *   or app-side Automap when [synthesizeOnionAutomap] (Arti has no native Automap).
  * - Non-DNS UDP / ICMP / multicast → blackhole (force apps onto TCP; Tor has no UDP)
- * - IPv4+IPv6 TCP → hev → Tor SOCKS
+ * - IPv4+IPv6 TCP → hev → Tor SOCKS (clearnet IPv6 TCP blackholed except Automap ULA)
  * - IPv4 TCP → firewall check → hev engine (UID stamped into [TcpFlowUidIndex] for SocksUidBridge)
  *
  * DoS / ARM notes:
@@ -395,7 +396,7 @@ class TunDnsMux(
     }
 
     /**
-     * @return Pair(dnsOffset, dnsLength) for UDP/53 payloads, or null.
+     * @return Pair(dnsOffset, dnsLength) for UDP/53 payloads (IPv4 or IPv6), or null.
      * @param expectDestPort53 true for client→resolver, false to skip dest-port check.
      */
     private fun udpDnsPayload(
@@ -405,25 +406,50 @@ class TunDnsMux(
     ): Pair<Int, Int>? {
         if (length < 28) return null
         val version = (packet[0].toInt() ushr 4) and 0x0f
-        if (version != 4) return null
-        val ihl = (packet[0].toInt() and 0x0f) * 4
-        if (length < ihl + 8) return null
-        if (packet[9].toInt() and 0xff != PROTO_UDP) return null
-        if (expectDestPort53) {
-            val destPort = ((packet[ihl + 2].toInt() and 0xff) shl 8) or (packet[ihl + 3].toInt() and 0xff)
-            if (destPort != 53) return null
+        return when (version) {
+            4 -> {
+                val ihl = (packet[0].toInt() and 0x0f) * 4
+                if (length < ihl + 8) return null
+                if (packet[9].toInt() and 0xff != PROTO_UDP) return null
+                if (expectDestPort53) {
+                    val destPort = ((packet[ihl + 2].toInt() and 0xff) shl 8) or
+                        (packet[ihl + 3].toInt() and 0xff)
+                    if (destPort != 53) return null
+                }
+                val dnsOffset = ihl + 8
+                val dnsLen = length - dnsOffset
+                if (dnsLen < 12) return null
+                dnsOffset to dnsLen
+            }
+            6 -> {
+                if (length < 40 + 8) return null
+                if (packet[6].toInt() and 0xff != PROTO_UDP) return null
+                if (expectDestPort53) {
+                    val destPort = ((packet[40 + 2].toInt() and 0xff) shl 8) or
+                        (packet[40 + 3].toInt() and 0xff)
+                    if (destPort != 53) return null
+                }
+                val dnsOffset = 40 + 8
+                val dnsLen = length - dnsOffset
+                if (dnsLen < 12) return null
+                dnsOffset to dnsLen
+            }
+            else -> null
         }
-        val dnsOffset = ihl + 8
-        val dnsLen = length - dnsOffset
-        if (dnsLen < 12) return null
-        return dnsOffset to dnsLen
     }
 
     private fun handleDnsQuery(packet: ByteArray, length: Int, tunOut: FileOutputStream) {
         if (!running.get()) return
         try {
-            val ihl = (packet[0].toInt() and 0x0f) * 4
-            val dnsOffset = ihl + 8
+            val version = (packet[0].toInt() ushr 4) and 0x0f
+            val dnsOffset = when (version) {
+                4 -> {
+                    val ihl = (packet[0].toInt() and 0x0f) * 4
+                    ihl + 8
+                }
+                6 -> 48
+                else -> return
+            }
             if (length <= dnsOffset) return
 
             val queryLen = length - dnsOffset
@@ -440,6 +466,11 @@ class TunDnsMux(
 
             if (useTorAutomap && synthesizeOnionAutomap) {
                 val host = qname ?: return
+                // Automap AAAA on IPv6 DNS would need virtual v6; keep A-only Automap on IPv4 path.
+                if (version != 4) {
+                    Timber.d("Onion Automap over IPv6 DNS skipped — use IPv4 DNS q=$qname")
+                    return
+                }
                 val virtIp = OnionAutomapAllocator.ipv4ForHostname(host)
                 val dnsPayload = DnsOnionAutomapReply.buildAResponse(
                     packet,
@@ -562,10 +593,15 @@ class TunDnsMux(
                     DnsHostnameCache.put(ip, hostForCache)
                 }
             } else {
-                val ihlOut = (packet[0].toInt() and 0x0f) * 4
-                val clientSport =
-                    ((packet[ihlOut].toInt() and 0xff) shl 8) or
-                        (packet[ihlOut + 1].toInt() and 0xff)
+                val clientSport = when (version) {
+                    4 -> {
+                        val ihlOut = (packet[0].toInt() and 0x0f) * 4
+                        ((packet[ihlOut].toInt() and 0xff) shl 8) or
+                            (packet[ihlOut + 1].toInt() and 0xff)
+                    }
+                    6 -> ((packet[40].toInt() and 0xff) shl 8) or (packet[41].toInt() and 0xff)
+                    else -> -1
+                }
                 learnFromDnsPayload(
                     scratch.responseBuf,
                     0,
@@ -612,6 +648,21 @@ class TunDnsMux(
         dnsLen: Int,
         out: ByteArray,
     ): Int? {
+        val version = (request[0].toInt() ushr 4) and 0x0f
+        return when (version) {
+            4 -> buildDnsReplyIpv4(request, requestLen, dnsPayload, dnsLen, out)
+            6 -> buildDnsReplyIpv6(request, requestLen, dnsPayload, dnsLen, out)
+            else -> null
+        }
+    }
+
+    private fun buildDnsReplyIpv4(
+        request: ByteArray,
+        requestLen: Int,
+        dnsPayload: ByteArray,
+        dnsLen: Int,
+        out: ByteArray,
+    ): Int? {
         val ihl = (request[0].toInt() and 0x0f) * 4
         val totalLen = ihl + 8 + dnsLen
         if (totalLen > MTU || dnsLen < 0 || totalLen > out.size || requestLen < ihl + 8) return null
@@ -641,6 +692,67 @@ class TunDnsMux(
 
         System.arraycopy(dnsPayload, 0, out, ihl + 8, dnsLen)
         return totalLen
+    }
+
+    private fun buildDnsReplyIpv6(
+        request: ByteArray,
+        requestLen: Int,
+        dnsPayload: ByteArray,
+        dnsLen: Int,
+        out: ByteArray,
+    ): Int? {
+        val udpLen = 8 + dnsLen
+        val totalLen = 40 + udpLen
+        if (totalLen > MTU || dnsLen < 0 || totalLen > out.size || requestLen < 48) return null
+
+        System.arraycopy(request, 0, out, 0, 40)
+        // Swap src ↔ dst (offsets 8..23 and 24..39).
+        for (i in 0 until 16) {
+            out[8 + i] = request[24 + i]
+            out[24 + i] = request[8 + i]
+        }
+        out[4] = (udpLen ushr 8).toByte()
+        out[5] = (udpLen and 0xff).toByte()
+        out[6] = PROTO_UDP.toByte()
+
+        out[40] = request[42]
+        out[41] = request[43]
+        out[42] = request[40]
+        out[43] = request[41]
+        out[44] = (udpLen ushr 8).toByte()
+        out[45] = (udpLen and 0xff).toByte()
+        out[46] = 0
+        out[47] = 0
+        System.arraycopy(dnsPayload, 0, out, 48, dnsLen)
+
+        // IPv6 UDP checksum is mandatory (RFC 8200).
+        val sum = udpChecksumIpv6(out, udpLen)
+        out[46] = (sum ushr 8).toByte()
+        out[47] = (sum and 0xff).toByte()
+        return totalLen
+    }
+
+    /** UDP checksum over IPv6 pseudo-header + UDP header + payload. */
+    private fun udpChecksumIpv6(packet: ByteArray, udpLen: Int): Int {
+        var sum = 0
+        var p = 8
+        while (p < 40) {
+            sum += ((packet[p].toInt() and 0xff) shl 8) or (packet[p + 1].toInt() and 0xff)
+            p += 2
+        }
+        sum += (udpLen ushr 16) and 0xffff
+        sum += udpLen and 0xffff
+        sum += PROTO_UDP
+        var i = 40
+        val end = 40 + udpLen
+        while (i + 1 < end) {
+            sum += ((packet[i].toInt() and 0xff) shl 8) or (packet[i + 1].toInt() and 0xff)
+            i += 2
+        }
+        if (i < end) sum += (packet[i].toInt() and 0xff) shl 8
+        while (sum ushr 16 != 0) sum = (sum and 0xffff) + (sum ushr 16)
+        val result = sum.inv() and 0xffff
+        return if (result == 0) 0xffff else result
     }
 
     private fun checksum(buf: ByteArray, offset: Int, length: Int): Int {

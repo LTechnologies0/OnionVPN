@@ -24,6 +24,7 @@ import ltechnologies.onionphone.onionvpn.core.model.observability.MemoryHygiene
 import ltechnologies.onionphone.onionvpn.core.model.observability.OpTrace
 import ltechnologies.onionphone.onionvpn.core.model.stability.ProcessLogLevel
 import ltechnologies.onionphone.onionvpn.core.tor.arti.ArtiRuntime
+import ltechnologies.onionphone.onionvpn.core.tor.kotlintor.KotlinTorRuntime
 import ltechnologies.onionphone.onionvpn.core.tor.config.TorBridgeConfig
 import ltechnologies.onionphone.onionvpn.core.tor.config.TorConfigWriter
 import ltechnologies.onionphone.onionvpn.core.tor.control.TorControlClient
@@ -44,6 +45,7 @@ import timber.log.Timber
  * Supports two engines via [TunnelPreferences.torEngine]:
  * - [TorEngine.LITTLE_T] — `libtor.so` process + torrc + ControlSocket (default)
  * - [TorEngine.ARTI] — in-process Arti (`arti-mobile`) SOCKS+DNS; synthetic control status
+ * - [TorEngine.KOTLIN_TOR] — in-process kotlin-tor SOCKS+DNSPort on HEV_SOCKS (+ DNSCrypt)
  *
  * Lives in the root `core.tor` package (public DI entry) while control/config/lifecycle
  * internals stay in subpackages — keeps Hilt/KSP resolution stable.
@@ -82,6 +84,16 @@ class TorProcessManager(
     private var preferences: TunnelPreferences = TunnelPreferences()
     private var activeEngine: TorEngine = TorEngine.LITTLE_T
     private val arti = ArtiRuntime(context)
+    private val kotlinTor = KotlinTorRuntime(context)
+    /**
+     * VpnService.protect for kotlin-tor OR/PT dials. Set from [OnionVpnService]
+     * / tunnel coordinator **before** [start] when under VPN.
+     */
+    var socketProtect: ((Int) -> Boolean)? = null
+        set(value) {
+            field = value
+            if (value != null) kotlinTor.attachVpn(value)
+        }
     /**
      * App-layer dormant flag for Arti when Ext JNI is absent.
      * Prefer [ArtiControlNative.setDormant] (TorClient::set_dormant) when patched .so is loaded.
@@ -142,16 +154,29 @@ class TorProcessManager(
                 runCatching { onDnsDependentPause?.invoke() }
                     .onFailure { Timber.w(it, "onDnsDependentPause failed") }
             }
+            var ok = false
             try {
-                block()
+                val result = block()
+                ok = true
+                result
             } finally {
                 if (pauseUpstreamSocks && bridgePauseDepth.decrementAndGet() == 0) {
-                    // Resume DNSCrypt only after block waited for traffic-ready (Arti)
-                    // or SocksPort settle (C Tor), then unpause hev SOCKS bridges.
-                    runCatching { onDnsDependentResume?.invoke() }
-                        .onFailure { Timber.w(it, "onDnsDependentResume failed") }
-                    runCatching { onTorDowntimeChanged?.invoke(false) }
-                        .onFailure { Timber.w(it, "onTorDowntimeChanged(false) failed") }
+                    if (ok) {
+                        // Resume DNSCrypt only after block waited for traffic-ready (Arti)
+                        // or SocksPort settle (C Tor), then unpause hev SOCKS bridges.
+                        runCatching { onDnsDependentResume?.invoke() }
+                            .onFailure { Timber.w(it, "onDnsDependentResume failed") }
+                        runCatching { onTorDowntimeChanged?.invoke(false) }
+                            .onFailure { Timber.w(it, "onTorDowntimeChanged(false) failed") }
+                    } else {
+                        // Do not restart DNSCrypt against a failed Arti/DisableNetwork path.
+                        // Unpause bridges so dials fail-closed and validation can react.
+                        runCatching { onTorDowntimeChanged?.invoke(false) }
+                            .onFailure { Timber.w(it, "onTorDowntimeChanged(false) after fail") }
+                        Timber.w(
+                            "withTorDowntime failed — bridges unpaused without DNSCrypt resume",
+                        )
+                    }
                 }
                 maintenanceDepth.decrementAndGet()
             }
@@ -228,6 +253,7 @@ class TorProcessManager(
     val runtimeConfigFile: File
         get() = when (activeEngine) {
             TorEngine.ARTI -> arti.statusFile
+            TorEngine.KOTLIN_TOR -> kotlinTor.statusFile
             TorEngine.LITTLE_T -> torrcFile
         }
 
@@ -255,6 +281,7 @@ class TorProcessManager(
                     artiDormant = false
                     startArti(ports, preferences)
                 }
+                TorEngine.KOTLIN_TOR -> startKotlinTor(ports, preferences)
                 TorEngine.LITTLE_T -> startLittleT(ports, preferences)
             }
         }
@@ -289,6 +316,37 @@ class TorProcessManager(
             stopInternal()
             runtimePorts = null
             Result.failure(TunnelFailure.fromThrowable(error, context = "arti.start"))
+        }
+    }
+
+    private suspend fun startKotlinTor(
+        ports: TunnelRuntimePorts,
+        preferences: TunnelPreferences,
+    ): Result<Unit> {
+        OpTrace.debug("tor", "kotlin_tor.stop_prior")
+        stopInternal()
+        runtimePorts = ports
+        return try {
+            OpTrace.stepSuspending("tor", "kotlin_tor.start", ProcessLogLevel.INFO) {
+                // attachVpn protect before SOCKS bind (PlatformNatives.protectSocketFd).
+                socketProtect?.let { kotlinTor.attachVpn(it) }
+                kotlinTor.start(ports, preferences, protect = socketProtect)
+            }
+            // DNSCrypt must wait until this returns — SOCKS + DNSPort ready.
+            publishKotlinTorReadyStatus()
+            OpTrace.info(
+                "tor",
+                "kotlin-tor ready socks=${ports.torSocksPort} " +
+                    "dnsCrypt=${ports.torDnsCryptSocksPort} " +
+                    "probe=${ports.torProbeSocksPort} dns=${ports.torDnsPort}",
+            )
+            Result.success(Unit)
+        } catch (error: Exception) {
+            OpTrace.error("tor", "kotlin-tor failed to start", error)
+            Timber.e(error, "kotlin-tor failed to start")
+            stopInternal()
+            runtimePorts = null
+            Result.failure(TunnelFailure.fromThrowable(error, context = "kotlin_tor.start"))
         }
     }
 
@@ -349,6 +407,7 @@ class TorProcessManager(
 
     fun isRunning(): Boolean = when (activeEngine) {
         TorEngine.ARTI -> arti.isRunning()
+        TorEngine.KOTLIN_TOR -> kotlinTor.isRunning()
         TorEngine.LITTLE_T -> process?.isAlive == true
     }
 
@@ -363,8 +422,11 @@ class TorProcessManager(
     fun attachExternalRuntimePorts(ports: TunnelRuntimePorts) {
         runtimePorts = ports
         externalDataPlanePorts = true
+        // Onionmasq plane skips tor.start() — keep engine aligned for control/status IO.
+        activeEngine = TorEngine.ARTI
+        preferences = preferences.copy(torEngine = TorEngine.ARTI)
         Timber.i(
-            "TorProcessManager attached external ports socks=%d probe=%d dns=%d",
+            "TorProcessManager attached external ports socks=%d probe=%d dns=%d engine=ARTI",
             ports.torSocksPort,
             ports.torProbeSocksPort,
             ports.torDnsPort,
@@ -383,7 +445,7 @@ class TorProcessManager(
         activeEngine == TorEngine.LITTLE_T && control.isConnected
 
     private fun requireClassic(op: String): Result<Unit>? {
-        if (activeEngine == TorEngine.ARTI) {
+        if (activeEngine == TorEngine.ARTI || activeEngine == TorEngine.KOTLIN_TOR) {
             return Result.failure(IOException(TorControlCompat.unsupportedMessage(op)))
         }
         if (!control.isConnected) {
@@ -430,6 +492,27 @@ class TorProcessManager(
                     },
                 )
             }
+            TorEngine.KOTLIN_TOR -> {
+                if (!kotlinTor.isRunning()) {
+                    return@withContext Result.failure(IOException("kotlin-tor not running"))
+                }
+                runCatching {
+                    withTorDowntime(pauseUpstreamSocks = false) {
+                        kotlinTor.newNym()
+                        clearAppDnsCaches()
+                        delay(NEWNYM_SETTLE_MS)
+                    }
+                }.fold(
+                    onSuccess = {
+                        Timber.i("kotlin-tor NEWNYM accepted")
+                        Result.success(Unit)
+                    },
+                    onFailure = { e ->
+                        Timber.w(e, "kotlin-tor NEWNYM failed")
+                        Result.failure(e)
+                    },
+                )
+            }
             TorEngine.LITTLE_T -> {
                 if (!control.isConnected) {
                     return@withContext Result.failure(IOException("control not connected"))
@@ -469,6 +552,15 @@ class TorProcessManager(
             )
             return Result.success(Unit)
         }
+        if (activeEngine == TorEngine.KOTLIN_TOR) {
+            // Soft ACTIVE: re-publish ready status (ControlServer SIGNAL when AAR wired).
+            if (!kotlinTor.isRunning()) {
+                return Result.failure(IOException("kotlin-tor not running"))
+            }
+            publishKotlinTorReadyStatus()
+            Timber.i("kotlin-tor ACTIVE (synthetic)")
+            return Result.success(Unit)
+        }
         if (!control.isConnected) return Result.failure(IOException("control not connected"))
         return control.setActive().also {
             it.onSuccess { Timber.i("SIGNAL ACTIVE") }
@@ -491,6 +583,13 @@ class TorProcessManager(
             )
             return Result.success(Unit)
         }
+        if (activeEngine == TorEngine.KOTLIN_TOR) {
+            if (!kotlinTor.isRunning()) {
+                return Result.failure(IOException("kotlin-tor not running"))
+            }
+            Timber.i("kotlin-tor DORMANT (synthetic; runtime kept under Blocking)")
+            return Result.success(Unit)
+        }
         if (!control.isConnected) return Result.failure(IOException("control not connected"))
         return control.setDormant()
     }
@@ -504,6 +603,10 @@ class TorProcessManager(
             // Soft path: wake / re-probe first; only flush DNSCrypt when upstream is ready.
             return onNetworkChanged()
         }
+        if (activeEngine == TorEngine.KOTLIN_TOR) {
+            clearAppDnsCaches()
+            return Result.success(Unit)
+        }
         if (!control.isConnected) return Result.failure(IOException("control not connected"))
         return control.clearDnsCache().also { result ->
             if (result.isSuccess) clearAppDnsCaches()
@@ -513,25 +616,37 @@ class TorProcessManager(
     /** DROPTIMEOUTS — Arti: soft recovery. */
     fun dropTimeouts(): Result<Unit> {
         if (activeEngine == TorEngine.ARTI) return onNetworkChanged()
+        if (activeEngine == TorEngine.KOTLIN_TOR) return onNetworkChanged()
         if (!control.isConnected) return Result.failure(IOException("control not connected"))
         return control.dropTimeouts()
     }
 
     /** DROPGUARDS — Arti: hard restart (clears client state). */
     suspend fun dropGuards(): Result<Unit> = withContext(Dispatchers.IO) {
-        if (activeEngine == TorEngine.ARTI) return@withContext recoverNetworkHard()
+        if (activeEngine == TorEngine.ARTI || activeEngine == TorEngine.KOTLIN_TOR) {
+            return@withContext recoverNetworkHard()
+        }
         if (!control.isConnected) {
             return@withContext Result.failure(IOException("control not connected"))
         }
         control.dropGuards()
     }
 
-    /** SETCONF DisableNetwork — Arti: hard restart. */
+    /** SETCONF DisableNetwork — Arti / kotlin-tor: hard restart. */
     suspend fun setDisableNetwork(disabled: Boolean): Result<Unit> = withContext(Dispatchers.IO) {
         if (activeEngine == TorEngine.ARTI) {
             return@withContext if (disabled) {
                 // Soft stop listeners by stopping Arti; caller should re-enable via hard recover.
                 arti.stop()
+                control.resetStatus()
+                Result.success(Unit)
+            } else {
+                recoverNetworkHard()
+            }
+        }
+        if (activeEngine == TorEngine.KOTLIN_TOR) {
+            return@withContext if (disabled) {
+                kotlinTor.stop()
                 control.resetStatus()
                 Result.success(Unit)
             } else {
@@ -566,6 +681,15 @@ class TorProcessManager(
                 predApplied,
                 newCircuitPeriodSec,
                 applied,
+            )
+            return Result.success(Unit)
+        }
+        if (activeEngine == TorEngine.KOTLIN_TOR) {
+            // liveCircuitTiming=false until KotlinTorEngine exposes timing reconfigure.
+            Timber.i(
+                "kotlin-tor circuit timing stored for next start dirt=%ds period=%ds",
+                maxCircuitDirtinessSec,
+                newCircuitPeriodSec,
             )
             return Result.success(Unit)
         }
@@ -610,6 +734,9 @@ class TorProcessManager(
             TorEngine.ARTI -> {
                 newNym().map { 0 }
             }
+            TorEngine.KOTLIN_TOR -> {
+                newNym().map { 0 }
+            }
             TorEngine.LITTLE_T -> {
                 if (!control.isConnected) {
                     return@withContext Result.failure(IOException("control not connected"))
@@ -640,6 +767,18 @@ class TorProcessManager(
                 runtimePorts?.let { TorReadiness.isPrimarySocksReady(it) },
             )
             if (!ok) return Result.failure(IOException("Arti not ready for DNSCrypt upstream"))
+            clearAppDnsCaches()
+            return Result.success(Unit)
+        }
+        if (activeEngine == TorEngine.KOTLIN_TOR) {
+            publishKotlinTorReadyStatus()
+            val ok = isReadyForDnsCryptUpstream()
+            Timber.i(
+                "kotlin-tor network change soft recovery ready=%s socks=%s",
+                ok,
+                runtimePorts?.let { TorReadiness.isPrimarySocksReady(it) },
+            )
+            if (!ok) return Result.failure(IOException("kotlin-tor not ready for DNSCrypt upstream"))
             clearAppDnsCaches()
             return Result.success(Unit)
         }
@@ -681,6 +820,25 @@ class TorProcessManager(
                     },
                 )
             }
+            TorEngine.KOTLIN_TOR -> {
+                runCatching {
+                    withTorDowntime {
+                        val ports = runtimePorts ?: error("no ports")
+                        kotlinTor.stop()
+                        kotlinTor.start(ports, preferences)
+                        clearAppDnsCaches()
+                    }
+                }.fold(
+                    onSuccess = {
+                        Timber.w("kotlin-tor network recovery HARD: restart")
+                        Result.success(Unit)
+                    },
+                    onFailure = { e ->
+                        Timber.w(e, "kotlin-tor hard recovery failed")
+                        Result.failure(e)
+                    },
+                )
+            }
             TorEngine.LITTLE_T -> {
                 if (!control.isConnected) {
                     return@withContext Result.failure(IOException("control not connected"))
@@ -716,10 +874,18 @@ class TorProcessManager(
         }
     }
 
-    /** GETINFO refresh — Arti: synthetic SOCKS/DNS status. */
+    /** GETINFO refresh — Arti / kotlin-tor: synthetic SOCKS/DNS status. */
     fun refreshControlInfo() {
+        if (externalDataPlanePorts) {
+            // onionmasq plane — no arti-mobile / classic control; status from BootstrapEvent.
+            return
+        }
         if (activeEngine == TorEngine.ARTI) {
             publishArtiReadyStatus()
+            return
+        }
+        if (activeEngine == TorEngine.KOTLIN_TOR) {
+            publishKotlinTorReadyStatus()
             return
         }
         if (control.isConnected) control.refreshInfo()
@@ -731,8 +897,13 @@ class TorProcessManager(
     }
 
     fun refreshControlHealthLite() {
+        if (externalDataPlanePorts) return
         if (activeEngine == TorEngine.ARTI) {
             publishArtiReadyStatus()
+            return
+        }
+        if (activeEngine == TorEngine.KOTLIN_TOR) {
+            publishKotlinTorReadyStatus()
             return
         }
         if (control.isConnected) control.refreshHealthLite()
@@ -769,6 +940,11 @@ class TorProcessManager(
                     Timber.w(e, "Arti bridges restart failed")
                     Result.failure(e)
                 },
+            )
+        }
+        if (activeEngine == TorEngine.KOTLIN_TOR) {
+            return@withContext Result.failure(
+                IOException("kotlin-tor bridges require restart (bridgesAtStart=false)"),
             )
         }
         if (!control.isConnected) {
@@ -810,6 +986,11 @@ class TorProcessManager(
                 Result.failure(IOException("Arti applyExitCountry failed (need control-api≥2)"))
             }
         }
+        if (activeEngine == TorEngine.KOTLIN_TOR) {
+            return Result.failure(
+                IOException("kotlin-tor node prefs not live yet (nodePrefs=false)"),
+            )
+        }
         if (!control.isConnected) return Result.failure(IOException("control not connected"))
         return control.setNodePrefs(entry, exit, exclude)
     }
@@ -841,6 +1022,17 @@ class TorProcessManager(
                         )
                     }
                 }
+                TorEngine.KOTLIN_TOR -> {
+                    val port = runtimePorts?.torDnsPort
+                        ?: return@withContext Result.failure(IOException("kotlin-tor DNSPort unknown"))
+                    runCatching {
+                        TorDnsResolve.resolveA(
+                            hostname = hostname,
+                            dnsPort = port,
+                            timeoutMs = timeoutMs.toInt().coerceIn(500, 60_000),
+                        )
+                    }
+                }
                 TorEngine.LITTLE_T -> {
                     if (!control.isConnected) {
                         return@withContext Result.failure(IOException("control not connected"))
@@ -852,7 +1044,9 @@ class TorProcessManager(
 
     /** SIGNAL RELOAD — Arti: hard restart (semantic 1:1 with HUP/reload). */
     suspend fun signalReload(): Result<Unit> = withContext(Dispatchers.IO) {
-        if (activeEngine == TorEngine.ARTI) return@withContext recoverNetworkHard()
+        if (activeEngine == TorEngine.ARTI || activeEngine == TorEngine.KOTLIN_TOR) {
+            return@withContext recoverNetworkHard()
+        }
         if (!control.isConnected) {
             return@withContext Result.failure(IOException("control not connected"))
         }
@@ -860,7 +1054,7 @@ class TorProcessManager(
     }
 
     fun signalHeartbeat(): Result<Unit> {
-        if (activeEngine == TorEngine.ARTI) return Result.success(Unit)
+        if (activeEngine == TorEngine.ARTI || activeEngine == TorEngine.KOTLIN_TOR) return Result.success(Unit)
         if (!control.isConnected) return Result.failure(IOException("control not connected"))
         return control.heartbeat()
     }
@@ -880,6 +1074,8 @@ class TorProcessManager(
             TorEngine.LITTLE_T ->
                 process?.isAlive == true && TorReadiness.isPrimarySocksReady(ports)
             TorEngine.ARTI -> isArtiTrafficReady(ports)
+            TorEngine.KOTLIN_TOR ->
+                kotlinTor.isRunning() && TorReadiness.isPrimarySocksReady(ports)
         }
     }
 
@@ -896,6 +1092,28 @@ class TorProcessManager(
             frac == null && !ArtiControlNative.isAvailable() -> true
             else -> false
         }
+    }
+
+    /** Synthetic control status for kotlin-tor HEV_SOCKS (DNSCrypt may start after this). */
+    private fun publishKotlinTorReadyStatus() {
+        val socksUp = runtimePorts?.let { TorReadiness.isPrimarySocksReady(it) } == true
+        val ready = kotlinTor.isRunning() && socksUp
+        control.publishSyntheticStatus(
+            TorControlStatus(
+                connected = ready,
+                torVersion = KotlinTorRuntime.VERSION_LABEL,
+                bootstrapProgress = if (ready) 100 else if (kotlinTor.isRunning()) 50 else 0,
+                bootstrapTag = if (ready) "done" else "starting",
+                bootstrapSummary = if (ready) {
+                    "kotlin-tor SOCKS+DNSPort ready"
+                } else {
+                    "kotlin-tor starting"
+                },
+                circuitEstablished = ready,
+                networkLive = ready,
+                builtCircuits = 0,
+            ),
+        )
     }
 
     private fun publishArtiReadyStatus() {
@@ -1372,7 +1590,10 @@ class TorProcessManager(
     }
 
     private suspend fun stopInternal() {
-        if (activeEngine == TorEngine.ARTI || arti.isRunning()) {
+        if (activeEngine == TorEngine.KOTLIN_TOR || kotlinTor.isRunning()) {
+            kotlinTor.stop()
+            control.resetStatus()
+        } else if (activeEngine == TorEngine.ARTI || arti.isRunning()) {
             // Await Stopped so a following Little-T/Arti start does not race AMEx state.
             arti.stopAndAwait()
             control.resetStatus()

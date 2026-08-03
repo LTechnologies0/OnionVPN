@@ -30,6 +30,31 @@ class LeakPacketFilterTest {
     }
 
     @Test
+    fun dnsUdp53_ipv6_isDivertNotBlackhole() {
+        val pkt = ipv6Udp(
+            src = byteArrayOf(
+                0xfd.toByte(), 0x00, 0x08, 0x08, 0x08, 0x08, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0x02,
+            ),
+            dst = byteArrayOf(
+                0xfd.toByte(), 0x00, 0x08, 0x08, 0x08, 0x08, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0x01,
+            ),
+            srcPort = 53_000,
+            dstPort = 53,
+            payload = byteArrayOf(0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00),
+        )
+        assertTrue(LeakPacketFilter.isIpv6DnsUdpPort53(pkt, pkt.size))
+        assertTrue(LeakPacketFilter.isDnsUdpPort53(pkt, pkt.size))
+        assertEquals(
+            LeakPacketFilter.UdpDisposition.DivertDns,
+            LeakPacketFilter.classifyUdp(pkt, pkt.size),
+        )
+        assertFalse(LeakPacketFilter.shouldBlackholeUdp(pkt, pkt.size))
+        assertFalse(LeakPacketFilter.shouldDropEarly(pkt, pkt.size))
+    }
+
+    @Test
     fun quicOn443_isBlackholeQuic() {
         // Long-header QUIC (bit7 set)
         val payload = byteArrayOf(0xC0.toByte(), 0x00, 0x00, 0x00, 0x01, 0x08)
@@ -139,6 +164,33 @@ class LeakPacketFilterTest {
         pkt[ihl + 4] = (udpLen ushr 8).toByte()
         pkt[ihl + 5] = (udpLen and 0xff).toByte()
         System.arraycopy(payload, 0, pkt, ihl + 8, payload.size)
+        return pkt
+    }
+
+    private fun ipv6Udp(
+        src: ByteArray,
+        dst: ByteArray,
+        srcPort: Int,
+        dstPort: Int,
+        payload: ByteArray,
+    ): ByteArray {
+        require(src.size == 16 && dst.size == 16)
+        val udpLen = 8 + payload.size
+        val pkt = ByteArray(40 + udpLen)
+        pkt[0] = 0x60
+        pkt[4] = (udpLen ushr 8).toByte()
+        pkt[5] = (udpLen and 0xff).toByte()
+        pkt[6] = 17 // UDP
+        pkt[7] = 64 // hop limit
+        System.arraycopy(src, 0, pkt, 8, 16)
+        System.arraycopy(dst, 0, pkt, 24, 16)
+        pkt[40] = (srcPort ushr 8).toByte()
+        pkt[41] = (srcPort and 0xff).toByte()
+        pkt[42] = (dstPort ushr 8).toByte()
+        pkt[43] = (dstPort and 0xff).toByte()
+        pkt[44] = (udpLen ushr 8).toByte()
+        pkt[45] = (udpLen and 0xff).toByte()
+        System.arraycopy(payload, 0, pkt, 48, payload.size)
         return pkt
     }
 

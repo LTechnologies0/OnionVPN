@@ -450,8 +450,21 @@ class CircuitLifecycleManager(
      */
     private fun reapUidIfKnown(uid: Int) {
         if (uid < 0 || uid == Process.myUid()) return
-        val user = TunnelEndpoints.socksUserForUid(uid)
-        closeAuthDomain(user)
+        // Close every NEWNYM epoch for this UID (`u{uid}` and `u{uid}-nN`).
+        val users = LinkedHashSet<String>()
+        streams.values.forEach { s ->
+            val name = s.socksUsername ?: s.info.socksUsername
+            if (name != null && TunnelEndpoints.uidFromSocksUser(name) == uid) users.add(name)
+        }
+        circuits.values.forEach { c ->
+            val name = c.socksUsername
+            if (name != null && TunnelEndpoints.uidFromSocksUser(name) == uid) users.add(name)
+        }
+        if (users.isEmpty()) {
+            // Still try current-epoch token (control may not have listed yet).
+            users.add(TunnelEndpoints.socksUserForUid(uid))
+        }
+        users.forEach { closeAuthDomain(it) }
     }
 
     private fun closeAuthDomain(socksUser: String) {

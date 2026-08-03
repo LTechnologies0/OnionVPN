@@ -21,7 +21,7 @@ import ltechnologies.onionphone.onionvpn.core.model.TunnelRuntimePorts
  * SOCKS TCP accepts early; DNSPort may listen but not answer queries until bootstrap
  * finishes — never require a successful DNS reply before bootstrap is done.
  */
-internal object TorReadiness {
+object TorReadiness {
     /** TCP connect to loopback SOCKS. Throws on failure. */
     fun assertSocksReady(port: Int, timeoutMs: Int = 800) {
         Socket().use { socket ->

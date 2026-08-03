@@ -115,6 +115,10 @@ class MainViewModel @Inject constructor(
     fun savePreferences(prefs: TunnelPreferences, restartIfConnected: Boolean = true) {
         viewModelScope.launch {
             actionMutex.withLock {
+                val previous = preferences.value
+                if (prefs == previous && !restartIfConnected) {
+                    return@withLock
+                }
                 preferencesStore.update { prefs }
                 val phase = snapshot.value.phase
                 when {
@@ -123,6 +127,7 @@ class MainViewModel @Inject constructor(
                         enqueueRestartLocked(prefs)
                     }
                     phase == TunnelPhase.Connected -> {
+                        if (prefs == previous) return@withLock
                         // Live apply without full tunnel restart (Orbot-style SETCONF where possible).
                         orchestrator.applyCircuitTiming(prefs)
                         withContext(Dispatchers.IO) {

@@ -52,21 +52,24 @@ internal class TunnelNotifications(
             .notify(NOTIFICATION_ID, build(phase, throughputText))
     }
 
-    /** Update notification at most every [minIntervalMs] unless [throughputText] changed. */
+    /** Update notification: always on phase change; throttle throughput text (Connected). */
     fun updateIfChanged(
         phase: TunnelPhase,
         throughputText: String,
         lastText: String?,
         lastUpdateMs: Long,
+        lastPhase: TunnelPhase?,
         minIntervalMs: Long = 15_000L,
-    ): Pair<String, Long> {
+    ): Triple<String, Long, TunnelPhase> {
         val content = notificationContent(phase, throughputText)
         val now = System.currentTimeMillis()
-        if (content != lastText || now - lastUpdateMs >= minIntervalMs) {
+        val phaseChanged = lastPhase != phase
+        val due = now - lastUpdateMs >= minIntervalMs
+        if (phaseChanged || due) {
             update(phase, throughputText)
-            return content to now
+            return Triple(content, now, phase)
         }
-        return (lastText ?: content) to lastUpdateMs
+        return Triple(lastText ?: content, lastUpdateMs, lastPhase ?: phase)
     }
 
     private fun notificationContent(phase: TunnelPhase, throughputText: String): String {

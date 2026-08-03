@@ -305,6 +305,7 @@ index 0000000..3333333
 +
 +fn socks_auth_ok(username: &str, password: &[u8]) -> bool {
 +    // Mirror TunnelEndpoints role secrets (OnionVPN).
++    // Epoch forms: u{uid}-nN / p{uid}-nN, pac{uid}-nN, dnscrypt-nN (NEWNYM rotate).
 +    let expected: Option<Vec<u8>> = if username == "probe" {
 +        Some(b"check".to_vec())
 +    } else if username == "dnscrypt" || username.starts_with("dnscrypt-n") {
@@ -312,19 +313,20 @@ index 0000000..3333333
 +    } else if username == "pac" {
 +        // SOCKS_PAC_PASS historically "dnscrypt"; also accept resolver.
 +        return password == b"dnscrypt" || password == b"resolver";
-+    } else if let Some(uid) = username.strip_prefix("pac") {
-+        if uid.is_empty() {
++    } else if let Some(rest) = username.strip_prefix("pac") {
++        if rest.is_empty() {
 +            return false;
 +        }
-+        // pac{uid} / p{uid} — DnsCryptSocksBridge per-client isolation.
-+        Some(format!("p{uid}").into_bytes())
++        // pac{uid} or pac{uid}-n{epoch} → p{uid} or p{uid}-n{epoch}
++        Some(format!("p{rest}").into_bytes())
 +    } else if username == "onionvpn" {
 +        Some(b"stream".to_vec())
-+    } else if let Some(uid) = username.strip_prefix('u') {
-+        if uid.is_empty() || uid == "unknown" {
++    } else if let Some(rest) = username.strip_prefix('u') {
++        if rest.is_empty() || rest == "unknown" {
 +            return password == b"punknown";
 +        }
-+        Some(format!("p{uid}").into_bytes())
++        // u{uid} or u{uid}-n{epoch} → p{uid} or p{uid}-n{epoch}
++        Some(format!("p{rest}").into_bytes())
 +    } else {
 +        None
 +    };

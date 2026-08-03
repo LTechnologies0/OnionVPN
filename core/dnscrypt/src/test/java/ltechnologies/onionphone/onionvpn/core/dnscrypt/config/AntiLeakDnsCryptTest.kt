@@ -100,3 +100,51 @@ class AntiLeakDnsCryptForceTcpOverrideTest {
         assertFalse(config.contains("force_tcp = false"))
     }
 }
+
+class AntiLeakDnsCryptAnonymizedTest {
+    @Test
+    fun anonymizedOffOmitsRelaysAndAnonymizedDnsBlock() {
+        val config = DnsCryptConfigWriter.write(
+            configDirectory = "/tmp",
+            preferences = TunnelPreferences(dnsCryptAnonymized = false),
+        )
+        assertFalse(config.contains("[anonymized_dns]"))
+        assertFalse(config.contains("[sources.'relays']"))
+    }
+
+    @Test
+    fun anonymizedOnEmitsRelaysSourceAndAnonymizedDnsRoutes() {
+        val config = DnsCryptConfigWriter.write(
+            configDirectory = "/tmp",
+            preferences = TunnelPreferences(dnsCryptAnonymized = true),
+        )
+        assertTrue(config.contains("[anonymized_dns]"))
+        assertTrue(config.contains("skip_incompatible = true"))
+        assertTrue(config.contains("[sources.'relays']"))
+        assertTrue(config.contains("server_name='*'"))
+        assertTrue(config.contains("via=['*']"))
+    }
+
+    @Test
+    fun paddingAndEcsPrefsEmitHonestyComments() {
+        val on = DnsCryptConfigWriter.write(
+            configDirectory = "/tmp",
+            preferences = TunnelPreferences(
+                dnsCryptQueryPadding = true,
+                dnsCryptBlockEcs = true,
+            ),
+        )
+        assertTrue(on.contains("query_padding:"))
+        assertTrue(on.contains("block ECS:"))
+
+        val off = DnsCryptConfigWriter.write(
+            configDirectory = "/tmp",
+            preferences = TunnelPreferences(
+                dnsCryptQueryPadding = false,
+                dnsCryptBlockEcs = false,
+            ),
+        )
+        assertTrue(off.contains("query_padding disabled"))
+        assertTrue(off.contains("ECS block preference off"))
+    }
+}

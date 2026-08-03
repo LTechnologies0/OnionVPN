@@ -226,6 +226,11 @@ object TunnelValidator {
                     d.contains("private/local") ||
                     d.contains("clearnet leak")
             }
+            // Tor/Arti config / status readiness (tripsKillSwitch on content validators).
+            "tor.arti.status",
+            "tor.config.content",
+            "tor.config.missing",
+            -> true
             // UID SOCKS / forwarder wiring broken → TUN packets won't reach Tor.
             "uid.forwarder.wiring", "hev.config.missing", "hev.forwarder.wiring" -> true
             // onionmasq data plane not ready / sidecar missing.
@@ -423,6 +428,26 @@ object TunnelValidator {
                         label = "Arti runtime status",
                         status = ValidationStatus.Fail,
                         detail = "arti.status not found",
+                    )
+                }
+                torEngine == TorEngine.KOTLIN_TOR && torConfig != null -> {
+                    val ready = torConfig.lineSequence().any {
+                        it.trim().equals("ready=true", ignoreCase = true)
+                    }
+                    ValidationCheck(
+                        id = "tor.kotlin.status",
+                        label = "kotlin-tor runtime status",
+                        status = if (ready) ValidationStatus.Pass else ValidationStatus.Fail,
+                        detail = "kotlin-tor status ready=$ready socks=${runtimePorts?.torSocksPort}",
+                        tripsKillSwitch = true,
+                    )
+                }
+                torEngine == TorEngine.KOTLIN_TOR -> {
+                    ValidationCheck(
+                        id = "tor.config.missing",
+                        label = "kotlin-tor runtime status",
+                        status = ValidationStatus.Fail,
+                        detail = "kotlin-tor status file not found",
                     )
                 }
                 torConfig != null -> {

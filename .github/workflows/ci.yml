@@ -76,6 +76,25 @@ jobs:
           --stacktrace
           --build-cache
 
+      - name: Native .so strings denylist
+        run: |
+          set -euo pipefail
+          DENY='(api[_-]?key|secret[_-]?key|BEGIN (RSA |OPENSSH )?PRIVATE KEY|AKIA[0-9A-Z]{16})'
+          found=0
+          while IFS= read -r so; do
+            size=$(stat -c%s "$so" 2>/dev/null || stat -f%z "$so")
+            if [ "$size" -gt 52428800 ]; then
+              echo "::warning::$so is >50MB — track with Git LFS (see docs/TUN_DATA_PLANE.md)"
+            fi
+            if command -v strings >/dev/null 2>&1; then
+              if strings -n 8 "$so" | grep -Eiq "$DENY"; then
+                echo "::error::Suspicious strings in $so"
+                found=1
+              fi
+            fi
+          done < <(find app/src/main/jniLibs -name '*.so' -type f 2>/dev/null || true)
+          exit "$found"
+
       - name: Upload debug APK artifact
         uses: actions/upload-artifact@v4
         with:

@@ -80,6 +80,57 @@ class AntiLeakVpnProfilePolicyTest {
             src.contains("addAllowedApplication") && src.contains("addDisallowedApplication"),
         )
         assertTrue("VpnAppRoutingMode INCLUDE handled", src.contains("VpnAppRoutingMode.INCLUDE"))
+        assertTrue(
+            "Tor-native BYPASS must use TorNativeAppUids + disallowTorNativeBypass",
+            src.contains("TorNativeAppUids") && src.contains("disallowTorNativeBypass"),
+        )
+        assertTrue(
+            "INCLUDE×lockdown must be documented/gated",
+            src.contains("includeConflictsWithLockdown"),
+        )
+    }
+
+    @Test
+    fun includeConflictsWithLockdownOnlyWhenIncludeNonEmpty() {
+        val prefsInclude = ltechnologies.onionphone.onionvpn.core.model.TunnelPreferences(
+            vpnAppRoutingMode = ltechnologies.onionphone.onionvpn.core.model.VpnAppRoutingMode.INCLUDE,
+            vpnAppPackages = setOf("com.example.app"),
+        )
+        val prefsAll = prefsInclude.copy(
+            vpnAppRoutingMode = ltechnologies.onionphone.onionvpn.core.model.VpnAppRoutingMode.ALL,
+        )
+        val prefsEmptyInclude = prefsInclude.copy(vpnAppPackages = emptySet())
+        assertTrue(VpnProfileBuilder.includeConflictsWithLockdown(prefsInclude, lockdownEnabled = true))
+        assertFalse(VpnProfileBuilder.includeConflictsWithLockdown(prefsInclude, lockdownEnabled = false))
+        assertFalse(VpnProfileBuilder.includeConflictsWithLockdown(prefsAll, lockdownEnabled = true))
+        assertFalse(VpnProfileBuilder.includeConflictsWithLockdown(prefsEmptyInclude, lockdownEnabled = true))
+    }
+
+    @Test
+    fun torNativeBypassRequiresSignaturePinsInSource() {
+        val src = java.io.File(
+            "src/main/java/ltechnologies/onionphone/onionvpn/core/vpn/onionmasq/TorNativeAppUids.kt",
+        ).readText()
+        assertTrue("must pin signing certs", src.contains("PINNED_CERT_SHA256"))
+        assertTrue("must verify SHA-256", src.contains("SHA-256") || src.contains("signingCertSha256Hex"))
+        assertTrue("Tor Browser release pin", src.contains("20061f045e737c67375c17794cfedb436a03cec6bacb7cb9f96642205ca2cec8"))
+        assertTrue("Orbot/Tor Project legacy pin", src.contains("a454b87a1847a89ed7f5e70fba6bba96f3ef29c26e0981204fe347bf231dfd5b"))
+        assertTrue("fail-closed without pin", src.contains("matchesPinnedSignature"))
+    }
+
+    @Test
+    fun orbotBypassPackagesAreSubsetOfTorNativeList() {
+        val bypass = ltechnologies.onionphone.onionvpn.core.vpn.onionmasq.TorNativeAppUids
+            .bypassPackages()
+            .toSet()
+        val orbot = ltechnologies.onionphone.onionvpn.core.vpn.onionmasq.TorNativeAppUids
+            .ORBOT_BYPASS_PACKAGES
+        assertTrue(
+            "Orbot BYPASS packages must be covered by TorNativeAppUids",
+            bypass.containsAll(orbot),
+        )
+        assertTrue(bypass.contains("org.torproject.android"))
+        assertTrue(bypass.contains("org.torproject.vpn"))
     }
 
     @Test
@@ -96,5 +147,21 @@ class AntiLeakVpnProfilePolicyTest {
             "empty uplink only for Connected mode",
             src.contains("mode == VpnProfileMode.Connected"),
         )
+    }
+
+    @Test
+    fun vpnDnsAddressV6IsUlaNotLinkLocal() {
+        assertTrue(
+            ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints.VPN_DNS_ADDRESS_V6
+                .startsWith("fd00:"),
+        )
+        assertFalse(
+            ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints.VPN_DNS_ADDRESS_V6
+                .startsWith("fe80:"),
+        )
+        val src = java.io.File(
+            "src/main/java/ltechnologies/onionphone/onionvpn/core/vpn/profile/VpnProfileBuilder.kt",
+        ).readText()
+        assertTrue(src.contains("VPN_DNS_ADDRESS_V6"))
     }
 }

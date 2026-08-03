@@ -23,7 +23,7 @@ enum class VpnAppRoutingMode {
  *
  * - [HEV_SOCKS]: Orbot-class hev-socks5-tunnel → SocksUidBridge → Tor SOCKS (shipped).
  * - [ONIONMASQ]: Tor Project onionmasq (smoltcp → Arti). Requires native lib + Arti engine;
- *   not bundled until jniLibs ship `libonionmasq.so` — selection fails closed to HEV.
+ *   not bundled until jniLibs ship `libonionmasq_mobile.so` — selection fails closed to HEV.
  */
 enum class TunDataPlane {
     HEV_SOCKS,

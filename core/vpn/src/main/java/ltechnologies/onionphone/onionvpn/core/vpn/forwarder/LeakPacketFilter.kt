@@ -9,7 +9,7 @@ import timber.log.Timber
  * Fail-closed packet filters for torrified VPN (Privacy Guides / Tor: TCP + DNS only).
  *
  * Strategy (no remote UDP gateway until prop. 339 ships):
- * 1. Divert UDP/53 (IPv4) → DNSCrypt-over-Tor (handled by [TunDnsMux]).
+ * 1. Divert UDP/53 (IPv4 + IPv6) → DNSCrypt-over-Tor (handled by [TunDnsMux]).
  * 2. Forward IPv4 TCP (+ Automap IPv6 ULA) via hev → SocksUidBridge → Tor SOCKS.
  * 3. Blackhole clearnet IPv6 TCP (DNSCrypt A-only; kills Happy Eyeballs Tor stalls),
  *    other UDP/ICMP/multicast so apps fall back to TCP.
@@ -117,23 +117,28 @@ object LeakPacketFilter {
         return TunnelEndpoints.isAutomapVirtualIpv6(dest)
     }
 
-    /** True when IPv4 UDP dest port is 53 (IPv6 DNS is blackholed — mux is IPv4-only). */
+    /** True when IPv4 or IPv6 UDP dest port is 53 (TunDnsMux → DNSCrypt). */
     fun isDnsUdpPort53(packet: ByteArray, length: Int): Boolean {
         if (length < 28) return false
         val version = (packet[0].toInt() ushr 4) and 0x0f
-        if (version != 4) return false
-        val ihl = (packet[0].toInt() and 0x0f) * 4
-        if (length < ihl + 8) return false
-        if (packet[9].toInt() and 0xff != PROTO_UDP) return false
-        val destPort = ((packet[ihl + 2].toInt() and 0xff) shl 8) or
-            (packet[ihl + 3].toInt() and 0xff)
-        return destPort == 53
+        return when (version) {
+            4 -> {
+                val ihl = (packet[0].toInt() and 0x0f) * 4
+                if (length < ihl + 8) return false
+                if (packet[9].toInt() and 0xff != PROTO_UDP) return false
+                val destPort = ((packet[ihl + 2].toInt() and 0xff) shl 8) or
+                    (packet[ihl + 3].toInt() and 0xff)
+                destPort == 53
+            }
+            6 -> isIpv6DnsUdpPort53(packet, length)
+            else -> false
+        }
     }
 
-    /** IPv6 UDP/53 — blackhole until TunDnsMux supports v6 DNS replies. */
+    /** IPv6 UDP/53 — diverted by TunDnsMux (same as IPv4). */
     fun isIpv6DnsUdpPort53(packet: ByteArray, length: Int): Boolean {
         if (length < 40 + 8) return false
-        val version = (packet[0].toInt() ushr 4) and 0x0f
+        val version = (packet[0].toInt() and 0xf0) ushr 4
         if (version != 6) return false
         if (packet[6].toInt() and 0xff != PROTO_UDP) return false
         val destPort = ((packet[40 + 2].toInt() and 0xff) shl 8) or
@@ -249,7 +254,7 @@ object LeakPacketFilter {
 
     /**
          * Early drop before DNS divert / firewall.
-         * IPv4 UDP/53 is NOT dropped here (caller diverts). IPv6 UDP/53 blackholes (mux IPv4-only).
+         * IPv4/IPv6 UDP/53 is NOT dropped here (caller diverts via TunDnsMux).
          */
     fun shouldDropEarly(packet: ByteArray, length: Int): Boolean {
         if (length < 20) return true
@@ -307,7 +312,7 @@ object LeakPacketFilter {
         payloadLen: Int,
     ): BlackholeReason {
         when (dstPort) {
-            53 -> return BlackholeReason.TcpDns // IPv6 UDP/53 (mux is IPv4-only)
+            53 -> return BlackholeReason.TcpDns // unreachable for UDP/53 (DivertDns first)
             443, 80, 8443, 853 -> {
                 if (payloadLen > 0 && looksLikeQuic(packet, payloadOff, payloadLen)) {
                     return BlackholeReason.QuicHttp3

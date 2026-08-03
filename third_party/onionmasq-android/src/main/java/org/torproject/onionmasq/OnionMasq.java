@@ -421,9 +421,13 @@ public class OnionMasq {
         OnionMasqJni.setCountryCode(cc);
     }
 
+    /**
+     * OnionVPN: WebRTC / TURN is unsupported on the torrified path (UDP blackhole).
+     * Soft-gated only — do not wire user prefs expecting TURN to work.
+     */
     public static void setTurnServerConfig(String host, long port, String auth) {
         if (instance == null) {
-            Log.d(TAG, "setTurnServerConfig skipped — not initialized");
+            Log.d(TAG, "setTurnServerConfig skipped — not initialized (WebRTC unsupported)");
             return;
         }
         OnionMasqJni.setTurnServerConfig(host, port, auth);

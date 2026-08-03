@@ -179,6 +179,9 @@ class HevSocks5TunForwarder(
         appendLine("  address: '$socksHost'")
         appendLine("  udp: 'tcp'")
         // No username — SocksUidBridge accepts NO AUTH and adds u{uid} toward Tor.
+        // IPv6: hev accepts dual-stack client address; clearnet IPv6 TCP is blackholed by
+        // LeakPacketFilter (DNSCrypt A-only). Automap ULA + UDP/53 v6 divert via TunDnsMux.
+        // mapdns stays off (conflicts with DNSCrypt + TunDnsMux); udp:tcp forces TCP DNS path.
         if (useMapDns) {
             appendLine("mapdns:")
             appendLine("  address: ${TunnelEndpoints.VPN_DNS_ADDRESS}")

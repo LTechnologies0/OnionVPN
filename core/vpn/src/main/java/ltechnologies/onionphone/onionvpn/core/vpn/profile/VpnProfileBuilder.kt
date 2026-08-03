@@ -8,6 +8,7 @@ import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
 import ltechnologies.onionphone.onionvpn.core.model.TunnelPreferences
 import ltechnologies.onionphone.onionvpn.core.model.VpnAppRoutingMode
 import ltechnologies.onionphone.onionvpn.core.model.VpnProfileMode
+import ltechnologies.onionphone.onionvpn.core.vpn.onionmasq.TorNativeAppUids
 import timber.log.Timber
 
 /**
@@ -26,9 +27,32 @@ import timber.log.Timber
  * - [setBlocking] only in [VpnProfileMode.Blocking]: drop unread TUN packets (unroutable).
  *   Connected mode keeps [setBlocking] false so hev can drain Tor-routable streams.
  * - [setConfigureIntent] so Always-on VPN settings open the app (InviZible/Mullvad)
+ *
+ * **INCLUDE × Android lockdown:** Builder cannot mix [addAllowedApplication] with
+ * [addDisallowedApplication]. Under OS lockdown, apps omitted from an INCLUDE allow-list
+ * get **no network** (Tor Browser offline) — Tor-over-Tor if forced onto the allow-list.
+ * [includeConflictsWithLockdown] + OnionVpnService refuse Connected establish instead of
+ * copying Orbot #774 (skip BYPASS in lockdown).
  */
 object VpnProfileBuilder {
     const val SESSION_NAME = "OnionVPN"
+
+    /**
+     * INCLUDE with a non-empty allow-list cannot honestly BYPASS Tor-native apps under
+     * Android Always-on lockdown (mutual exclusion on Builder lists).
+     */
+    fun includeConflictsWithLockdown(
+        preferences: TunnelPreferences,
+        lockdownEnabled: Boolean,
+    ): Boolean {
+        if (!lockdownEnabled) return false
+        if (preferences.vpnAppRoutingMode != VpnAppRoutingMode.INCLUDE) return false
+        return preferences.vpnAppPackages.any { it.isNotBlank() }
+    }
+
+    const val INCLUDE_LOCKDOWN_BLOCK_REASON =
+        "INCLUDE per-app mode conflicts with Android VPN lockdown — " +
+            "switch to ALL/EXCLUDE or disable lockdown (Tor-native BYPASS cannot use clearnet under lockdown)"
 
     val BLOCKED_PUBLIC_DNS = listOf(
         // Google
@@ -99,6 +123,12 @@ object VpnProfileBuilder {
             .addDnsServer(dnsServer)
             .setBlocking(mode == VpnProfileMode.Blocking)
 
+        // Dual-stack DNS: Android may query AAAA path to VPN DNS ULA.
+        if (mode == VpnProfileMode.Connected) {
+            runCatching { builder.addDnsServer(TunnelEndpoints.VPN_DNS_ADDRESS_V6) }
+                .onFailure { Timber.w(it, "Skip VPN DNS v6 ${TunnelEndpoints.VPN_DNS_ADDRESS_V6}") }
+        }
+
         BLOCKED_PUBLIC_DNS.forEach { resolver ->
             // IPv6 literals need prefix length 128; IPv4 /32.
             val prefix = if (resolver.contains(':')) 128 else 32
@@ -128,6 +158,11 @@ object VpnProfileBuilder {
     /**
      * Orbot-style app filter. Own package is never on the VPN (uplink loop).
      * INCLUDE with empty list → treat as ALL (fail open to full tunnel, not zero apps).
+     *
+     * Tor-native BYPASS packages: ALL/EXCLUDE/INCLUDE-empty use [addDisallowedApplication]
+     * (Orbot, signature-pinned). INCLUDE non-empty omits them from the allow-list only —
+     * Android forbids mixing allow + disallow on the same Builder. Callers must refuse
+     * Connected when [includeConflictsWithLockdown] (lockdown + INCLUDE non-empty).
      */
     private fun applyAppRouting(
         service: VpnService,
@@ -139,11 +174,14 @@ object VpnProfileBuilder {
         when (preferences.vpnAppRoutingMode) {
             VpnAppRoutingMode.INCLUDE -> {
                 if (packages.isEmpty()) {
-                    Timber.w("INCLUDE list empty — falling back to ALL (+ self-exclude)")
+                    Timber.w("INCLUDE list empty — falling back to ALL (+ self-exclude + BYPASS)")
                     excludeOwnPackage(service, builder)
+                    disallowTorNativeBypass(service, builder)
                     return
                 }
-                packages.forEach { pkg ->
+                // Under lockdown this path is unreachable (establish hard-gates first).
+                // Omit BYPASS from allow-list (clearnet / own Tor) — do not also disallow.
+                packages.filterNot { TorNativeAppUids.isBypassPackage(it) }.forEach { pkg ->
                     runCatching { builder.addAllowedApplication(pkg) }
                         .onFailure { Timber.w(it, "Skip allow VPN for $pkg") }
                 }
@@ -151,12 +189,24 @@ object VpnProfileBuilder {
             }
             VpnAppRoutingMode.EXCLUDE -> {
                 excludeOwnPackage(service, builder)
-                packages.forEach { pkg ->
+                disallowTorNativeBypass(service, builder)
+                packages.filterNot { TorNativeAppUids.isBypassPackage(it) }.forEach { pkg ->
                     runCatching { builder.addDisallowedApplication(pkg) }
                         .onFailure { Timber.w(it, "Skip disallow VPN for $pkg") }
                 }
             }
-            VpnAppRoutingMode.ALL -> excludeOwnPackage(service, builder)
+            VpnAppRoutingMode.ALL -> {
+                excludeOwnPackage(service, builder)
+                disallowTorNativeBypass(service, builder)
+            }
+        }
+    }
+
+    /** Orbot BYPASS_VPN_PACKAGES — Tor-over-Tor prevention on hev and all planes. */
+    private fun disallowTorNativeBypass(service: VpnService, builder: VpnService.Builder) {
+        TorNativeAppUids.installedBypassPackages(service).forEach { pkg ->
+            runCatching { builder.addDisallowedApplication(pkg) }
+                .onFailure { Timber.w(it, "Skip disallow Tor-native BYPASS for $pkg") }
         }
     }
 

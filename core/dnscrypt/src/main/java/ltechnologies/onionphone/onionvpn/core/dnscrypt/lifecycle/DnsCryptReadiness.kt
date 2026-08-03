@@ -80,16 +80,26 @@ internal object DnsCryptReadiness {
     }
 
     /**
-     * Parses dnscrypt-proxy log lines into readiness flags.
+     * Parses dnscrypt-proxy log lines into readiness flags (upstream proxy.go / serversInfo.go).
+     *
+     * Listener = `Now listening to` only (not `live servers:`).
+     * Server = `live servers: N` with N≥1, or `] OK (DoH)` / `] OK (DNSCrypt)`.
      *
      * @return Pair(listenerHint, serverHint)
      */
     fun hintsFromLogLine(line: String): Pair<Boolean, Boolean> {
-        val listener = line.contains("Now listening to") || line.contains("live servers:")
-        val server = line.contains("live servers:") ||
-            (line.contains("[NOTICE]") && line.contains("OK") && line.contains("ms"))
-        return listener to server
+        if (line.contains("waiting for at least one server")) {
+            return false to false
+        }
+        val listener = line.contains("Now listening to")
+        val liveServers = LIVE_SERVERS_RE.containsMatchIn(line)
+        val serverOk = liveServers ||
+            line.contains("] OK (DoH)") ||
+            line.contains("] OK (DNSCrypt)")
+        return listener to serverOk
     }
+
+    private val LIVE_SERVERS_RE = Regex("""live servers:\s*[1-9]""")
 
     private fun logProbe(kind: String, port: Int, error: Exception) {
         val label = when (error) {

@@ -38,6 +38,23 @@ data class TunnelPreferences(
     val dnsCryptForceTcp: Boolean = true,
     /** Prefer DNSCrypt servers advertising DNSSEC in their stamp. */
     val dnsCryptRequireDnssec: Boolean = true,
+    /**
+     * Anonymized DNSCrypt (relay hop) when the pinned dnscrypt-proxy `.so` supports
+     * `[anonymized_dns]` + relays catalog. Adds latency; default off.
+     */
+    val dnsCryptAnonymized: Boolean = false,
+    /**
+     * Prefer query padding when the `.so` supports it (privacy draft §8.4).
+     * Harmless no-op on builds that ignore the knob.
+     */
+    val dnsCryptQueryPadding: Boolean = true,
+    /** Block EDNS Client Subnet when the `.so` exposes the knob (default on). */
+    val dnsCryptBlockEcs: Boolean = true,
+    /**
+     * When true, Connected establish fails unless Android Always-on VPN lockdown
+     * is enabled for OnionVPN ([VpnService.isLockdownEnabled]).
+     */
+    val requireOsLockdown: Boolean = false,
     /** Interactive OpenSnitch-style firewall on the TUN path. */
     val firewallEnabled: Boolean = false,
     val firewallDefaultAction: FirewallDefaultAction = FirewallDefaultAction.ASK,

@@ -27,6 +27,12 @@ object TunnelEndpoints {
      */
     const val VPN_CLIENT_ADDRESS_V6 = "fd00:8:8:8::2"
 
+    /**
+     * VPN DNS over IPv6 (ULA sibling of [VPN_DNS_ADDRESS]). TunDnsMux diverts UDP/53
+     * here to DNSCrypt (not fe80::53 Tor-sample — DNSCrypt-first).
+     */
+    const val VPN_DNS_ADDRESS_V6 = "fd00:8:8:8::1"
+
     /** Fake-IP pool for hev mapdns (must not overlap VPN 10.8.0.0/24). */
     const val FAKE_DNS_NETWORK = "100.64.0.0"
     const val FAKE_DNS_NETMASK = "255.192.0.0"
@@ -198,7 +204,8 @@ object TunnelEndpoints {
 
     /**
      * SOCKS5 credentials helpers for per-app IsolateSOCKSAuth (path-spec strong tokens).
-     * username = u{uid}, password = p{uid}. Unknown UID uses a dedicated token.
+     * username = `u{uid}` or `u{uid}-n{epoch}` after NEWNYM (KeepAliveIsolateSOCKSAuth
+     * sticky tokens must rotate — prop 368). Unknown UID uses a dedicated token.
      */
     const val SOCKS_UNKNOWN_USER = "uunknown"
     const val SOCKS_UNKNOWN_PASS = "punknown"
@@ -207,17 +214,46 @@ object TunnelEndpoints {
     const val SOCKS_ISOLATION_USER = "onionvpn"
     const val SOCKS_ISOLATION_PASS = "stream"
 
-    fun socksUserForUid(uid: Int): String =
-        if (uid < 0) SOCKS_UNKNOWN_USER else "u$uid"
+    /**
+     * Global app SOCKS IsolationToken epoch. Bumped on NEWNYM (all planes) so
+     * KeepAliveIsolateSOCKSAuth cannot reuse pre-NEWNYM identity.
+     */
+    @JvmField
+    @Volatile
+    var appSocksNymEpoch: Int = 0
 
-    fun socksPassForUid(uid: Int): String =
-        if (uid < 0) SOCKS_UNKNOWN_PASS else "p$uid"
+    fun bumpAppSocksNymEpoch(): Int {
+        val next = appSocksNymEpoch + 1
+        appSocksNymEpoch = next
+        return next
+    }
 
+    fun resetAppSocksNymEpoch() {
+        appSocksNymEpoch = 0
+    }
+
+    fun socksUserForUid(uid: Int, epoch: Int = appSocksNymEpoch): String {
+        if (uid < 0) return SOCKS_UNKNOWN_USER
+        return if (epoch > 0) "u$uid-n$epoch" else "u$uid"
+    }
+
+    fun socksPassForUid(uid: Int, epoch: Int = appSocksNymEpoch): String {
+        if (uid < 0) return SOCKS_UNKNOWN_PASS
+        return if (epoch > 0) "p$uid-n$epoch" else "p$uid"
+    }
+
+    /** Parse `u{uid}`, `u{uid}-n{epoch}`, or unknown sentinel. */
     fun uidFromSocksUser(user: String): Int? {
         if (user == SOCKS_UNKNOWN_USER) return -1
         if (!user.startsWith("u")) return null
-        return user.removePrefix("u").toIntOrNull()
+        val body = user.removePrefix("u")
+        val uidPart = body.substringBefore("-n")
+        return uidPart.toIntOrNull()
     }
+
+    fun dnsCryptSocksUser(epoch: Int = appSocksNymEpoch): String =
+        if (epoch > 0) "dnscrypt-n$epoch" else SOCKS_DNSCRYPT_USER
+
 
     /**
      * SOCKS5 credentials for DNSCrypt → separate SocksPort + IsolateSOCKSAuth
@@ -362,6 +398,11 @@ data class TunnelSnapshot(
      * UI must disable NEWNYM mash; kill-switch probes are deferred separately.
      */
     val identityRefreshing: Boolean = false,
+    /**
+     * Epoch ms until New Identity is allowed again (C Tor ~10s defer / Arti / onionmasq gate).
+     * 0 = no cooldown.
+     */
+    val newNymCooldownUntilMs: Long = 0L,
 ) {
     val isBusy: Boolean
         get() = when (phase) {
@@ -390,11 +431,12 @@ data class TunnelSnapshot(
             else -> true
         }
 
-    /** New Identity only when fully connected and not already refreshing. */
+    /** New Identity only when fully connected, not refreshing, and past Tor rate limit. */
     val canNewNym: Boolean
         get() = phase == TunnelPhase.Connected &&
             !identityRefreshing &&
-            (torRuntimeReady || torControlConnected)
+            (torRuntimeReady || torControlConnected) &&
+            System.currentTimeMillis() >= newNymCooldownUntilMs
 }
 
 sealed interface VpnEstablishResult {

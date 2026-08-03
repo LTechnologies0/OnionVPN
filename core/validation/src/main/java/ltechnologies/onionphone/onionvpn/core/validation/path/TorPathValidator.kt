@@ -110,7 +110,11 @@ object TorPathValidator {
             config.contains("IsolateClientProtocol")
         val appsNoDestPortStorm = config.lineSequence()
             .filter { it.startsWith("SOCKSPort ") && it.contains("SessionGroup=${TunnelEndpoints.SESSION_GROUP_APPS}") }
-            .any { it.contains("KeepAliveIsolateSOCKSAuth") && !it.contains("IsolateDestPort") }
+            .any {
+                it.contains("KeepAliveIsolateSOCKSAuth") &&
+                    !it.contains("IsolateDestPort") &&
+                    !it.contains("IsolateClientAddr")
+            }
         val socksPolicy = config.contains("SocksPolicy accept 127.0.0.1") &&
             config.contains("SocksPolicy reject *")
         // Apps + DNSCrypt + probe SocksPorts (path-spec proxy-address isolation).

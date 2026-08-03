@@ -42,11 +42,15 @@ class TorStatusListParserTest {
 
     @Test
     fun socksUserForUid_roundTrip() {
+        TunnelEndpoints.resetAppSocksNymEpoch()
         assertEquals("u10087", TunnelEndpoints.socksUserForUid(10087))
         assertEquals("p10087", TunnelEndpoints.socksPassForUid(10087))
         assertEquals(10087, TunnelEndpoints.uidFromSocksUser("u10087"))
         assertEquals(TunnelEndpoints.SOCKS_UNKNOWN_USER, TunnelEndpoints.socksUserForUid(-1))
         assertNull(TunnelEndpoints.uidFromSocksUser("dnscrypt"))
+        assertEquals(10087, TunnelEndpoints.uidFromSocksUser("u10087-n3"))
+        assertEquals("u10087-n2", TunnelEndpoints.socksUserForUid(10087, epoch = 2))
+        assertEquals("dnscrypt-n2", TunnelEndpoints.dnsCryptSocksUser(2))
     }
 
     @Test

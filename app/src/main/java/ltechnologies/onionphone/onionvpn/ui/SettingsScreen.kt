@@ -41,7 +41,9 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicReference
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import ltechnologies.onionphone.onionvpn.R
 import ltechnologies.onionphone.onionvpn.bridges.BuiltinBridges
 import ltechnologies.onionphone.onionvpn.bridges.MoatCircumventionClient
@@ -84,14 +86,19 @@ fun SettingsScreen(
     val caps = local.torEngine.capabilities
     val latestLocal = remember { AtomicReference(local) }
     val saveRef = remember { AtomicReference(onSavePreferences) }
+    val persistedRef = remember { AtomicReference(preferences) }
     SideEffect {
         latestLocal.set(local)
         saveRef.set(onSavePreferences)
+        persistedRef.set(preferences)
     }
-    // Persist draft when leaving Settings (tab switch / overlay permission / app background).
+    // Persist draft when leaving Settings only if dirty (avoid hammering Tor on tab switch).
     DisposableEffect(Unit) {
         onDispose {
-            saveRef.get().invoke(latestLocal.get(), false)
+            val draft = latestLocal.get()
+            if (draft != persistedRef.get()) {
+                saveRef.get().invoke(draft, false)
+            }
         }
     }
     fun commit(next: TunnelPreferences, restart: Boolean = false) {
@@ -192,7 +199,8 @@ fun SettingsScreen(
         SectionHeader(
             title = "Per-app VPN",
             subtitle = "Orbot-style: choose which apps use the Tor tunnel. " +
-                "Apps off the VPN use clearnet. Restart tunnel to apply.",
+                "Apps off the VPN use clearnet (except Tor-native BYPASS, signature-pinned). " +
+                "INCLUDE + Android lockdown is refused at connect. Restart tunnel to apply.",
         )
         Row(
             modifier = Modifier
@@ -223,6 +231,14 @@ fun SettingsScreen(
                 },
                 enabled = controlsEnabled,
                 label = { Text("Exclude selected") },
+            )
+        }
+        if (local.vpnAppRoutingMode == VpnAppRoutingMode.INCLUDE && local.vpnAppPackages.isNotEmpty()) {
+            Text(
+                text = "With Always-on VPN lockdown enabled, INCLUDE mode cannot connect " +
+                    "(Tor-native apps would be offline or Tor-over-Tor). Use ALL/EXCLUDE, or disable lockdown.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
             )
         }
         if (local.vpnAppRoutingMode != VpnAppRoutingMode.ALL) {
@@ -256,7 +272,7 @@ fun SettingsScreen(
         SectionHeader(
             title = "TUN data plane",
             subtitle = "hev→SOCKS is the shipped Orbot-class path. onionmasq (Arti TUN) " +
-                "needs libonionmasq.so + Arti engine — otherwise HEV is used.",
+                "needs libonionmasq_mobile.so + Arti engine — otherwise HEV is used.",
         )
         Row(
             modifier = Modifier
@@ -309,6 +325,17 @@ fun SettingsScreen(
         ) {
             Text("Open network settings (set Private DNS Off)")
         }
+        PrefSwitch(
+            label = "Require OS lockdown to connect",
+            checked = local.requireOsLockdown,
+            onChecked = { commit(local.copy(requireOsLockdown = it)) },
+        )
+        Text(
+            text = "When on, Connected fails unless Always-on VPN lockdown is enabled for OnionVPN " +
+                "(same hard gate style as Private DNS).",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
         OutlinedButton(
             onClick = {
                 if (BatteryOptimization.needsWhitelisting(context)) {
@@ -653,8 +680,22 @@ fun SettingsScreen(
                 enabled = controlsEnabled,
                 label = { Text("Arti") },
             )
+            FilterChip(
+                selected = local.torEngine == TorEngine.KOTLIN_TOR,
+                onClick = {
+                    commit(
+                        local.copy(
+                            torEngine = TorEngine.KOTLIN_TOR,
+                            tunDataPlane = TunDataPlane.HEV_SOCKS,
+                        ),
+                        restart = true,
+                    )
+                },
+                enabled = controlsEnabled,
+                label = { Text("Kotlin Tor") },
+            )
         }
-        if (caps.liveSetConf) {
+        if (caps.liveSetConf && local.tunDataPlane != TunDataPlane.ONIONMASQ) {
             Row(
                 modifier = Modifier.horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -899,10 +940,11 @@ fun SettingsScreen(
                                     bridgeRequestStatus = "Contacting bridges.torproject.org…"
                                     scope.launch {
                                         runCatching {
+                                            val socks = torSocksPort()
                                             val outcome = MoatCircumventionClient.fetchBridges(
                                                 transport = transport,
-                                                viaTor = local.moatRequestViaTor,
-                                                socksPort = torSocksPort(),
+                                                viaTor = local.moatRequestViaTor || socks != null,
+                                                socksPort = socks,
                                             )
                                             val normalized = TorBridgeConfig.parseLines(
                                                 outcome.lines.joinToString("\n"),
@@ -1044,14 +1086,16 @@ fun SettingsScreen(
                         org.torproject.onionmasq.OnionMasq.isRunning()
                     ) {
                         val cc = TorCountryCatalog.parseNodeCodes(next).firstOrNull()
-                        runCatching {
-                            if (cc.isNullOrBlank()) {
-                                org.torproject.onionmasq.OnionMasq.setCountryCode(null)
-                            } else {
-                                org.torproject.onionmasq.OnionMasq.setCountryCode(cc.uppercase())
-                            }
-                            org.torproject.onionmasq.OnionMasq.refreshCircuits()
-                        }.onFailure { timber.log.Timber.w(it, "live exit country apply") }
+                        scope.launch(Dispatchers.IO) {
+                            runCatching {
+                                if (cc.isNullOrBlank()) {
+                                    org.torproject.onionmasq.OnionMasq.setCountryCode(null)
+                                } else {
+                                    org.torproject.onionmasq.OnionMasq.setCountryCode(cc.uppercase())
+                                }
+                                org.torproject.onionmasq.OnionMasq.refreshCircuits()
+                            }.onFailure { timber.log.Timber.w(it, "live exit country apply") }
+                        }
                     }
                     pickingExit = false
                 },
@@ -1070,7 +1114,8 @@ fun SettingsScreen(
             )
         }
         }
-        val showCircuitTimingFields = caps.liveSetConf || caps.torrcConfig ||
+        val showCircuitTimingFields = (caps.liveSetConf && local.tunDataPlane != TunDataPlane.ONIONMASQ) ||
+            caps.torrcConfig ||
             (caps.liveCircuitTiming && local.tunDataPlane != TunDataPlane.ONIONMASQ)
         if (showCircuitTimingFields) {
             val artiTiming = caps.liveCircuitTiming && !caps.torrcConfig
@@ -1204,6 +1249,27 @@ fun SettingsScreen(
             label = "Require DNSSEC",
             checked = local.dnsCryptRequireDnssec,
             onChecked = { commit(local.copy(dnsCryptRequireDnssec = it)) },
+        )
+        PrefSwitch(
+            label = "Anonymized DNSCrypt (relays)",
+            checked = local.dnsCryptAnonymized,
+            onChecked = { commit(local.copy(dnsCryptAnonymized = it), restart = true) },
+        )
+        Text(
+            text = "Adds a relay hop when the pinned dnscrypt-proxy supports [anonymized_dns]. " +
+                "Filters out resolvers marked incompatible with anonymization.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        PrefSwitch(
+            label = "Prefer DNS query padding",
+            checked = local.dnsCryptQueryPadding,
+            onChecked = { commit(local.copy(dnsCryptQueryPadding = it), restart = true) },
+        )
+        PrefSwitch(
+            label = "Block EDNS Client Subnet",
+            checked = local.dnsCryptBlockEcs,
+            onChecked = { commit(local.copy(dnsCryptBlockEcs = it), restart = true) },
         )
         OutlinedButton(
             onClick = {

@@ -93,7 +93,25 @@ object DnsCryptConfigWriter {
                 "@${TunnelEndpoints.LOOPBACK}:$torSocksPort"
         val resolvedList = DnsCryptPublicResolvers.resolveNames(
             serverName.ifBlank { preferences.dnsCryptServerName },
-        )
+        ).let { names ->
+            if (!preferences.dnsCryptAnonymized) {
+                names
+            } else {
+                // Prefer servers that document Anonymized DNSCrypt / relay compatibility.
+                val filtered = names.filter { name ->
+                    if (name == DnsCryptPublicResolvers.AUTO) return@filter true
+                    val desc = DnsCryptPublicResolvers.byName[name]?.description.orEmpty()
+                    !desc.contains("incompatible with anonymization", ignoreCase = true) &&
+                        (
+                            desc.contains("Anonymized DNSCrypt", ignoreCase = true) ||
+                                desc.contains("as Anonymized", ignoreCase = true) ||
+                                desc.contains("relay", ignoreCase = true) ||
+                                name.startsWith("dnscry.pt-")
+                            )
+                }
+                filtered.ifEmpty { names }
+            }
+        }
         val isAuto = resolvedList.size == 1 && resolvedList[0] == DnsCryptPublicResolvers.AUTO
         val serverNamesBlock = if (isAuto) {
             "# server_names omitted — use every resolver matching require_* filters"
@@ -138,16 +156,28 @@ object DnsCryptConfigWriter {
             timeout = 25000
             keepalive = 30
             cert_refresh_delay = 240
+            ${if (preferences.dnsCryptQueryPadding) {
+                "# query_padding: DNSCrypt pads by protocol; prefer DoH padding if .so supports it"
+            } else {
+                "# query_padding disabled by preference (protocol may still pad)"
+            }}
+            ${if (preferences.dnsCryptBlockEcs) {
+                "# block ECS: DNSCrypt stamps omit Client Subnet; DoH path must not leak ECS"
+            } else {
+                "# ECS block preference off"
+            }}
 
             # Upstream DNSCrypt server connections go through Tor SOCKS (isolated port).
             proxy = '$proxy'
 
-            # Bootstrap and netprobe use Tor DNSPort only — never system / captive DNS.
+            # Bootstrap / netprobe hit loopback only (never system DNS):
+            # - C Tor / Arti with DNSPort: Tor DNSPort on this port
+            # - onionmasq (and Arti when DNSPort dead): SocksDnsBootstrapRelay → DoH :443
             bootstrap_resolvers = ['$bootstrap']
             ignore_system_dns = true
             netprobe_address = '$bootstrap'
-            # Tor DNSPort on cold start can exceed 500ms; fail-open probe must wait.
-            netprobe_timeout = 5000
+            # dnscrypt-proxy units: seconds (upstream default 60). Cold Tor/DoH needs headroom.
+            netprobe_timeout = 60
 
             # Local cache cuts repeat lookups over Tor (double-hop DNSCrypt path).
             # Flushed on Tor CLEARDNSCACHE/NEWNYM via DnsCryptProcessManager.clearQueryCache()
@@ -175,6 +205,29 @@ object DnsCryptConfigWriter {
                 cache_file = '${DnsCryptPublicResolvers.SOURCE_CACHE_FILE}'
                 refresh_delay = 72
                 prefix = ''
+${if (preferences.dnsCryptAnonymized) {
+                """
+              [sources.'relays']
+                urls = [
+                  'https://raw.githubusercontent.com/DNSCrypt/dnscrypt-resolvers/master/v3/relays.md',
+                  'https://download.dnscrypt.info/resolvers-list/v3/relays.md',
+                  'https://cdn.jsdelivr.net/gh/DNSCrypt/dnscrypt-resolvers@master/v3/relays.md',
+                ]
+                minisign_key = '${DnsCryptPublicResolvers.MINISIGN_KEY}'
+                cache_file = 'relays.md'
+                refresh_delay = 72
+                prefix = ''
+
+            [anonymized_dns]
+              skip_incompatible = true
+              # Prefer any compatible relay; catalog filter prefers Anonymized-capable servers.
+              routes = [
+                { server_name='*', via=['*'] }
+              ]
+""".trimEnd()
+            } else {
+                ""
+            }}
 
             $staticBlock
         """.trimIndent().replace(Regex("\n{3,}"), "\n\n") + "\n"

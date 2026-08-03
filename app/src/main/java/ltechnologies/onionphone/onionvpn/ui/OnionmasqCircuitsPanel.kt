@@ -28,6 +28,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.delay
 import ltechnologies.onionphone.onionvpn.core.vpn.OnionVpnService
+import ltechnologies.onionphone.onionvpn.core.vpn.onionmasq.OnionmasqNativeGate
 import ltechnologies.onionphone.onionvpn.firewall.AppUidResolver
 import ltechnologies.onionphone.onionvpn.ui.components.EmptyStateHint
 import ltechnologies.onionphone.onionvpn.ui.components.SectionHeader
@@ -59,7 +60,11 @@ fun OnionmasqCircuitsPanel(
         )
         FilledTonalButton(
             onClick = {
-                if (!OnionMasq.isInitialized() || !OnionMasq.isRunning()) {
+                if (!OnionmasqNativeGate.mayCommandRunningProxy(
+                        javaInitialized = OnionMasq.isInitialized(),
+                        nativeRunning = OnionMasq.isRunning(),
+                    )
+                ) {
                     Timber.w("refreshCircuits skipped — onionmasq not running")
                     return@FilledTonalButton
                 }
@@ -93,7 +98,11 @@ fun OnionmasqCircuitsPanel(
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 FilledTonalButton(
                                     onClick = {
-                                        if (!OnionMasq.isInitialized() || !OnionMasq.isRunning()) {
+                                        if (!OnionmasqNativeGate.mayCommandRunningProxy(
+                                                javaInitialized = OnionMasq.isInitialized(),
+                                                nativeRunning = OnionMasq.isRunning(),
+                                            )
+                                        ) {
                                             Timber.w("refreshCircuitsForApp skipped — not running")
                                             return@FilledTonalButton
                                         }

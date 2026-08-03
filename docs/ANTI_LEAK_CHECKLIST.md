@@ -32,7 +32,7 @@ Generated from source enumeration — do not invent IDs without evidence paths.
 | AL-025 | torrc | `TorConfigWriter.kt` | torrc contains: RefuseUnknownExits 1 | AntiLeakTorrcTest | Pass |
 | AL-026 | torrc | `TorConfigWriter.kt` | torrc contains: FetchUselessDescriptors 0 | AntiLeakTorrcTest | Pass |
 | AL-027 | torrc | `TorConfigWriter.kt` | torrc contains: DownloadExtraInfo 0 | AntiLeakTorrcTest | Pass |
-| AL-028 | torrc | `TorConfigWriter.kt` | torrc contains: ClientPreferIPv6ORPort 0 | AntiLeakTorrcTest | Pass |
+| AL-028 | torrc | `TorConfigWriter.kt` | ClientPreferIPv6ORPort 0 (bridges → auto) | AntiLeakTorrcTest | Pass |
 | AL-029 | torrc | `TorConfigWriter.kt` | torrc contains: HardwareAccel 1 | AntiLeakTorrcTest | Pass |
 | AL-030 | torrc | `TorConfigWriter.kt` | torrc contains: VanguardsLiteEnabled 1 | AntiLeakTorrcTest | Pass |
 | AL-031 | torrc | `TorConfigWriter.kt` | torrc contains: ConfluxEnabled auto | AntiLeakTorrcTest | Pass |
@@ -43,7 +43,7 @@ Generated from source enumeration — do not invent IDs without evidence paths.
 | AL-036 | torrc | `TorConfigWriter.kt` | torrc contains: NumDirectoryGuards 3 | AntiLeakTorrcTest | Pass |
 | AL-037 | torrc | `TorConfigWriter.kt` | torrc contains: EnforceDistinctSubnets 1 | AntiLeakTorrcTest | Pass |
 | AL-038 | torrc | `TorConfigWriter.kt` | torrc contains: StrictNodes 0 | AntiLeakTorrcTest | Pass |
-| AL-039 | torrc | `TorConfigWriter.kt` | torrc contains: MaxClientCircuitsPending 48 | AntiLeakTorrcTest | Pass |
+| AL-039 | torrc | `TorConfigWriter.kt` | MaxClientCircuitsPending 96 | AntiLeakTorrcTest | Pass |
 | AL-040 | torrc | `TorConfigWriter.kt` | torrc contains: CircuitBuildTimeout 60 | AntiLeakTorrcTest | Pass |
 | AL-041 | torrc | `TorConfigWriter.kt` | torrc contains: LearnCircuitBuildTimeout 1 | AntiLeakTorrcTest | Pass |
 | AL-042 | torrc | `TorConfigWriter.kt` | torrc contains: SocksTimeout 120 | AntiLeakTorrcTest | Pass |
@@ -261,8 +261,8 @@ Generated from source enumeration — do not invent IDs without evidence paths.
 | AL-253 | mapped-DNSCrypt draft | `dnscrypt_ephemeral_keys` | ephemeral keys | AntiLeakMappedTest | Pass |
 | AL-254 | mapped-DNSCrypt draft | `tls_disable_session_tickets` | no TLS tickets | AntiLeakMappedTest | Pass |
 | AL-255 | mapped-DNSCrypt draft | `block_ipv6` | block IPv6 resolvers | AntiLeakMappedTest | Pass |
-| AL-256 | mapped-DNSCrypt | `bootstrap_resolvers loopback` | bootstrap via Tor DNSPort only | AntiLeakMappedTest | Pass |
-| AL-257 | mapped-DNSCrypt | `netprobe_address` | netprobe via Tor DNSPort only | AntiLeakMappedTest | Pass |
+| AL-256 | mapped-DNSCrypt | `bootstrap_resolvers loopback` | bootstrap via loopback only (Tor DNSPort on C Tor, or SocksDnsBootstrapRelay→DoH on onionmasq/Arti gap) — never system DNS | AntiLeakMappedTest | Pass |
+| AL-257 | mapped-DNSCrypt | `netprobe_address` | netprobe via same loopback bootstrap endpoint — never system DNS | AntiLeakMappedTest | Pass |
 | AL-258 | mapped-DNSCrypt | `blocked_names` | block DoH hostnames | AntiLeakMappedTest | Pass |
 | AL-259 | mapped-DNSCrypt | `blocked_names` | block captive portal hosts | AntiLeakMappedTest | Pass |
 | AL-260 | mapped-OnionVPN | `HevSocks5TunForwarder useMapDns=false` | FakeDNS disabled | AntiLeakMappedTest | Pass |
@@ -341,6 +341,14 @@ Generated from source enumeration — do not invent IDs without evidence paths.
 | AL-333 | ports | `TunnelPortAllocator` | distinct torDnsPort | AntiLeakPortsTest | Pass |
 | AL-334 | ports | `TunnelPortAllocator` | distinct dnsCryptListenPort | AntiLeakPortsTest | Pass |
 | AL-335 | ports | `TunnelPortAllocator` | avoid fixed PAC/UID ports collision | AntiLeakPortsTest | Pass |
+| AL-336 | routing | `TorNativeAppUids` | signature-pinned BYPASS before UID/disallow | AntiLeakVpnProfilePolicyTest | Pass |
+| AL-337 | routing | `VpnProfileBuilder.includeConflictsWithLockdown` | INCLUDE×lockdown refused (not Orbot #774) | AntiLeakVpnProfilePolicyTest | Pass |
+| AL-338 | routing | `TunnelForegroundService` | Tor-native PACKAGE_* rebinds Connected (hev) | source invariant | Pass |
+| AL-339 | dns-v6 | `LeakPacketFilter.isDnsUdpPort53` | IPv6 UDP/53 DivertDns (not blackhole) | LeakPacketFilterTest | Pass |
+| AL-340 | dns-v6 | `TunnelEndpoints.VPN_DNS_ADDRESS_V6` | ULA DNS `fd00:8:8:8::1` (not fe80::53) | AntiLeakVpnProfilePolicyTest | Pass |
+| AL-341 | dnscrypt | `DnsCryptConfigWriter` | optional `[anonymized_dns]` + relays source | AntiLeakDnsCryptAnonymizedTest | Pass |
+| AL-342 | android | `TunnelPreferences.requireOsLockdown` | Connected fails without lockdown when pref on | source invariant | Pass |
+| AL-343 | fgs | `AndroidManifest` | dual specialUse: coordinator + VpnService | source invariant | Pass |
 
-**Total: 336** — **Pass: 336** — **Fail: 0** (Pass = automated test and/or verified source invariant).
+**Total: 344** — **Pass: 344** — **Fail: 0** (Pass = automated test and/or verified source invariant).
 

@@ -16,6 +16,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
+import ltechnologies.onionphone.onionvpn.core.vpn.firewall.ConnectionOwnerResolver
 import ltechnologies.onionphone.onionvpn.core.vpn.firewall.FirewallBridge
 import ltechnologies.onionphone.onionvpn.core.vpn.forwarder.Socks5Client
 import timber.log.Timber
@@ -161,6 +162,12 @@ class DnsCryptSocksBridge(
                 }
 
                 val clientUid = resolveClientUid(c)
+                if (!ConnectionOwnerResolver.isValidUid(clientUid)) {
+                    // Fail-closed: shared IsolateSOCKSAuth "pac" would merge distinct apps.
+                    Timber.v("PAC SOCKS UID miss — refuse CONNECT")
+                    safeReply(output, REP_NOT_ALLOWED)
+                    return
+                }
                 val (socksUser, socksPass) = pacSocksAuth(clientUid)
                 val resolvedIp: String
                 val remote: Socket = if (TunnelEndpoints.isOnionLikeHostname(host)) {
@@ -332,12 +339,14 @@ class DnsCryptSocksBridge(
     /**
      * Per-client IsolateSOCKSAuth so PAC helpers do not share one circuit pool
      * (Tor path-spec / X-Tor-Stream-Isolation analogue via SOCKS username).
+     * Caller must fail-closed on invalid UID — never fall back to shared [SOCKS_PAC_USER].
      */
     private fun pacSocksAuth(uid: Int): Pair<String, String> {
-        return if (uid >= 0) {
-            "pac$uid" to "p$uid"
+        val epoch = TunnelEndpoints.appSocksNymEpoch
+        return if (epoch > 0) {
+            "pac$uid-n$epoch" to "p$uid-n$epoch"
         } else {
-            TunnelEndpoints.SOCKS_PAC_USER to TunnelEndpoints.SOCKS_PAC_PASS
+            "pac$uid" to "p$uid"
         }
     }
 
