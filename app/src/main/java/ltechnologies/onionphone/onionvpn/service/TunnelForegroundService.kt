@@ -480,11 +480,8 @@ class TunnelForegroundService : Service() {
                         )
                         return START_STICKY
                     }
-                } else if (
-                    preferences.torEngine == TorEngine.LITTLE_T ||
-                    preferences.torEngine == TorEngine.KOTLIN_TOR
-                ) {
-                    // Soft debounce — SocksPort stays up (C Tor defers; kotlin-tor newnym soft).
+                } else if (preferences.torEngine == TorEngine.LITTLE_T) {
+                    // Soft debounce — SocksPort stays up (C Tor defers NEWNYM).
                     val wait = lastLittleTNewNymMs + LITTLE_T_NEWNYM_SOFT_DEBOUNCE_MS -
                         System.currentTimeMillis()
                     if (wait > 0) {
@@ -561,10 +558,7 @@ class TunnelForegroundService : Service() {
                                 // C Tor KeepAliveIsolateSOCKSAuth sticks on u{uid} until
                                 // username rotates — bump epoch on every successful NEWNYM.
                                 TunnelEndpoints.bumpAppSocksNymEpoch()
-                                if (
-                                    preferences.torEngine == TorEngine.LITTLE_T ||
-                                    preferences.torEngine == TorEngine.KOTLIN_TOR
-                                ) {
+                                if (preferences.torEngine == TorEngine.LITTLE_T) {
                                     lastLittleTNewNymMs = System.currentTimeMillis()
                                 }
                             }
@@ -890,10 +884,6 @@ class TunnelForegroundService : Service() {
         // HEV / C Tor: classic tor.start → DNSCrypt → Connected.
         var activePorts = ports
         if (effectivePlane != TunDataPlane.ONIONMASQ) {
-            if (preferences.torEngine == TorEngine.KOTLIN_TOR) {
-                // Bootstrap gate: wire protect before first OR dial when VPN is already up.
-                tor.socketProtect = { fd -> OnionVpnService.protectFd(fd) }
-            }
             val torResult = try {
                 OpTrace.stepSuspending("tunnel", "tor_start", ProcessLogLevel.INFO) {
                     tor.start(ports, preferences)
@@ -1806,9 +1796,7 @@ class TunnelForegroundService : Service() {
             tor.control.isConnected
         val artiLive = preferences.torEngine == TorEngine.ARTI &&
             (st.connected || tor.isRunning())
-        val kotlinLive = preferences.torEngine == TorEngine.KOTLIN_TOR &&
-            (st.connected || tor.isRunning())
-        if (!controlLive && !artiLive && !kotlinLive) return
+        if (!controlLive && !artiLive) return
         // Orbot: SIGNAL ACTIVE whenever control is up before probes — not only when dormant.
         tor.signalActive()
     }
@@ -1943,7 +1931,7 @@ class TunnelForegroundService : Service() {
     }
 
     /**
-     * Debug-only: `files/tor/engine.override.txt` with `ARTI`, `LITTLE_T`, or `KOTLIN_TOR`
+     * Debug-only: `files/tor/engine.override.txt` with `ARTI` or `LITTLE_T`
      * forces [TunnelPreferences.torEngine] for MCP/adb tests without Settings UI.
      *
      * **One-shot**: the file is deleted after apply so Settings → Apply & restart

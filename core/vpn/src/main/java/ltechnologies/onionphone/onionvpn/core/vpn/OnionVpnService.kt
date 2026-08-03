@@ -63,7 +63,6 @@ class OnionVpnService : VpnService() {
 
     override fun onCreate() {
         super.onCreate()
-        bindInstanceProtect { fd -> protect(fd) }
         // Do not bind onionmasq here: OnionMasq.init() has not run yet (getInstance throws).
         // OnionmasqTunForwarder rebinds after init.
     }
@@ -97,7 +96,6 @@ class OnionVpnService : VpnService() {
     }
 
     override fun onDestroy() {
-        clearInstanceProtect()
         runCatching { OnionMasq.unbindVPNService() }
         // Run teardown on the VPN thread and wait — shutdown() alone can drop stopTunnel.
         try {
@@ -679,23 +677,6 @@ class OnionVpnService : VpnService() {
          */
         @Volatile
         private var torSocksUpstreamUpdater: ((Int) -> Unit)? = null
-
-        /**
-         * Best-effort [VpnService.protect] for kotlin-tor OR dials while this service is alive.
-         * Set from onCreate; cleared onDestroy.
-         */
-        @Volatile
-        private var instanceProtect: ((Int) -> Boolean)? = null
-
-        fun protectFd(fd: Int): Boolean = instanceProtect?.invoke(fd) ?: false
-
-        internal fun bindInstanceProtect(protect: (Int) -> Boolean) {
-            instanceProtect = protect
-        }
-
-        internal fun clearInstanceProtect() {
-            instanceProtect = null
-        }
 
         /**
          * Pause (0) or restore Tor SocksPort on the UID bridge without restarting hev.

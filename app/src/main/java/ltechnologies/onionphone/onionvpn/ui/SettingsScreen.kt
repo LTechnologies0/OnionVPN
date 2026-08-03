@@ -680,20 +680,6 @@ fun SettingsScreen(
                 enabled = controlsEnabled,
                 label = { Text("Arti") },
             )
-            FilterChip(
-                selected = local.torEngine == TorEngine.KOTLIN_TOR,
-                onClick = {
-                    commit(
-                        local.copy(
-                            torEngine = TorEngine.KOTLIN_TOR,
-                            tunDataPlane = TunDataPlane.HEV_SOCKS,
-                        ),
-                        restart = true,
-                    )
-                },
-                enabled = controlsEnabled,
-                label = { Text("Kotlin Tor") },
-            )
         }
         if (caps.liveSetConf && local.tunDataPlane != TunDataPlane.ONIONMASQ) {
             Row(

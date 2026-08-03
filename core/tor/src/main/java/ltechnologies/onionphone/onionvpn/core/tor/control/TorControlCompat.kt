@@ -357,18 +357,6 @@ object TorControlCompat {
 
     fun isSupported(engine: TorEngine, opName: String): Boolean {
         if (engine == TorEngine.LITTLE_T) return true
-        if (engine == TorEngine.KOTLIN_TOR) {
-            // kotlin-tor: NEWNYM / dormant / soft recover via TorProcessManager wrappers.
-            return when (behavior(opName)) {
-                ArtiBehavior.EQUIVALENT,
-                ArtiBehavior.NOOP_OK,
-                ArtiBehavior.SOFT_RECOVER,
-                ArtiBehavior.HARD_RECOVER,
-                ArtiBehavior.REQUIRES_RESTART,
-                -> true
-                ArtiBehavior.UNSUPPORTED -> opName.equals("NEWNYM", ignoreCase = true)
-            }
-        }
         return when (behavior(opName)) {
             ArtiBehavior.EQUIVALENT,
             ArtiBehavior.NOOP_OK,

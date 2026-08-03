@@ -79,20 +79,17 @@ internal object TunnelSnapshotBuilder {
             torCircuitEstablished = torStatus.circuitEstablished ||
                 (caps.circuitInspection && built > 0) ||
                 (torEngine == TorEngine.ARTI && runtimeReady) ||
-                (torEngine == TorEngine.KOTLIN_TOR && runtimeReady) ||
                 onionmasqReady,
             torVersion = torStatus.torVersion.ifBlank {
                 when {
                     onionmasqReady -> "onionmasq"
                     torEngine == TorEngine.ARTI -> "arti-mobile"
-                    torEngine == TorEngine.KOTLIN_TOR -> "kotlin-tor"
                     else -> ""
                 }
             },
             torStreamCount = if (caps.circuitInspection) streams else 0,
             torNetworkLive = torStatus.networkLive ||
                 (torEngine == TorEngine.ARTI && runtimeReady) ||
-                (torEngine == TorEngine.KOTLIN_TOR && runtimeReady) ||
                 onionmasqReady,
             torDormant = if (caps.dormantSignals) torStatus.dormant else false,
             torEntryGuards = if (caps.classicControlPlane) torStatus.entryGuardsSummary else "",

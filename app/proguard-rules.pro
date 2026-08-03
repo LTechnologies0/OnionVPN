@@ -18,11 +18,3 @@
     public static void postEvent(java.lang.String);
     public static native <methods>;
 }
-
-# kotlin-tor (composite) — keep engine; ignore JVM-only FFM/ProcessHandle refs.
--keep class org.kotlintor.** { *; }
--dontwarn java.lang.ProcessHandle
--dontwarn java.lang.foreign.**
--dontwarn org.kotlintor.os.SeccompBpf
--dontwarn org.kotlintor.os.SeccompBpf$*
--dontwarn org.kotlintor.config.PidFile

@@ -430,26 +430,6 @@ object TunnelValidator {
                         detail = "arti.status not found",
                     )
                 }
-                torEngine == TorEngine.KOTLIN_TOR && torConfig != null -> {
-                    val ready = torConfig.lineSequence().any {
-                        it.trim().equals("ready=true", ignoreCase = true)
-                    }
-                    ValidationCheck(
-                        id = "tor.kotlin.status",
-                        label = "kotlin-tor runtime status",
-                        status = if (ready) ValidationStatus.Pass else ValidationStatus.Fail,
-                        detail = "kotlin-tor status ready=$ready socks=${runtimePorts?.torSocksPort}",
-                        tripsKillSwitch = true,
-                    )
-                }
-                torEngine == TorEngine.KOTLIN_TOR -> {
-                    ValidationCheck(
-                        id = "tor.config.missing",
-                        label = "kotlin-tor runtime status",
-                        status = ValidationStatus.Fail,
-                        detail = "kotlin-tor status file not found",
-                    )
-                }
                 torConfig != null -> {
                     TorPathValidator.validateTorrcContent(
                         torConfig,
