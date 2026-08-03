@@ -70,14 +70,42 @@ internal object DnsCryptReadiness {
             )
             val response = DatagramPacket(ByteArray(512), 512)
             socket.receive(response)
-            response.length > 12 &&
-                (response.data[3].toInt() and 0x0f) == 0 &&
-                (((response.data[6].toInt() and 0xff) shl 8) or (response.data[7].toInt() and 0xff)) > 0
+            isSuccessfulAResponse(response.data, response.length)
         }
     } catch (error: Exception) {
         logProbe("udp-upstream", port, error)
         false
     }
+
+    /**
+     * Same as [probeResolvesExample] over TCP DNS (RFC 1035 length prefix).
+     * Required when dnscrypt-proxy `force_tcp = true` (OnionVPN Tor path).
+     */
+    fun probeResolvesExampleTcp(port: Int): Boolean = try {
+        Socket().use { socket ->
+            socket.soTimeout = 8_000
+            socket.connect(InetSocketAddress(TunnelEndpoints.LOOPBACK, port), 3_000)
+            val out = java.io.DataOutputStream(socket.getOutputStream())
+            val inp = java.io.DataInputStream(socket.getInputStream())
+            val query = exampleComQuery(id = 3)
+            out.writeShort(query.size)
+            out.write(query)
+            out.flush()
+            val len = inp.readUnsignedShort()
+            if (len < 12 || len > 4_096) return false
+            val buf = ByteArray(len)
+            inp.readFully(buf)
+            isSuccessfulAResponse(buf, buf.size)
+        }
+    } catch (error: Exception) {
+        logProbe("tcp-upstream", port, error)
+        false
+    }
+
+    private fun isSuccessfulAResponse(data: ByteArray, length: Int): Boolean =
+        length > 12 &&
+            (data[3].toInt() and 0x0f) == 0 &&
+            (((data[6].toInt() and 0xff) shl 8) or (data[7].toInt() and 0xff)) > 0
 
     /**
      * Parses dnscrypt-proxy log lines into readiness flags (upstream proxy.go / serversInfo.go).

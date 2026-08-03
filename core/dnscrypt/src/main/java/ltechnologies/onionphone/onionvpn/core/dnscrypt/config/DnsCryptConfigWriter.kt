@@ -94,11 +94,12 @@ object DnsCryptConfigWriter {
         val resolvedList = DnsCryptPublicResolvers.resolveNames(
             serverName.ifBlank { preferences.dnsCryptServerName },
         ).let { names ->
+            val torFriendly = DnsCryptPublicResolvers.ensureTorFriendlyServers(names)
             if (!preferences.dnsCryptAnonymized) {
-                names
+                torFriendly
             } else {
                 // Prefer servers that document Anonymized DNSCrypt / relay compatibility.
-                val filtered = names.filter { name ->
+                val filtered = torFriendly.filter { name ->
                     if (name == DnsCryptPublicResolvers.AUTO) return@filter true
                     val desc = DnsCryptPublicResolvers.byName[name]?.description.orEmpty()
                     !desc.contains("incompatible with anonymization", ignoreCase = true) &&
@@ -109,7 +110,7 @@ object DnsCryptConfigWriter {
                                 name.startsWith("dnscry.pt-")
                             )
                 }
-                filtered.ifEmpty { names }
+                filtered.ifEmpty { torFriendly }
             }
         }
         val isAuto = resolvedList.size == 1 && resolvedList[0] == DnsCryptPublicResolvers.AUTO
@@ -153,7 +154,7 @@ object DnsCryptConfigWriter {
             force_tcp = true
             # DNSCrypt-over-Tor needs headroom; Tor SocksTimeout default is 120s.
             # Keep below TunDnsMux DNS_TIMEOUT so the mux can retry once.
-            timeout = 25000
+            timeout = 45000
             keepalive = 30
             cert_refresh_delay = 240
             ${if (preferences.dnsCryptQueryPadding) {
@@ -171,13 +172,15 @@ object DnsCryptConfigWriter {
             proxy = '$proxy'
 
             # Bootstrap / netprobe hit loopback only (never system DNS):
-            # - C Tor / Arti with DNSPort: Tor DNSPort on this port
-            # - onionmasq (and Arti when DNSPort dead): SocksDnsBootstrapRelay → DoH :443
+            # - C Tor: Tor DNSPort (UDP+TCP) on this port
+            # - Arti: TCP DNS adapter on this port (force_tcp) → TorClient::resolve /
+            #   SOCKS RESOLVE / DoH :443; Arti stock dns-proxy may own UDP
+            # - onionmasq: dual-stack SocksDnsBootstrapRelay → sidecar SOCKS RESOLVE + DoH
             bootstrap_resolvers = ['$bootstrap']
             ignore_system_dns = true
             netprobe_address = '$bootstrap'
-            # dnscrypt-proxy units: seconds (upstream default 60). Cold Tor/DoH needs headroom.
-            netprobe_timeout = 60
+            # dnscrypt-proxy units: seconds (upstream default 60). Cold Tor needs headroom.
+            netprobe_timeout = 90
 
             # Local cache cuts repeat lookups over Tor (double-hop DNSCrypt path).
             # Flushed on Tor CLEARDNSCACHE/NEWNYM via DnsCryptProcessManager.clearQueryCache()

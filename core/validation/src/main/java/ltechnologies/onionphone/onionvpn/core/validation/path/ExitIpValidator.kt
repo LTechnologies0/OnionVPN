@@ -73,9 +73,11 @@ object ExitIpValidator {
             OkHttpClient.Builder()
                 .proxy(proxy)
                 .dns(TorSocksDns)
-                .connectTimeout(25, TimeUnit.SECONDS)
-                .readTimeout(25, TimeUnit.SECONDS)
-                .writeTimeout(25, TimeUnit.SECONDS)
+                .connectTimeout(45, TimeUnit.SECONDS)
+                .readTimeout(45, TimeUnit.SECONDS)
+                .writeTimeout(45, TimeUnit.SECONDS)
+                .callTimeout(60, TimeUnit.SECONDS)
+                .retryOnConnectionFailure(true)
                 .followRedirects(true)
                 .build()
         }
@@ -206,17 +208,25 @@ object ExitIpValidator {
             TunnelEndpoints.VPN_CLIENT_ADDRESS,
             TunnelEndpoints.VPN_CLIENT_ADDRESS_V6,
         )
-        val unexpected = vpnAddrs.filter { addr ->
-            addr !in expected && !isOnionVpnVirtual(addr)
+        // Hard only when a public/ISP address appears on a VPN iface (clearnet misbind).
+        // Extra private/link-local/ULA (e.g. 169.254.x, fc00::) from OS/CM is Soft noise —
+        // GrapheneOS / Always-on often expose such addrs alongside 10.8.0.2.
+        val publicOnVpn = vpnAddrs.filter { !isPrivateOrLocal(it) }
+        val unexpectedPrivate = vpnAddrs.filter { addr ->
+            addr !in expected && !isOnionVpnVirtual(addr) && isPrivateOrLocal(addr)
         }
-        val publicOnVpn = vpnAddrs.filter { !isPrivateOrLocal(it) && it !in expected }
 
-        return if (publicOnVpn.isEmpty() && unexpected.isEmpty()) {
+        return if (publicOnVpn.isEmpty()) {
             ValidationCheck(
                 id = "vpn.address.not.public",
                 label = "VPN addresses are virtual (not ISP)",
                 status = ValidationStatus.Pass,
-                detail = "vpnAddrs=$vpnAddrs",
+                detail = buildString {
+                    append("vpnAddrs=$vpnAddrs")
+                    if (unexpectedPrivate.isNotEmpty()) {
+                        append(" notePrivate=$unexpectedPrivate")
+                    }
+                },
                 tripsKillSwitch = true,
             )
         } else {
@@ -224,7 +234,7 @@ object ExitIpValidator {
                 id = "vpn.address.not.public",
                 label = "VPN addresses are virtual (not ISP)",
                 status = ValidationStatus.Fail,
-                detail = "unexpected=$unexpected publicOnVpn=$publicOnVpn",
+                detail = "publicOnVpn=$publicOnVpn vpnAddrs=$vpnAddrs",
                 tripsKillSwitch = true,
             )
         }
@@ -247,7 +257,12 @@ object ExitIpValidator {
         if (host == TunnelEndpoints.VPN_CLIENT_ADDRESS) return true
         if (host == TunnelEndpoints.VPN_CLIENT_ADDRESS_V6) return true
         if (host.startsWith("10.8.0.")) return true
-        if (host.startsWith("fd00:8:8:8:")) return true
+        if (host.startsWith("fd00:8:8:8:", ignoreCase = true)) return true
+        // IPv4 link-local / IPv6 ULA often appear on VPN LinkProperties (not ISP egress).
+        if (host.startsWith("169.254.")) return true
+        if (host.startsWith("fc", ignoreCase = true) || host.startsWith("fd", ignoreCase = true)) {
+            return true
+        }
         if (host.startsWith("100.")) {
             val parts = host.split('.')
             if (parts.size == 4) {

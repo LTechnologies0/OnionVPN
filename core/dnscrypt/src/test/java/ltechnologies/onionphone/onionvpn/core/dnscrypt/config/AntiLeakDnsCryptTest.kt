@@ -41,7 +41,7 @@ class AntiLeakDnsCryptTest(private val requiredSubstring: String) {
             "[sources.'public-resolvers']",
             "minisign_key",
             "cache = true",
-            "timeout = 25000",
+            "timeout = 45000",
         ).map { arrayOf(it) }
     }
 }

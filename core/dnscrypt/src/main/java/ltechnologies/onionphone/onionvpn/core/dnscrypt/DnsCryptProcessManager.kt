@@ -82,10 +82,12 @@ class DnsCryptProcessManager(
                 lastSocksOverride = socksPortOverride
                 lastSocksUser = socksUserOverride
                 lastServerName = serverName.ifBlank { preferences.dnsCryptServerName }
-                listenPort = ports.dnsCryptListenPort
                 OpTrace.debug("dnscrypt", "stop_prior")
                 stopInternal()
                 killOrphanedProcesses()
+                // Re-bind after stopInternal() which clears listenPort — otherwise
+                // waitForLiveServer hits `listenPort ?: return` and skips upstream gate.
+                listenPort = ports.dnsCryptListenPort
                 listenerReady.set(false)
                 serverReady.set(false)
                 try {
@@ -97,7 +99,9 @@ class DnsCryptProcessManager(
                     OpTrace.stepSuspending("dnscrypt", "wait_listener") {
                         waitForListener(ports.dnsCryptListenPort)
                     }
-                    OpTrace.stepSuspending("dnscrypt", "wait_server") { waitForLiveServer() }
+                    OpTrace.stepSuspending("dnscrypt", "wait_server") {
+                        waitForLiveServer(ports.dnsCryptListenPort)
+                    }
                     OpTrace.info("dnscrypt", "listening on ${ports.dnsCryptListenPort}")
                     Timber.i("DNSCrypt listening on ${ports.dnsCryptListenPort}")
                     Result.success(Unit)
@@ -218,9 +222,11 @@ class DnsCryptProcessManager(
     }
 
     private suspend fun waitForLiveServer(
-        timeoutMs: Long = 90_000,
+        listenPort: Int,
+        timeoutMs: Long = 120_000,
         pollMs: Long = 500,
     ) {
+        require(listenPort > 0) { "DNSCrypt listenPort required for upstream wait" }
         val deadline = System.currentTimeMillis() + timeoutMs
         while (System.currentTimeMillis() < deadline) {
             if (!kotlin.coroutines.coroutineContext.isActive) {
@@ -236,10 +242,15 @@ class DnsCryptProcessManager(
                 Timber.i("DNSCrypt upstream server ready")
                 return
             }
-            val port = listenPort ?: return
-            if (DnsCryptReadiness.probeResolvesExample(port)) {
+            if (DnsCryptReadiness.probeResolvesExample(listenPort)) {
                 serverReady.set(true)
                 Timber.i("DNSCrypt upstream ready (DNS probe)")
+                return
+            }
+            // force_tcp=true — TCP DNS probe catches upstream when UDP is muted.
+            if (DnsCryptReadiness.probeResolvesExampleTcp(listenPort)) {
+                serverReady.set(true)
+                Timber.i("DNSCrypt upstream ready (TCP DNS probe)")
                 return
             }
             delay(pollMs)

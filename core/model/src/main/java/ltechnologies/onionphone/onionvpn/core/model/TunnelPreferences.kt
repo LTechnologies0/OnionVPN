@@ -107,8 +107,8 @@ data class TunnelPreferences(
      */
     val allowAdbClearnetLeak: Boolean = false,
     /**
-     * TUN forwarder stack. [TunDataPlane.ONIONMASQ] only with [TorEngine.ARTI] and
-     * when native onionmasq is present; otherwise HEV is used.
+     * TUN forwarder stack. [TunDataPlane.ONIONMASQ] is forced when
+     * [TorEngine.ARTI] and native onionmasq are present; otherwise HEV.
      */
     val tunDataPlane: TunDataPlane = TunDataPlane.HEV_SOCKS,
 )

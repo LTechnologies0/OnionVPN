@@ -29,7 +29,10 @@ class DnsCryptConfigWriterTest {
         assertTrue(config.contains("ipv6_servers = false"))
         assertTrue(config.contains("require_dnssec = true"))
         assertTrue(config.contains("[sources.'public-resolvers']"))
-        assertTrue(config.contains("server_names = ['cloudflare']"))
+        // DoH-only defaults get classic DNSCrypt peers prepended for Tor SOCKS reliability.
+        assertTrue(config.contains("server_names = ['adguard-dns', 'cs-de', 'cs-nl', 'cloudflare']"))
+        assertTrue(config.contains("[static.'adguard-dns']"))
+        assertTrue(config.contains("[static.'cloudflare']"))
     }
 
     @Test

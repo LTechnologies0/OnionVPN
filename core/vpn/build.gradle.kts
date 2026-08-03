@@ -23,6 +23,7 @@ dependencies {
     implementation(libs.androidx.lifecycle.livedata.ktx)
     implementation(libs.kotlinx.coroutines.core)
     implementation(libs.kotlinx.coroutines.android)
+    implementation(libs.okhttp)
     implementation(libs.timber)
 
     testImplementation(libs.junit)

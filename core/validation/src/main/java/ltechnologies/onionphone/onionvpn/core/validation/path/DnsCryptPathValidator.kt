@@ -118,25 +118,26 @@ object DnsCryptPathValidator {
         }
     }
 
-    /** DNS-over-TCP: length-prefixed query; require matching transaction ID in answer. */
+    /** DNS-over-TCP: length-prefixed query; require matching transaction ID + answers. */
     private fun probeTcpDns(port: Int): Boolean {
         return try {
             Socket().use { socket ->
-                socket.connect(InetSocketAddress(TunnelEndpoints.LOOPBACK, port), 2_000)
-                socket.soTimeout = 5_000
+                socket.connect(InetSocketAddress(TunnelEndpoints.LOOPBACK, port), 3_000)
+                socket.soTimeout = 15_000
                 val query = dnsQueryExampleA()
-                DataOutputStream(socket.getOutputStream()).use { out ->
-                    out.writeShort(query.size)
-                    out.write(query)
-                    out.flush()
-                }
-                DataInputStream(socket.getInputStream()).use { inp ->
-                    val len = inp.readUnsignedShort()
-                    if (len < 12 || len > 4_096) return false
-                    val resp = ByteArray(len)
-                    inp.readFully(resp)
-                    dnsIdMatches(resp, resp.size, query)
-                }
+                // Do not close stream wrappers — that closes the Socket before the answer.
+                val out = DataOutputStream(socket.getOutputStream())
+                out.writeShort(query.size)
+                out.write(query)
+                out.flush()
+                val inp = DataInputStream(socket.getInputStream())
+                val len = inp.readUnsignedShort()
+                if (len < 12 || len > 4_096) return false
+                val resp = ByteArray(len)
+                inp.readFully(resp)
+                dnsIdMatches(resp, resp.size, query) &&
+                    (resp[3].toInt() and 0x0f) == 0 &&
+                    (((resp[6].toInt() and 0xff) shl 8) or (resp[7].toInt() and 0xff)) > 0
             }
         } catch (_: Exception) {
             false

@@ -1132,14 +1132,26 @@ class TorProcessManager(
             }
             if (bootDone) {
                 // Probe DNSPort only after bootstrap (same rule as little-t waitForBootstrap).
+                // Prefer TCP — DNSCrypt force_tcp hits TCP; Arti stock dns-proxy is UDP-only
+                // so TCP may appear only after the app's bootstrap adapter binds.
                 if (!dnsReady) {
-                    dnsReady = TorReadiness.isDnsPortReady(ports.torDnsPort, timeoutMs = 2_000)
+                    dnsReady = TorReadiness.isDnsPortAnyReady(ports.torDnsPort, timeoutMs = 2_000)
                 }
                 if (dnsReady) {
                     Timber.i(
                         "Arti bootstrap complete readyTraffic=%s frac=%s dnsPort=%d",
                         nativeReady,
                         frac,
+                        ports.torDnsPort,
+                    )
+                    return
+                }
+                // Ext API: ready_for_traffic is enough — TunnelForegroundService always
+                // binds a TCP DNS adapter for DNSCrypt before starting dnscrypt-proxy.
+                if (hasExt && nativeReady) {
+                    Timber.i(
+                        "Arti ready_for_traffic — DNSPort UDP deferred " +
+                            "(TCP bootstrap adapter starts with DNSCrypt) dns=%d",
                         ports.torDnsPort,
                     )
                     return

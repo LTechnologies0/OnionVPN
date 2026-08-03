@@ -21,29 +21,240 @@ index 63797e4..83c832d 100644
  # the java native interface
  jni = { version = "0.21", default-features = false }
 diff --git a/crates/onionmasq-mobile/src/ffi.rs b/crates/onionmasq-mobile/src/ffi.rs
-index d94b358..a0f18ab 100644
+index d94b358..312bff8 100644
 --- a/crates/onionmasq-mobile/src/ffi.rs
 +++ b/crates/onionmasq-mobile/src/ffi.rs
-@@ -67,6 +67,17 @@ pub extern "C" fn Java_org_torproject_onionmasq_OnionMasqJni_isRunning(
-     })
- }
+@@ -9,7 +9,7 @@ use jni::sys::{jboolean, jlong};
+ use jni::JNIEnv;
+ use onion_tunnel::accounting::BandwidthCounter;
+ use onion_tunnel::scaffolding::TunnelCommand;
+-use tracing::{debug, error, info};
++use tracing::{debug, error, info, warn};
  
+ #[no_mangle]
+ pub extern "C" fn Java_org_torproject_onionmasq_OnionMasqJni_runProxy(
+@@ -23,7 +23,14 @@ pub extern "C" fn Java_org_torproject_onionmasq_OnionMasqJni_runProxy(
+     bridge_lines: JString,
+ ) {
+     panic_handling::capture_unwind!(env, {
+-        let mobile = OnionmasqMobile::get();
++        let Some(mobile) = OnionmasqMobile::try_get() else {
++            error!("runProxy() called before init()");
++            let _ = env.throw_new(
++                "org/torproject/onionmasq/errors/OnionmasqException",
++                "OnionMasq not initialized",
++            );
++            return;
++        };
+         // SAFETY: runProxy has the same contract as run_proxy
+         if let Err(e) = unsafe {
+             mobile.run_proxy(
+@@ -48,7 +55,10 @@ pub extern "C" fn Java_org_torproject_onionmasq_OnionMasqJni_closeProxy(
+     _: JClass,
+ ) {
+     panic_handling::capture_unwind!(env, {
+-        let mobile = OnionmasqMobile::get();
++        // Never expect()-abort when stop races ahead of init (Android VPN restart).
++        let Some(mobile) = OnionmasqMobile::try_get() else {
++            return;
++        };
+         if let Err(e) = mobile.stop_proxy() {
+             error!("closeProxy() returned error: {e:?}");
+             errors::throw_java_exception_for(&mut env, e).unwrap();
+@@ -62,8 +72,25 @@ pub extern "C" fn Java_org_torproject_onionmasq_OnionMasqJni_isRunning(
+     _: JClass,
+ ) -> jboolean {
+     panic_handling::capture_unwind!(env, {
+-        let mobile = OnionmasqMobile::get();
+-        anyhow::Ok(mobile.is_running()).expect("Could not determine running state")
++        // Return false when uninitialised — callers probe isRunning before init.
++        // get().expect aborts the app under panic=abort.
++        match OnionmasqMobile::try_get() {
++            Some(mobile) => mobile.is_running(),
++            None => 0,
++        }
++    })
++}
++
 +#[no_mangle]
 +pub extern "C" fn Java_org_torproject_onionmasq_OnionMasqJni_getSocksSidecarPort(
 +    mut env: JNIEnv,
 +    _: JClass,
 +) -> jlong {
 +    panic_handling::capture_unwind!(env, {
-+        anyhow::Ok(OnionmasqMobile::get().socks_sidecar_port())
-+            .expect("Could not read SOCKS sidecar port")
-+    })
-+}
-+
- #[no_mangle]
- pub extern "C" fn Java_org_torproject_onionmasq_OnionMasqJni_refreshCircuits(
++        match OnionmasqMobile::try_get() {
++            Some(mobile) => mobile.socks_sidecar_port(),
++            None => 0,
++        }
+     })
+ }
+ 
+@@ -73,7 +100,9 @@ pub extern "C" fn Java_org_torproject_onionmasq_OnionMasqJni_refreshCircuits(
+     _: JClass,
+ ) {
+     panic_handling::capture_unwind!(env, {
+-        let mobile = OnionmasqMobile::get();
++        let Some(mobile) = OnionmasqMobile::try_get() else {
++            return;
++        };
+         if let Err(e) = mobile.send_command(TunnelCommand::RefreshCircuits) {
+             errors::throw_java_exception_for(&mut env, e).unwrap();
+         }
+@@ -87,7 +116,9 @@ pub extern "C" fn Java_org_torproject_onionmasq_OnionMasqJni_refreshCircuitsForA
+     aid: jlong,
+ ) {
+     panic_handling::capture_unwind!(env, {
+-        let mobile = OnionmasqMobile::get();
++        let Some(mobile) = OnionmasqMobile::try_get() else {
++            return;
++        };
+         if let Err(e) = mobile.send_command(TunnelCommand::RefreshCircuitsForApp {
+             isolation_key: aid as u64,
+         }) {
+@@ -114,7 +145,10 @@ pub extern "C" fn Java_org_torproject_onionmasq_OnionMasqJni_setPcapPath(
+ ) {
+     panic_handling::capture_unwind!(env, {
+         debug!("setPcapPath()");
+-        let path = env.get_string(&path).expect("path is invalid");
++        let Ok(path) = env.get_string(&path) else {
++            warn!("setPcapPath: invalid path jstring");
++            return;
++        };
+         let path = path.to_string_lossy();
+         info!("enabling pcap logging to path: {}", path);
+         let path = if path.is_empty() {
+@@ -122,7 +156,9 @@ pub extern "C" fn Java_org_torproject_onionmasq_OnionMasqJni_setPcapPath(
+         } else {
+             Some(path.to_string())
+         };
+-        OnionmasqMobile::get().set_pcap_path(path);
++        if let Some(mobile) = OnionmasqMobile::try_get() {
++            mobile.set_pcap_path(path);
++        }
+     })
+ }
+ 
+@@ -134,7 +170,7 @@ pub extern "C" fn Java_org_torproject_onionmasq_OnionMasqJni_getBytesReceived(
+     panic_handling::capture_unwind!(env, {
+         let rx = BandwidthCounter::global().bytes_rx();
+         // Realistically nobody is going to pass 8192 PiB of data through the tunnel, are they?
+-        rx.try_into().expect("wow, large bandwidth counter")
++        rx.try_into().unwrap_or(jlong::MAX)
+     })
+ }
+ 
+@@ -145,8 +181,11 @@ pub extern "C" fn Java_org_torproject_onionmasq_OnionMasqJni_getBytesReceivedFor
+     aid: jlong,
+ ) -> jlong {
+     panic_handling::capture_unwind!(env, {
+-        let rx = OnionmasqMobile::get().app_rx_counter(aid as u64);
+-        rx.try_into().expect("wow, large bandwidth counter")
++        let Some(mobile) = OnionmasqMobile::try_get() else {
++            return 0;
++        };
++        let rx = mobile.app_rx_counter(aid as u64);
++        rx.try_into().unwrap_or(jlong::MAX)
+     })
+ }
+ 
+@@ -157,7 +196,7 @@ pub extern "C" fn Java_org_torproject_onionmasq_OnionMasqJni_getBytesSent(
+ ) -> jlong {
+     panic_handling::capture_unwind!(env, {
+         let tx = BandwidthCounter::global().bytes_tx();
+-        tx.try_into().expect("wow, large bandwidth counter")
++        tx.try_into().unwrap_or(jlong::MAX)
+     })
+ }
+ 
+@@ -168,8 +207,11 @@ pub extern "C" fn Java_org_torproject_onionmasq_OnionMasqJni_getBytesSentForApp(
+     aid: jlong,
+ ) -> jlong {
+     panic_handling::capture_unwind!(env, {
+-        let tx = OnionmasqMobile::get().app_tx_counter(aid as u64);
+-        tx.try_into().expect("wow, large bandwidth counter")
++        let Some(mobile) = OnionmasqMobile::try_get() else {
++            return 0;
++        };
++        let tx = mobile.app_tx_counter(aid as u64);
++        tx.try_into().unwrap_or(jlong::MAX)
+     })
+ }
+ 
+@@ -178,7 +220,11 @@ pub extern "C" fn Java_org_torproject_onionmasq_OnionMasqJni_resetCounters(
      mut env: JNIEnv,
+     _: JClass,
+ ) {
+-    panic_handling::capture_unwind!(env, { OnionmasqMobile::get().reset_counters() })
++    panic_handling::capture_unwind!(env, {
++        if let Some(mobile) = OnionmasqMobile::try_get() {
++            mobile.reset_counters();
++        }
++    })
+ }
+ 
+ #[no_mangle]
+@@ -188,7 +234,10 @@ pub extern "C" fn Java_org_torproject_onionmasq_OnionMasqJni_setCountryCode(
+     country_code: JString<'_>,
+ ) {
+     panic_handling::capture_unwind!(env, {
+-        if let Err(e) = OnionmasqMobile::get().set_country_code(country_code) {
++        let Some(mobile) = OnionmasqMobile::try_get() else {
++            return;
++        };
++        if let Err(e) = mobile.set_country_code(country_code) {
+             errors::throw_java_exception_for(&mut env, e).unwrap();
+         }
+     })
+@@ -201,7 +250,10 @@ pub extern "C" fn Java_org_torproject_onionmasq_OnionMasqJni_setExcludedUids(
+     uids: JLongArray,
+ ) {
+     panic_handling::capture_unwind!(env, {
+-        if let Err(e) = OnionmasqMobile::get().set_excluded_uids(uids) {
++        let Some(mobile) = OnionmasqMobile::try_get() else {
++            return;
++        };
++        if let Err(e) = mobile.set_excluded_uids(uids) {
+             errors::throw_java_exception_for(&mut env, e).unwrap();
+         }
+     })
+@@ -214,7 +266,10 @@ pub extern "C" fn Java_org_torproject_onionmasq_OnionMasqJni_setInternetConnecti
+     available: jboolean,
+ ) {
+     panic_handling::capture_unwind!(env, {
+-        if let Err(e) = OnionmasqMobile::get().set_internet_connectivity(available) {
++        let Some(mobile) = OnionmasqMobile::try_get() else {
++            return;
++        };
++        if let Err(e) = mobile.set_internet_connectivity(available) {
+             errors::throw_java_exception_for(&mut env, e).unwrap();
+         }
+     })
+@@ -230,7 +285,10 @@ pub extern "C" fn Java_org_torproject_onionmasq_OnionMasqJni_setTurnServerConfig
+ ) {
+     panic_handling::capture_unwind!(env, {
+         let p = port as u64;
+-        if let Err(e) = OnionmasqMobile::get().set_turn_server_config(host, p, auth) {
++        let Some(mobile) = OnionmasqMobile::try_get() else {
++            return;
++        };
++        if let Err(e) = mobile.set_turn_server_config(host, p, auth) {
+             errors::throw_java_exception_for(&mut env, e).unwrap();
+         }
+     })
+@@ -243,7 +301,10 @@ pub extern "C" fn Java_org_torproject_onionmasq_OnionMasqJni_setBridgeLines(
+     lines: JString<'_>,
+ ) {
+     panic_handling::capture_unwind!(env, {
+-        if let Err(e) = OnionmasqMobile::get().set_bridge_lines(lines) {
++        let Some(mobile) = OnionmasqMobile::try_get() else {
++            return;
++        };
++        if let Err(e) = mobile.set_bridge_lines(lines) {
+             errors::throw_java_exception_for(&mut env, e).unwrap();
+         }
+     })
 diff --git a/crates/onionmasq-mobile/src/lib.rs b/crates/onionmasq-mobile/src/lib.rs
-index fdbc78d..4a4cf12 100644
+index fdbc78d..8ce4343 100644
 --- a/crates/onionmasq-mobile/src/lib.rs
 +++ b/crates/onionmasq-mobile/src/lib.rs
 @@ -6,6 +6,7 @@ mod ffi;
@@ -54,7 +265,20 @@ index fdbc78d..4a4cf12 100644
  
  use crate::errors::{CountryCodeError, ProxyStoppedError};
  use crate::scaffolding::AndroidScaffolding;
-@@ -303,6 +304,15 @@ impl OnionmasqMobile {
+@@ -172,6 +173,12 @@ impl OnionmasqMobile {
+             .expect("OnionmasqMobile::get() called without being initialised (did you forget to call init?)")
+     }
+ 
++    /// Like [`Self::get`], but returns `None` when `init()` has not run yet.
++    /// Prefer this for probe/stop/config JNI entry points that must not abort.
++    pub fn try_get() -> Option<&'static Self> {
++        ONIONMASQ_MOBILE_SINGLETON.get()
++    }
++
+     /// Get the Android API version.
+     pub fn get_android_api(&self) -> Result<i32> {
+         self.call_jni_class_method("getAndroidAPI", "()I", &[])
+@@ -303,6 +310,15 @@ impl OnionmasqMobile {
  
              debug!("successfully created tun interface");
  
@@ -70,7 +294,7 @@ index fdbc78d..4a4cf12 100644
              let mut events = onion_tunnel.get_bootstrap_events();
              tokio::spawn(async move {
                  debug!("starting bootstrap event listening ...");
-@@ -319,6 +329,7 @@ impl OnionmasqMobile {
+@@ -319,6 +335,7 @@ impl OnionmasqMobile {
  
              // (This call is blocking, and only returns in case of error or external shutdown.)
              let result = onion_tunnel.run().await;
@@ -78,7 +302,7 @@ index fdbc78d..4a4cf12 100644
              if let Err(ref e) = result {
                  error!("OnionTunnel failed: {e}");
              }
-@@ -357,6 +368,11 @@ impl OnionmasqMobile {
+@@ -357,6 +374,11 @@ impl OnionmasqMobile {
          }
      }
  
@@ -90,21 +314,70 @@ index fdbc78d..4a4cf12 100644
      /// Send a `TunnelCommand` to the running proxy.
      fn send_command(&self, cmd: TunnelCommand) -> Result<()> {
          if let Some(sender) = self.command_sender.lock().unwrap().as_mut() {
+diff --git a/crates/onionmasq-mobile/src/scaffolding.rs b/crates/onionmasq-mobile/src/scaffolding.rs
+index 26d7208..00df8a8 100644
+--- a/crates/onionmasq-mobile/src/scaffolding.rs
++++ b/crates/onionmasq-mobile/src/scaffolding.rs
+@@ -68,7 +68,11 @@ impl TunnelScaffolding for AndroidScaffolding {
+     fn isolate(&self, src: IpEndpoint, dst: IpEndpoint, ip_proto: u8) -> io::Result<u64> {
+         // NOTE: using trace level logging here to avoid exposing `src` and `dst` to logcat
+ 
+-        if OnionmasqMobile::get().get_android_api().unwrap() >= 29 {
++        if OnionmasqMobile::try_get()
++            .and_then(|m| m.get_android_api().ok())
++            .unwrap_or(0)
++            >= 29
++        {
+             trace!(
+                 "isolate(): calling getConnectionOwnerUid({ip_proto}, {:?}, {:?})",
+                 sensitive(src),
+@@ -235,8 +239,13 @@ pub fn get_connection_owner_uid(
+     destination_address: IpAddr,
+     destination_port: i32,
+ ) -> io::Result<u64> {
+-    let mobile = OnionmasqMobile::get();
+-    let guard = mobile.get_jni_env().expect("failed to get JNI env");
++    // Hot path: never OnionmasqMobile::get().expect — panic=abort kills the VPN process.
++    let Some(mobile) = OnionmasqMobile::try_get() else {
++        return Err(io::Error::other("OnionMasq not initialized"));
++    };
++    let guard = mobile
++        .get_jni_env()
++        .map_err(|e| io::Error::other(format!("failed to get JNI env: {e}")))?;
+ 
+     let source_ip_bytes = match source_address {
+         IpAddr::V4(source_address) => source_address.octets().to_vec(),
+@@ -249,10 +258,10 @@ pub fn get_connection_owner_uid(
+ 
+     let source_address_jbyte_array = guard
+         .byte_array_from_slice(source_ip_bytes.as_slice())
+-        .unwrap();
++        .map_err(|e| io::Error::other(format!("src byte array: {e}")))?;
+     let destination_address_jbyte_array = guard
+         .byte_array_from_slice(destination_ip_bytes.as_slice())
+-        .unwrap();
++        .map_err(|e| io::Error::other(format!("dst byte array: {e}")))?;
+ 
+     let ret = mobile
+         .call_jni_class_method::<jint>(
 diff --git a/crates/onionmasq-mobile/src/socks_sidecar.rs b/crates/onionmasq-mobile/src/socks_sidecar.rs
 new file mode 100644
-index 0000000..3333333
+index 0000000..7712330
 --- /dev/null
 +++ b/crates/onionmasq-mobile/src/socks_sidecar.rs
-@@ -0,0 +1,244 @@
+@@ -0,0 +1,358 @@
 +//! Loopback SOCKS5 sidecar on the same TorClient as onionmasq TUN traffic.
 +//!
 +//! DNSCrypt / probe clients authenticate with username/password; each username maps to a
 +//! stable [`IsolationToken`] so roles stay isolated without a second Arti bootstrap.
++//!
++//! Commands (RFC 1928 + Tor socks-extensions):
++//! - `CONNECT` (`0x01`) — TCP stream via Tor
++//! - `RESOLVE` (`0xF0`) — remote DNS via `TorClient::resolve_with_prefs` (no clearnet DoH)
 +
 +use arti_client::{IntoTorAddr, IsolationToken, StreamPrefs, TorClient};
 +use dashmap::DashMap;
-+use futures::future::FutureExt;
-+use std::net::SocketAddr;
++use std::net::{IpAddr, SocketAddr};
 +use std::sync::atomic::{AtomicU16, Ordering};
 +use std::sync::Arc;
 +use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -226,10 +499,7 @@ index 0000000..3333333
 +    if req[0] != 0x05 {
 +        anyhow::bail!("bad request version");
 +    }
-+    if req[1] != 0x01 {
-+        reply_socks_error(&mut stream, 0x07).await?;
-+        anyhow::bail!("unsupported SOCKS command {}", req[1]);
-+    }
++    let cmd = req[1];
 +    let (host, port) = match req[3] {
 +        0x01 => {
 +            let mut addr = [0u8; 4];
@@ -269,6 +539,30 @@ index 0000000..3333333
 +    let mut prefs = StreamPrefs::new();
 +    prefs.set_isolation(isolation);
 +
++    match cmd {
++        // CONNECT — RFC 1928
++        0x01 => relay_connect(stream, peer, arti, username, host, port, prefs).await,
++        // RESOLVE — Tor socks-extensions.txt (0xF0)
++        0xF0 => reply_resolve(stream, peer, arti, username, host, prefs).await,
++        other => {
++            reply_socks_error(&mut stream, 0x07).await?;
++            anyhow::bail!("unsupported SOCKS command {other}");
++        }
++    }
++}
++
++async fn relay_connect<R>(
++    stream: TcpStream,
++    peer: SocketAddr,
++    arti: Arc<TorClient<R>>,
++    username: String,
++    host: String,
++    port: u16,
++    prefs: StreamPrefs,
++) -> anyhow::Result<()>
++where
++    R: Runtime,
++{
 +    let tor_addr = (host.as_str(), port)
 +        .into_tor_addr()
 +        .map_err(|e| anyhow::anyhow!("TorAddr: {e}"))?;
@@ -278,27 +572,115 @@ index 0000000..3333333
 +    let arti_stream = match arti.connect_with_prefs(tor_addr, &prefs).await {
 +        Ok(s) => s,
 +        Err(e) => {
++            let mut stream = stream;
 +            reply_socks_error(&mut stream, 0x05).await?;
 +            return Err(e.into());
 +        }
 +    };
 +
++    let mut stream = stream;
++    let _ = stream.set_nodelay(true);
 +    stream
 +        .write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
 +        .await?;
 +
++    // Spawn both directions independently (arti SOCKS proxy pattern). The old
++    // select!-until-first-EOF aborted the peer half mid-TLS and surfaced as
++    // SSLHandshakeException: connection closed on DoH over this sidecar.
++    //
++    // Critical: futures::io::copy only poll_flush()s after reader EOF. Arti's
++    // DataWriter buffers cells, so a TLS ClientHello / DNSCrypt cert query sat
++    // unflushed while the peer waited forever (handshake timeout / TIMEOUT).
 +    let (mut arti_r, mut arti_w) = arti_stream.split();
 +    let (cli_r, cli_w) = stream.into_split();
 +    let mut cli_r = cli_r.compat();
 +    let mut cli_w = cli_w.compat_write();
 +
-+    let c2a = futures::io::copy(&mut cli_r, &mut arti_w).fuse();
-+    let a2c = futures::io::copy(&mut arti_r, &mut cli_w).fuse();
-+    tokio::pin!(c2a);
-+    tokio::pin!(a2c);
-+    tokio::select! {
-+        r = &mut c2a => { let _ = r; }
-+        r = &mut a2c => { let _ = r; }
++    let c2a = tokio::spawn(async move {
++        let _ = copy_flushing(&mut cli_r, &mut arti_w).await;
++    });
++    let _ = copy_flushing(&mut arti_r, &mut cli_w).await;
++    let _ = c2a.await;
++    Ok(())
++}
++
++/// Byte-copy that flushes after every write so Arti cells leave the buffer
++/// before the peer's response is expected (TLS / DNSCrypt request-response).
++async fn copy_flushing<R, W>(reader: &mut R, writer: &mut W) -> anyhow::Result<u64>
++where
++    R: futures::io::AsyncRead + Unpin,
++    W: futures::io::AsyncWrite + Unpin,
++{
++    use futures::io::{AsyncReadExt, AsyncWriteExt};
++    let mut buf = [0u8; 16 * 1024];
++    let mut total = 0u64;
++    loop {
++        let n = reader.read(&mut buf).await?;
++        if n == 0 {
++            break;
++        }
++        writer.write_all(&buf[..n]).await?;
++        writer.flush().await?;
++        total += n as u64;
++    }
++    writer.close().await?;
++    Ok(total)
++}
++
++async fn reply_resolve<R>(
++    mut stream: TcpStream,
++    peer: SocketAddr,
++    arti: Arc<TorClient<R>>,
++    username: String,
++    host: String,
++    prefs: StreamPrefs,
++) -> anyhow::Result<()>
++where
++    R: Runtime,
++{
++    debug!("SOCKS RESOLVE {username}@{peer} → {host}");
++
++    // Literal IP: echo back (Tor/Arti SOCKS RESOLVE behavior).
++    if let Ok(ip) = host.parse::<IpAddr>() {
++        return write_resolve_success(&mut stream, ip).await;
++    }
++
++    let addrs = match arti.resolve_with_prefs(&host, &prefs).await {
++        Ok(a) if !a.is_empty() => a,
++        Ok(_) => {
++            reply_socks_error(&mut stream, 0x04).await?;
++            anyhow::bail!("RESOLVE empty for {host}");
++        }
++        Err(e) => {
++            reply_socks_error(&mut stream, 0x04).await?;
++            return Err(e.into());
++        }
++    };
++
++    // Prefer IPv4 for DNSCrypt bootstrap (block_ipv6=true).
++    let ip = addrs
++        .iter()
++        .copied()
++        .find(|a| matches!(a, IpAddr::V4(_)))
++        .unwrap_or(addrs[0]);
++
++    write_resolve_success(&mut stream, ip).await
++}
++
++async fn write_resolve_success(stream: &mut TcpStream, ip: IpAddr) -> anyhow::Result<()> {
++    match ip {
++        IpAddr::V4(v4) => {
++            let mut reply = vec![0x05, 0x00, 0x00, 0x01];
++            reply.extend_from_slice(&v4.octets());
++            reply.extend_from_slice(&[0, 0]); // BND.PORT unused
++            stream.write_all(&reply).await?;
++        }
++        IpAddr::V6(v6) => {
++            let mut reply = vec![0x05, 0x00, 0x00, 0x04];
++            reply.extend_from_slice(&v6.octets());
++            reply.extend_from_slice(&[0, 0]);
++            stream.write_all(&reply).await?;
++        }
 +    }
 +    Ok(())
 +}

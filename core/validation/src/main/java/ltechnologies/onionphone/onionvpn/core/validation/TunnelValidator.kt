@@ -60,7 +60,9 @@ object TunnelValidator {
                         TorPathValidator.validate(
                             socksPort = runtimePorts.torProbeSocksPort,
                             dnsPort = runtimePorts.torDnsPort,
-                            dnsPortIsBootstrapRelay = plane == TunDataPlane.ONIONMASQ,
+                            // Arti/onionmasq: TCP(+UDP) bootstrap adapter, not classic C Tor DNSPort alone.
+                            dnsPortIsBootstrapRelay = plane == TunDataPlane.ONIONMASQ ||
+                                torEngine == TorEngine.ARTI,
                         ),
                     )
                     if (includeExitIp) {

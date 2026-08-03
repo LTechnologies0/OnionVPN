@@ -8,6 +8,10 @@ import java.io.File
 
 /**
  * Selects TUN→Tor forwarder. onionmasq path is gated on native availability + Arti.
+ *
+ * **Arti policy:** when `libonionmasq_mobile.so` is present, Arti always uses
+ * [TunDataPlane.ONIONMASQ] (single TorClient). HEV is only for C Tor or Arti
+ * without the native library.
  */
 object TunDataPlaneFactory {
     fun resolve(
@@ -15,16 +19,19 @@ object TunDataPlaneFactory {
         requested: TunDataPlane,
         engine: TorEngine,
     ): TunDataPlane {
+        if (engine == TorEngine.ARTI && isOnionmasqNativePresent(context)) {
+            if (requested != TunDataPlane.ONIONMASQ) {
+                Timber.i("Arti + onionmasq native — forcing ONIONMASQ (was %s)", requested)
+            }
+            return TunDataPlane.ONIONMASQ
+        }
         if (requested == TunDataPlane.ONIONMASQ) {
             if (engine != TorEngine.ARTI) {
                 Timber.w("onionmasq requires Arti — falling back to HEV_SOCKS")
                 return TunDataPlane.HEV_SOCKS
             }
-            if (!isOnionmasqNativePresent(context)) {
-                Timber.w("libonionmasq_mobile.so missing — falling back to HEV_SOCKS")
-                return TunDataPlane.HEV_SOCKS
-            }
-            return TunDataPlane.ONIONMASQ
+            Timber.w("libonionmasq_mobile.so missing — falling back to HEV_SOCKS")
+            return TunDataPlane.HEV_SOCKS
         }
         return TunDataPlane.HEV_SOCKS
     }

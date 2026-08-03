@@ -28,6 +28,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import java.util.concurrent.atomic.AtomicBoolean
@@ -139,20 +140,45 @@ class TunnelForegroundService : Service() {
     private fun isDataPlaneTorLive(): Boolean =
         if (isOnionmasqPlane()) isOnionmasqLive() else tor.isRunning()
 
-    /** Start/replace loopback UDP DNS → SOCKS DoH bootstrap (onionmasq / Arti DNSPort gap). */
+    /**
+     * Start/replace loopback DNS bootstrap for DNSCrypt (`force_tcp` → TCP DNS).
+     *
+     * Arti: prefer TorClient::resolve (Ext JNI) + SOCKS RESOLVE, DoH fallback;
+     * UDP bind skipped when Arti dns-proxy already owns the port.
+     * onionmasq: UDP+TCP → sidecar SOCKS RESOLVE (0xF0) + DoH fallback.
+     */
     private fun ensureSocksDnsBootstrapRelay(
         listenPort: Int,
         socksPort: Int,
         socksUser: String = TunnelEndpoints.SOCKS_DNSCRYPT_USER,
+        bindUdp: Boolean = true,
+        useSocksResolve: Boolean = true,
+        hostnameResolver: ((String) -> String?)? = null,
     ) {
         socksDnsBootstrapRelay?.stop()
         val relay = ltechnologies.onionphone.onionvpn.core.vpn.dns.SocksDnsBootstrapRelay(
             listenPort = listenPort,
             socksPort = socksPort,
             socksUser = socksUser,
+            bindUdp = bindUdp,
+            bindTcp = true,
+            useSocksResolve = useSocksResolve,
+            hostnameResolver = hostnameResolver,
         )
         relay.start()
         socksDnsBootstrapRelay = relay
+    }
+
+    /** Fail-closed gate: DNSCrypt bootstrap needs TCP DNS answers. */
+    private suspend fun awaitBootstrapRelayTcpReady(attempts: Int = 8, timeoutMs: Int = 2_000): Boolean {
+        repeat(attempts) { attempt ->
+            if (socksDnsBootstrapRelay?.probeOnceTcp(timeoutMs = timeoutMs) == true) {
+                return true
+            }
+            Timber.d("TCP DNS bootstrap probe miss attempt=%d/%d", attempt + 1, attempts)
+            delay(400)
+        }
+        return false
     }
 
     @Volatile private var pendingNetworkRecover = false
@@ -210,7 +236,7 @@ class TunnelForegroundService : Service() {
                 }
                 val dnsUser = TunnelEndpoints.dnsCryptSocksUser(onionmasqDnsNymEpoch)
                 Timber.i(
-                    "Tor downtime end: DNSCrypt via sidecar :%d user=%s (+ DoH relay)",
+                    "Tor downtime end: DNSCrypt via sidecar :%d user=%s (+ RESOLVE/DoH relay)",
                     sidecar,
                     dnsUser,
                 )
@@ -219,6 +245,8 @@ class TunnelForegroundService : Service() {
                         listenPort = ports.torDnsPort,
                         socksPort = sidecar,
                         socksUser = dnsUser,
+                        bindUdp = true,
+                        useSocksResolve = true,
                     )
                 }.onFailure { Timber.e(it, "bootstrap relay resume failed") }
                 dnsCrypt.start(
@@ -235,6 +263,21 @@ class TunnelForegroundService : Service() {
             if (!tor.isRunning() || !tor.isReadyForDnsCryptUpstream()) {
                 Timber.w("DNSCrypt resume skipped — Tor upstream not ready yet")
                 return@resumeDns
+            }
+            if (preferences.torEngine == TorEngine.ARTI) {
+                val dnsUdpReady = ltechnologies.onionphone.onionvpn.core.tor.lifecycle.TorReadiness
+                    .isDnsPortReady(ports.torDnsPort, timeoutMs = 1_000)
+                runCatching {
+                    ensureSocksDnsBootstrapRelay(
+                        listenPort = ports.torDnsPort,
+                        socksPort = ports.torDnsCryptSocksPort,
+                        bindUdp = !dnsUdpReady,
+                        useSocksResolve = true,
+                        hostnameResolver = { host ->
+                            org.torproject.arti.ArtiControlNative.resolveHostname(host)
+                        },
+                    )
+                }.onFailure { Timber.e(it, "Arti TCP DNS bootstrap resume failed") }
             }
             Timber.i("Tor downtime end: start DNSCrypt on :%d", ports.dnsCryptListenPort)
             dnsCrypt.start(preferences.dnsCryptServerName, ports, preferences).onFailure {
@@ -526,6 +569,8 @@ class TunnelForegroundService : Service() {
                                             listenPort = ports.torDnsPort,
                                             socksPort = sidecar,
                                             socksUser = dnsUser,
+                                            bindUdp = true,
+                                            useSocksResolve = true,
                                         )
                                         dnsCrypt.start(
                                             preferences.dnsCryptServerName,
@@ -811,7 +856,13 @@ class TunnelForegroundService : Service() {
         acquireTunnelWakeLock(BOOTSTRAP_WAKELOCK_TIMEOUT_MS)
         preferences = applyDebugBridgeOverride(preferences)
         preferences = applyDebugEngineOverride(preferences)
-        DiagnosticsGate.setNoLogsEnabled(preferences.noLogsEnabled)
+        // Prefer DataStore over ACTION_START intent snapshot — Settings may have toggled
+        // no-logs while the service still held a stale intent extra.
+        val storedNoLogs = runCatching {
+            preferencesStore.preferences.first().noLogsEnabled
+        }.getOrDefault(preferences.noLogsEnabled)
+        preferences = preferences.copy(noLogsEnabled = storedNoLogs)
+        DiagnosticsGate.setNoLogsEnabled(storedNoLogs)
         // Cancel Tor-bound downloads before we tear down / recycle SOCKS ports.
         domainReputation.onTorUnavailable()
 
@@ -914,20 +965,33 @@ class TunnelForegroundService : Service() {
                 OpTrace.step("tunnel", "arti_socks_role_mux") {
                     artiSocksRoleMux.start(ports)
                 }
-                // C Tor keeps Tor DNSPort bootstrap. Arti: only use DoH relay if DNSPort dead.
-                val dnsReady = ltechnologies.onionphone.onionvpn.core.tor.lifecycle.TorReadiness
+                // DNSCrypt force_tcp needs TCP DNS. Arti dns-proxy is UDP-only — always
+                // bind TCP bootstrap on :torDnsPort (UDP only if Arti UDP is not answering).
+                val dnsUdpReady = ltechnologies.onionphone.onionvpn.core.tor.lifecycle.TorReadiness
                     .isDnsPortReady(ports.torDnsPort, timeoutMs = 2_000)
-                if (!dnsReady) {
-                    Timber.w(
-                        "Arti DNSPort :%d not ready — SocksDnsBootstrapRelay DoH fallback",
-                        ports.torDnsPort,
+                Timber.i(
+                    "Arti DNSCrypt bootstrap: UDP dnsPort=%s — binding TCP adapter " +
+                        "(nativeResolve + SOCKS RESOLVE + DoH fallback)",
+                    dnsUdpReady,
+                )
+                OpTrace.step("tunnel", "socks_dns_bootstrap_relay_arti") {
+                    ensureSocksDnsBootstrapRelay(
+                        listenPort = ports.torDnsPort,
+                        socksPort = ports.torDnsCryptSocksPort,
+                        bindUdp = !dnsUdpReady,
+                        useSocksResolve = true,
+                        hostnameResolver = { host ->
+                            org.torproject.arti.ArtiControlNative.resolveHostname(host)
+                        },
                     )
-                    OpTrace.step("tunnel", "socks_dns_bootstrap_relay_arti") {
-                        ensureSocksDnsBootstrapRelay(
-                            listenPort = ports.torDnsPort,
-                            socksPort = ports.torDnsCryptSocksPort,
-                        )
-                    }
+                }
+                if (!awaitBootstrapRelayTcpReady()) {
+                    failDuringStart(
+                        message = "Arti TCP DNS bootstrap not ready for DNSCrypt (force_tcp) — fail-closed",
+                        fromValidation = false,
+                        stopTorProcesses = false,
+                    )
+                    return
                 }
             }
             updateSnapshot(TunnelPhase.StartingDnsCrypt, torRunning = true)
@@ -1012,25 +1076,21 @@ class TunnelForegroundService : Service() {
                 )
                 return
             }
-            // DNSCrypt bootstrap_resolvers → local UDP relay → sidecar SOCKS → DoH :443
+            // DNSCrypt force_tcp → TCP DNS on :torDnsPort → sidecar SOCKS RESOLVE
+            // (Tor socks-extensions 0xF0 via Arti TorClient::resolve) + DoH fallback.
             OpTrace.step("tunnel", "socks_dns_bootstrap_relay") {
                 ensureSocksDnsBootstrapRelay(
                     listenPort = ports.torDnsPort,
                     socksPort = sidecar,
+                    bindUdp = true,
+                    useSocksResolve = true,
                 )
             }
-            var relayReady = false
-            repeat(5) { attempt ->
-                if (socksDnsBootstrapRelay?.probeOnce(timeoutMs = 350) == true) {
-                    relayReady = true
-                    return@repeat
-                }
-                Timber.d("DoH bootstrap relay probe miss attempt=%d/5", attempt + 1)
-                delay(400)
-            }
-            if (!relayReady) {
+            // Warm a circuit before fail-closed probe (first RESOLVE builds exit path).
+            delay(1_500)
+            if (!awaitBootstrapRelayTcpReady(attempts = 12, timeoutMs = 3_000)) {
                 failDuringStart(
-                    message = "DoH bootstrap relay not ready (UDP→SOCKS→DoH) — fail-closed",
+                    message = "DNS bootstrap relay not ready (TCP DNS→SOCKS RESOLVE/DoH) — fail-closed",
                     fromValidation = false,
                     stopTorProcesses = false,
                 )
@@ -1188,11 +1248,24 @@ class TunnelForegroundService : Service() {
                 }
             }
         }
+    } catch (error: TimeoutCancellationException) {
+        // withTimeout throws TimeoutCancellationException (a CancellationException).
+        // Must NOT rethrow — that cancels startTunnel ("Tunnel start cancelled during Validating").
+        OpTrace.error("tunnel", "Validation timed out — hard-gate", error)
+        Timber.e(error, "Validation timed out — running hard-gate (do not cancel start)")
+        validationTimeoutHardGate(ports, error)
     } catch (error: CancellationException) {
         throw error
     } catch (error: Exception) {
         OpTrace.error("tunnel", "Validation timed out or failed", error)
         Timber.e(error, "Validation timed out or failed")
+        validationTimeoutHardGate(ports, error)
+    }
+
+    private suspend fun validationTimeoutHardGate(
+        ports: TunnelRuntimePorts,
+        error: Exception,
+    ): List<ValidationCheck> {
         // Soft timeout must not alone Block — but never promote on SOCKS TCP alone.
         // Re-run a fast hard-gate (wiring + routes + Private DNS / Always-on owner).
         val hardGate = runCatching {
@@ -1207,8 +1280,13 @@ class TunnelForegroundService : Service() {
                 )
             }
         }.getOrElse { gateError ->
-            if (gateError is CancellationException) throw gateError
-            Timber.e(gateError, "Hard-gate after timeout failed — fail-closed (never SOCKS-only promote)")
+            if (gateError is TimeoutCancellationException) {
+                Timber.e(gateError, "Hard-gate timed out — fail-closed (never SOCKS-only promote)")
+            } else if (gateError is CancellationException) {
+                throw gateError
+            } else {
+                Timber.e(gateError, "Hard-gate after timeout failed — fail-closed (never SOCKS-only promote)")
+            }
             listOf(
                 ValidationCheck(
                     id = "validation.hard_gate",
@@ -1219,7 +1297,7 @@ class TunnelForegroundService : Service() {
                 ),
             )
         }
-        listOf(
+        return listOf(
             ValidationCheck(
                 id = "validation.timeout",
                 label = "Tunnel validation",

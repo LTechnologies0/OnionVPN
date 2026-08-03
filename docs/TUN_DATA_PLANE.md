@@ -1,16 +1,35 @@
 # TUN data planes
 
-## HEV_SOCKS (default without native onionmasq / C Tor)
+## HEV_SOCKS (C Tor, or Arti without onionmasq native)
 
 ```
 Apps → VpnService TUN → TunDnsMux → hev-socks5-tunnel → SocksUidBridge → Tor SOCKS
 ```
 
-Works with C Tor and Arti (arti-mobile). DNSCrypt divert on TunDnsMux; upstream via Tor SOCKS.
+Works with C Tor always. Arti uses HEV only when `libonionmasq_mobile.so` is missing.
 
-## ONIONMASQ (Arti preferred when `libonionmasq_mobile.so` present)
+### Arti + DNSCrypt bootstrap (HEV / arti-mobile — fallback only)
+
+DNSCrypt sets `force_tcp = true` (Tor has no UDP). Arti stock `dns-proxy` is **UDP-only**,
+so OnionVPN always binds a **TCP DNS adapter** on `:torDnsPort` before starting DNSCrypt:
+
+```
+DNSCrypt bootstrap/netprobe (TCP DNS)
+  → SocksDnsBootstrapRelay :torDnsPort (TCP; UDP only if Arti dns-proxy not answering)
+       1. Arti Ext JNI TorClient::resolve (when control-api≥2)
+       2. Tor SOCKS RESOLVE 0xF0 via ArtiSocksRoleMux → arti SOCKS
+       3. DoH POST /dns-query via OkHttp SOCKS5h (dns.cloudflare.com:443) + raw SSL fallback
+  → DNSCrypt upstream proxy=socks5://…@torDnsCryptSocksPort (force_tcp)
+```
+
+C Tor keeps classic DNSPort (UDP+TCP) — no adapter required.
+
+## ONIONMASQ (forced for Arti when `libonionmasq_mobile.so` present)
 
 Tor Project **onionmasq**: TUN packets (via TunDnsMux socketpair) → smoltcp → **arti-client** in-process.
+
+**Policy:** `TunDataPlaneFactory` forces ONIONMASQ whenever engine=ARTI and the native
+library is present (Settings cannot keep Arti on HEV).
 
 **Single TorClient** (Tor VPN parity — no parallel arti-mobile):
 
@@ -19,8 +38,9 @@ Blocking TUN (kill-switch)
   → Connected TUN → TunDnsMux → socketpair → OnionMasq.start(fd)
        → wait BootstrapEvent ready_for_traffic ∧ pct≥100 (sticky; Tor VPN gate)
        → SOCKS sidecar (same TorClient; IsolationToken by user; password allowlist)
-  → SocksDnsBootstrapRelay :torDnsPort → sidecar → DoH https://1.1.1.1/dns-query (not :53)
-  → DNSCrypt proxy=@sidecar bootstrap=@relay
+  → SocksDnsBootstrapRelay :torDnsPort (TCP+UDP)
+       → sidecar SOCKS RESOLVE 0xF0 (Arti TorClient::resolve) + DoH fallback
+  → DNSCrypt force_tcp + proxy=@sidecar bootstrap=@relay (TCP DNS — Tor has no UDP)
   → Validating → Connected UI
 ```
 
@@ -58,7 +78,7 @@ exit country via `setCountryCode` + NEWNYM via `refreshCircuits` (~10.5s rate li
 
 ### Anti-leak
 
-OnionVPN keeps fail-closed routing (no Tor VPN `allowFamily`). Own package stays disallowed from the VPN; onionmasq/Arti sockets use clearnet uplink via `protect`. Tor-native apps (Orbot, Tor Browser, …) use a dual bypass: **hev / all planes** — `VpnService.Builder.addDisallowedApplication` (Orbot BYPASS, **signature-pinned** via `TorNativeAppUids`); **onionmasq** — additionally `setExcludedUids` before `OnionMasq.start` (clearnet via `protect`). PACKAGE_ADDED/REMOVED/REPLACED for Tor-native candidates **rebinds Connected** on hev (disallow list is establish-time only) and refreshes onionmasq UIDs. **INCLUDE × Android lockdown** refuses Connected establish (Builder cannot mix allow + disallow; lockdown would offline BYPASS apps — never Orbot #774 skip-BYPASS). DNSCrypt bootstrap never uses system DNS (`SocksDnsBootstrapRelay` over sidecar on onionmasq; Tor DNSPort on C Tor).
+OnionVPN keeps fail-closed routing (no Tor VPN `allowFamily`). Own package stays disallowed from the VPN; onionmasq/Arti sockets use clearnet uplink via `protect`. Tor-native apps (Orbot, Tor Browser, …) use a dual bypass: **hev / all planes** — `VpnService.Builder.addDisallowedApplication` (Orbot BYPASS, **signature-pinned** via `TorNativeAppUids`); **onionmasq** — additionally `setExcludedUids` before `OnionMasq.start` (clearnet via `protect`). PACKAGE_ADDED/REMOVED/REPLACED for Tor-native candidates **rebinds Connected** on hev (disallow list is establish-time only) and refreshes onionmasq UIDs. **INCLUDE × Android lockdown** refuses Connected establish (Builder cannot mix allow + disallow; lockdown would offline BYPASS apps — never Orbot #774 skip-BYPASS). DNSCrypt bootstrap never uses system DNS (`SocksDnsBootstrapRelay` TCP+UDP over sidecar on onionmasq; TCP adapter + Arti resolve/RESOLVE/DoH on Arti HEV; Tor DNSPort on C Tor).
 
 ### Lifecycle (native abort hazard)
 

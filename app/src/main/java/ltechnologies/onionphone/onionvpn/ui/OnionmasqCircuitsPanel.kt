@@ -1,128 +1,136 @@
 package ltechnologies.onionphone.onionvpn.ui
 
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material3.ElevatedCard
-import androidx.compose.material3.FilledTonalButton
-import androidx.compose.material3.Icon
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Text
+import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 import ltechnologies.onionphone.onionvpn.core.vpn.OnionVpnService
 import ltechnologies.onionphone.onionvpn.core.vpn.onionmasq.OnionmasqNativeGate
 import ltechnologies.onionphone.onionvpn.firewall.AppUidResolver
-import ltechnologies.onionphone.onionvpn.ui.components.EmptyStateHint
-import ltechnologies.onionphone.onionvpn.ui.components.SectionHeader
+import ltechnologies.onionphone.onionvpn.ui.components.AppCircuitCard
+import ltechnologies.onionphone.onionvpn.ui.components.CircuitActionButton
+import ltechnologies.onionphone.onionvpn.ui.components.CircuitsScreenScaffold
+import ltechnologies.onionphone.onionvpn.ui.components.MetricChip
+import ltechnologies.onionphone.onionvpn.ui.components.formatByteCount
+import ltechnologies.onionphone.onionvpn.ui.components.formatCountryHopPath
 import org.torproject.onionmasq.OnionMasq
 import org.torproject.onionmasq.errors.ProxyStoppedException
 import timber.log.Timber
 
 /**
- * Tor-VPN-style per-app circuit hops (onionmasq CircuitStore / country codes).
+ * Onionmasq CircuitStore UI — same chrome / cards as [CircuitsScreen] (C Tor).
+ * Shows country-code hops only (never relay IPs / identities).
  */
 @Composable
-fun OnionmasqCircuitsPanel(
+fun OnionmasqCircuitsScreen(
     appUidResolver: AppUidResolver,
-    modifier: Modifier = Modifier,
+    onBack: () -> Unit,
 ) {
     var rows by remember { mutableStateOf<List<AppCircuitRow>>(emptyList()) }
+    var refreshTick by remember { mutableStateOf(0) }
 
-    LaunchedEffect(Unit) {
+    LaunchedEffect(refreshTick) {
+        rows = withContext(Dispatchers.Default) {
+            collectOnionmasqRows(appUidResolver)
+        }
         while (true) {
-            rows = collectOnionmasqRows(appUidResolver)
             delay(1_000)
-        }
-    }
-
-    Column(modifier = modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        SectionHeader(
-            title = "App circuits (onionmasq)",
-            subtitle = "Hops by Android UID — New circuit refreshes isolation epoch for that app.",
-        )
-        FilledTonalButton(
-            onClick = {
-                if (!OnionmasqNativeGate.mayCommandRunningProxy(
-                        javaInitialized = OnionMasq.isInitialized(),
-                        nativeRunning = OnionMasq.isRunning(),
-                    )
-                ) {
-                    Timber.w("refreshCircuits skipped — onionmasq not running")
-                    return@FilledTonalButton
-                }
-                runCatching { OnionMasq.refreshCircuits() }
-                    .onFailure { Timber.w(it, "refreshCircuits failed") }
-            },
-        ) {
-            Icon(Icons.Filled.Refresh, contentDescription = null)
-            Spacer(Modifier.width(6.dp))
-            Text("New identity (all apps)")
-        }
-        if (rows.isEmpty()) {
-            EmptyStateHint("No onionmasq circuits yet. Use Arti + onionmasq TUN and open an app.")
-        } else {
-            LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                items(rows, key = { it.uid }) { row ->
-                    ElevatedCard(Modifier.fillMaxWidth()) {
-                        Column(Modifier.padding(12.dp)) {
-                            Text(row.label, style = MaterialTheme.typography.titleSmall)
-                            Text(
-                                "UID ${row.uid} · ↓${row.bytesIn} ↑${row.bytesOut}",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                            Spacer(Modifier.height(6.dp))
-                            Text(
-                                row.hops.joinToString(" → ").ifBlank { "(no hops yet)" },
-                                style = MaterialTheme.typography.bodyMedium,
-                            )
-                            Spacer(Modifier.height(8.dp))
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                FilledTonalButton(
-                                    onClick = {
-                                        if (!OnionmasqNativeGate.mayCommandRunningProxy(
-                                                javaInitialized = OnionMasq.isInitialized(),
-                                                nativeRunning = OnionMasq.isRunning(),
-                                            )
-                                        ) {
-                                            Timber.w("refreshCircuitsForApp skipped — not running")
-                                            return@FilledTonalButton
-                                        }
-                                        try {
-                                            OnionMasq.refreshCircuitsForApp(row.uid.toLong())
-                                            OnionVpnService.circuitRepository.removeCountryCodes(row.uid)
-                                        } catch (e: ProxyStoppedException) {
-                                            Timber.w(e, "refreshCircuitsForApp")
-                                        }
-                                    },
-                                ) {
-                                    Text("New circuit for app")
-                                }
-                            }
-                        }
-                    }
-                }
+            rows = withContext(Dispatchers.Default) {
+                collectOnionmasqRows(appUidResolver)
             }
         }
     }
+
+    val openTotal = rows.sumOf { it.openConnections }
+    CircuitsScreenScaffold(
+        title = "Tor circuits",
+        subtitle = "Per-app hops (onionmasq) — New circuit refreshes isolation for that UID.",
+        onBack = onBack,
+        metrics = {
+            MetricChip(label = "Apps", value = rows.size.toString())
+            MetricChip(label = "Open", value = openTotal.toString())
+        },
+        actions = {
+            CircuitActionButton(
+                label = "New identity (all)",
+                onClick = {
+                    if (!OnionmasqNativeGate.mayCommandRunningProxy(
+                            javaInitialized = OnionMasq.isInitialized(),
+                            nativeRunning = OnionMasq.isRunning(),
+                        )
+                    ) {
+                        Timber.w("refreshCircuits skipped — onionmasq not running")
+                        return@CircuitActionButton
+                    }
+                    runCatching { OnionMasq.refreshCircuits() }
+                        .onFailure { Timber.w(it, "refreshCircuits failed") }
+                    refreshTick++
+                },
+                icon = Icons.Filled.SwapHoriz,
+            )
+            CircuitActionButton(
+                label = "Refresh",
+                onClick = { refreshTick++ },
+                icon = Icons.Filled.Refresh,
+                tonal = false,
+            )
+        },
+        empty = rows.isEmpty(),
+        emptyHint = "No live circuits yet. Start the VPN (Arti + onionmasq) and open an app.",
+    ) {
+        items(rows, key = { it.uid }) { row ->
+            val appIcon = remember(row.uid) {
+                row.uid.takeIf { it >= 0 }?.let { appUidResolver.iconDrawable(it) }
+            }
+            AppCircuitCard(
+                title = row.label,
+                subtitle = "uid=${row.uid}",
+                pathText = formatCountryHopPath(row.hops).ifBlank { "(no hops yet)" },
+                metaText = "open=${row.openConnections} · " +
+                    "↓${formatByteCount(row.bytesIn)} ↑${formatByteCount(row.bytesOut)}",
+                appIcon = appIcon,
+                appContentDescription = row.label,
+                primaryLabel = "New circuit for app",
+                onPrimary = {
+                    if (!OnionmasqNativeGate.mayCommandRunningProxy(
+                            javaInitialized = OnionMasq.isInitialized(),
+                            nativeRunning = OnionMasq.isRunning(),
+                        )
+                    ) {
+                        Timber.w("refreshCircuitsForApp skipped — not running")
+                        return@AppCircuitCard
+                    }
+                    try {
+                        OnionMasq.refreshCircuitsForApp(row.uid.toLong())
+                        OnionVpnService.circuitRepository.removeCountryCodes(row.uid)
+                    } catch (e: ProxyStoppedException) {
+                        Timber.w(e, "refreshCircuitsForApp")
+                    }
+                },
+            )
+        }
+    }
+}
+
+/** Prefer [OnionmasqCircuitsScreen] — thin alias for older call sites. */
+@Composable
+fun OnionmasqCircuitsPanel(
+    appUidResolver: AppUidResolver,
+    onBack: () -> Unit = {},
+) {
+    OnionmasqCircuitsScreen(
+        appUidResolver = appUidResolver,
+        onBack = onBack,
+    )
 }
 
 private data class AppCircuitRow(
@@ -131,19 +139,25 @@ private data class AppCircuitRow(
     val hops: List<String>,
     val bytesIn: Long,
     val bytesOut: Long,
+    val openConnections: Int,
 )
 
 private fun collectOnionmasqRows(appUidResolver: AppUidResolver): List<AppCircuitRow> {
     val repo = OnionVpnService.circuitRepository
+    val proxyReady = OnionmasqNativeGate.mayCommandRunningProxy(
+        javaInitialized = OnionMasq.isInitialized(),
+        nativeRunning = OnionMasq.isRunning(),
+    )
     return repo.knownAppUids().sorted().map { uid ->
         val hops = repo.countryCodesForAppUid(uid)
         val identity = appUidResolver.resolve(uid)
-        val rx = if (OnionMasq.isInitialized()) {
+        val open = repo.openConnectionsForAppUid(uid).size
+        val rx = if (proxyReady) {
             runCatching { OnionMasq.getBytesReceivedForApp(uid.toLong()) }.getOrDefault(0L)
         } else {
             0L
         }
-        val tx = if (OnionMasq.isInitialized()) {
+        val tx = if (proxyReady) {
             runCatching { OnionMasq.getBytesSentForApp(uid.toLong()) }.getOrDefault(0L)
         } else {
             0L
@@ -154,6 +168,7 @@ private fun collectOnionmasqRows(appUidResolver: AppUidResolver): List<AppCircui
             hops = hops,
             bytesIn = rx,
             bytesOut = tx,
+            openConnections = open,
         )
     }
 }

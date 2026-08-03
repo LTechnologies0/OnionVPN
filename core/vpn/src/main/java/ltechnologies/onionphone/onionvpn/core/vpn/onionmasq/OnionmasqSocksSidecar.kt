@@ -11,8 +11,8 @@ import timber.log.Timber
  * SOCKS user/pass → `StreamPrefs` IsolationToken (`dnscrypt` / `probe`).
  *
  * **Cold-start ordering (single TorClient):** Blocking TUN → onionmasq Connected TUN →
- * wait ready + sidecar → [SocksDnsBootstrapRelay] on allocated DNSPort → DNSCrypt
- * proxy=@sidecar (no arti-mobile).
+ * wait ready + sidecar → [SocksDnsBootstrapRelay] TCP+UDP on allocated DNSPort → DNSCrypt
+ * `force_tcp` + proxy=@sidecar (no arti-mobile; SOCKS RESOLVE + DoH fallback).
  */
 object OnionmasqSocksSidecar {
     /**

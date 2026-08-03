@@ -878,6 +878,26 @@ object DnsCryptPublicResolvers {
         return parts.ifEmpty { listOf("cloudflare") }
     }
 
+    /**
+     * Tor SOCKS (esp. onionmasq sidecar) often stalls HTTPS DoH handshakes.
+     * If the selection is DoH-only, prepend classic DNSCrypt (`sdns://AQ…`) peers
+     * so upstream can come up without TLS/ALPN.
+     */
+    fun ensureTorFriendlyServers(names: List<String>): List<String> {
+        if (names.size == 1 && names[0] == AUTO) return names
+        val hasDnsCryptProto = names.any { name ->
+            byName[name]?.stamps?.any { isDnsCryptProtocolStamp(it) } == true
+        }
+        if (hasDnsCryptProto) return names
+        val extras = listOf("adguard-dns", "cs-de", "cs-nl")
+            .filter { byName.containsKey(it) && it !in names }
+        return (extras + names).distinct()
+    }
+
+    /** DNSCrypt protocol stamps start with `sdns://AQ` (DoH is `sdns://Ag`). */
+    fun isDnsCryptProtocolStamp(stamp: String): Boolean =
+        stamp.startsWith("sdns://AQ", ignoreCase = true)
+
     fun encodeNames(names: Collection<String>): String {
         val cleaned = names.map { it.trim() }.filter { it.isNotEmpty() }.distinct()
         if (cleaned.isEmpty() || cleaned.any { it.equals(AUTO, ignoreCase = true) }) {

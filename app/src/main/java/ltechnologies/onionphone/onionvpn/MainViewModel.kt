@@ -113,13 +113,30 @@ class MainViewModel @Inject constructor(
     }
 
     fun savePreferences(prefs: TunnelPreferences, restartIfConnected: Boolean = true) {
+        // Flip diagnostics gate before the mutex — tunnel start / live-apply can hold it.
+        if (prefs.noLogsEnabled != preferences.value.noLogsEnabled) {
+            ltechnologies.onionphone.onionvpn.core.model.observability.DiagnosticsGate
+                .setNoLogsEnabled(prefs.noLogsEnabled)
+        }
         viewModelScope.launch {
             actionMutex.withLock {
                 val previous = preferences.value
                 if (prefs == previous && !restartIfConnected) {
                     return@withLock
                 }
-                preferencesStore.update { prefs }
+                // Merge into current store so a concurrent tun_data_plane write isn't clobbered
+                // by an older Settings snapshot (and vice versa for no_logs).
+                preferencesStore.update { current ->
+                    prefs.copy(
+                        // Service may have just persisted plane; keep newer store value if
+                        // Settings draft still has the pre-start plane.
+                        tunDataPlane = when {
+                            prefs.tunDataPlane != previous.tunDataPlane -> prefs.tunDataPlane
+                            else -> current.tunDataPlane
+                        },
+                        killSwitchEnabled = true,
+                    )
+                }
                 val phase = snapshot.value.phase
                 when {
                     restartIfConnected &&

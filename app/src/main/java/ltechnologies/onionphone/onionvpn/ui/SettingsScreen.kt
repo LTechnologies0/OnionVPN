@@ -24,6 +24,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -82,7 +83,11 @@ fun SettingsScreen(
     /** False while start/stop/restart/identity — disable Apply & engine-switch mash. */
     controlsEnabled: Boolean = true,
 ) {
-    var local by remember(preferences) { mutableStateOf(preferences) }
+    // Do NOT key remember() on [preferences] — a concurrent DataStore emit (e.g. tun_data_plane
+    // from tunnel start) would clobber an in-flight toggle and DisposableEffect could persist
+    // the reverted noLogs=true.
+    var local by remember { mutableStateOf(preferences) }
+    var dirty by remember { mutableStateOf(false) }
     val caps = local.torEngine.capabilities
     val latestLocal = remember { AtomicReference(local) }
     val saveRef = remember { AtomicReference(onSavePreferences) }
@@ -91,6 +96,16 @@ fun SettingsScreen(
         latestLocal.set(local)
         saveRef.set(onSavePreferences)
         persistedRef.set(preferences)
+    }
+    // Pull store updates only when the draft matches what we last saved / loaded.
+    LaunchedEffect(preferences) {
+        if (!dirty) {
+            local = preferences
+            latestLocal.set(preferences)
+        } else if (preferences == latestLocal.get()) {
+            dirty = false
+            local = preferences
+        }
     }
     // Persist draft when leaving Settings only if dirty (avoid hammering Tor on tab switch).
     DisposableEffect(Unit) {
@@ -103,6 +118,7 @@ fun SettingsScreen(
     }
     fun commit(next: TunnelPreferences, restart: Boolean = false) {
         local = next
+        dirty = true
         latestLocal.set(next)
         onSavePreferences(next, restart)
     }
@@ -265,43 +281,6 @@ fun SettingsScreen(
                 onConfirm = { pkgs ->
                     pickingPerApp = false
                     commit(local.copy(vpnAppPackages = pkgs), restart = true)
-                },
-            )
-        }
-
-        SectionHeader(
-            title = "TUN data plane",
-            subtitle = "hev→SOCKS is the shipped Orbot-class path. onionmasq (Arti TUN) " +
-                "needs libonionmasq_mobile.so + Arti engine — otherwise HEV is used.",
-        )
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .horizontalScroll(rememberScrollState()),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            FilterChip(
-                selected = local.tunDataPlane == TunDataPlane.HEV_SOCKS,
-                onClick = {
-                    commit(local.copy(tunDataPlane = TunDataPlane.HEV_SOCKS), restart = true)
-                },
-                enabled = controlsEnabled,
-                label = { Text("hev SOCKS") },
-            )
-            FilterChip(
-                selected = local.tunDataPlane == TunDataPlane.ONIONMASQ,
-                onClick = {
-                    commit(
-                        local.copy(
-                            tunDataPlane = TunDataPlane.ONIONMASQ,
-                            torEngine = TorEngine.ARTI,
-                        ),
-                        restart = true,
-                    )
-                },
-                enabled = controlsEnabled && onionmasqNative,
-                label = {
-                    Text(if (onionmasqNative) "onionmasq" else "onionmasq (lib missing)")
                 },
             )
         }
@@ -684,19 +663,78 @@ fun SettingsScreen(
             FilterChip(
                 selected = local.torEngine == TorEngine.ARTI,
                 onClick = {
-                    val plane =
-                        if (TunDataPlaneFactory.isOnionmasqNativePresent(context)) {
-                            TunDataPlane.ONIONMASQ
-                        } else {
-                            TunDataPlane.HEV_SOCKS
-                        }
                     commit(
-                        local.copy(torEngine = TorEngine.ARTI, tunDataPlane = plane),
+                        local.copy(
+                            torEngine = TorEngine.ARTI,
+                            tunDataPlane = if (TunDataPlaneFactory.isOnionmasqNativePresent(context)) {
+                                TunDataPlane.ONIONMASQ
+                            } else {
+                                TunDataPlane.HEV_SOCKS
+                            },
+                        ),
                         restart = true,
                     )
                 },
                 enabled = controlsEnabled,
                 label = { Text("Arti") },
+            )
+        }
+        SectionHeader(
+            title = "TUN data plane",
+            subtitle = "Arti always uses onionmasq when libonionmasq_mobile.so is present " +
+                "(single TorClient). C Tor always uses hev→SOCKS. HEV+Arti only if the " +
+                "native library is missing.",
+        )
+        val artiForcesOnionmasq =
+            local.torEngine == TorEngine.ARTI && onionmasqNative
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            FilterChip(
+                selected = local.tunDataPlane == TunDataPlane.HEV_SOCKS && !artiForcesOnionmasq,
+                onClick = {
+                    commit(
+                        local.copy(
+                            tunDataPlane = TunDataPlane.HEV_SOCKS,
+                            torEngine = TorEngine.LITTLE_T,
+                        ),
+                        restart = true,
+                    )
+                },
+                enabled = controlsEnabled,
+                label = { Text("hev SOCKS (C Tor)") },
+            )
+            FilterChip(
+                selected = local.tunDataPlane == TunDataPlane.ONIONMASQ || artiForcesOnionmasq,
+                onClick = {
+                    commit(
+                        local.copy(
+                            tunDataPlane = TunDataPlane.ONIONMASQ,
+                            torEngine = TorEngine.ARTI,
+                        ),
+                        restart = true,
+                    )
+                },
+                enabled = controlsEnabled && onionmasqNative,
+                label = {
+                    Text(
+                        when {
+                            !onionmasqNative -> "onionmasq (lib missing)"
+                            artiForcesOnionmasq -> "onionmasq (Arti)"
+                            else -> "onionmasq"
+                        },
+                    )
+                },
+            )
+        }
+        if (artiForcesOnionmasq) {
+            Text(
+                text = "Arti is locked to onionmasq on this build — hev is not used.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
         if (caps.liveSetConf && local.tunDataPlane != TunDataPlane.ONIONMASQ) {

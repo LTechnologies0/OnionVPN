@@ -261,7 +261,8 @@ Generated from source enumeration — do not invent IDs without evidence paths.
 | AL-253 | mapped-DNSCrypt draft | `dnscrypt_ephemeral_keys` | ephemeral keys | AntiLeakMappedTest | Pass |
 | AL-254 | mapped-DNSCrypt draft | `tls_disable_session_tickets` | no TLS tickets | AntiLeakMappedTest | Pass |
 | AL-255 | mapped-DNSCrypt draft | `block_ipv6` | block IPv6 resolvers | AntiLeakMappedTest | Pass |
-| AL-256 | mapped-DNSCrypt | `bootstrap_resolvers loopback` | bootstrap via loopback only (Tor DNSPort on C Tor, or SocksDnsBootstrapRelay→DoH on onionmasq/Arti gap) — never system DNS | AntiLeakMappedTest | Pass |
+| AL-256 | mapped-DNSCrypt | `bootstrap_resolvers loopback` | bootstrap via loopback only (Tor DNSPort on C Tor; Arti TCP DNS adapter → resolve/RESOLVE/DoH; onionmasq SocksDnsBootstrapRelay→DoH) — never system DNS | AntiLeakMappedTest | Pass |
+
 | AL-257 | mapped-DNSCrypt | `netprobe_address` | netprobe via same loopback bootstrap endpoint — never system DNS | AntiLeakMappedTest | Pass |
 | AL-258 | mapped-DNSCrypt | `blocked_names` | block DoH hostnames | AntiLeakMappedTest | Pass |
 | AL-259 | mapped-DNSCrypt | `blocked_names` | block captive portal hosts | AntiLeakMappedTest | Pass |

@@ -183,6 +183,27 @@ class AntiLeakDnsCryptConfigValidatorTest {
     }
 
     @Test
+    fun privateUnexpectedVpnAddrsDoNotHardFailWhenSoftTrips() {
+        // Historical false Hard: unexpected=[169.254.42.1, fc00::] publicOnVpn=[]
+        val soft = ValidationCheck(
+            id = "vpn.address.not.public",
+            label = "VPN addresses",
+            status = ValidationStatus.Fail,
+            detail = "No VPN link addresses found (CM race) — Soft",
+            tripsKillSwitch = false,
+        )
+        assertFalse(TunnelValidator.isHardKillSwitchFailure(soft))
+        val publicLeak = ValidationCheck(
+            id = "vpn.address.not.public",
+            label = "VPN addresses",
+            status = ValidationStatus.Fail,
+            detail = "publicOnVpn=[8.8.8.8]",
+            tripsKillSwitch = true,
+        )
+        assertTrue(TunnelValidator.isHardKillSwitchFailure(publicLeak))
+    }
+
+    @Test
     fun ispIpOnExitPathIsHard() {
         val check = ValidationCheck(
             id = "tor.exit.ip",

@@ -21,12 +21,7 @@ object TorPathValidator {
         dnsPortIsBootstrapRelay: Boolean = false,
     ): List<ValidationCheck> = withContext(Dispatchers.IO) {
         val dnsCheck = if (dnsPortIsBootstrapRelay) {
-            checkDnsPort(
-                "tor.dns.bootstrap_relay",
-                "DNSCrypt bootstrap relay (UDP→DoH via SOCKS)",
-                socksHost,
-                dnsPort,
-            )
+            checkDnsBootstrap(socksHost, dnsPort)
         } else {
             checkDnsPort("tor.dnsport", "Tor DNSPort reachable (UDP)", socksHost, dnsPort)
         }
@@ -181,6 +176,56 @@ object TorPathValidator {
         }
     }
 
+    /**
+     * DNSCrypt `force_tcp` bootstrap: prefer TCP DNS answer, fall back to UDP
+     * (Arti dns-proxy UDP + app TCP adapter, or onionmasq dual-stack relay).
+     */
+    private fun checkDnsBootstrap(host: String, port: Int): ValidationCheck {
+        val tcp = runCatching {
+            Socket().use { socket ->
+                socket.connect(InetSocketAddress(host, port), 3_000)
+                socket.soTimeout = DNS_PORT_TIMEOUT_MS
+                val query = minimalDnsQuery()
+                val out = java.io.DataOutputStream(socket.getOutputStream())
+                out.writeShort(query.size)
+                out.write(query)
+                out.flush()
+                val inp = java.io.DataInputStream(socket.getInputStream())
+                val len = inp.readUnsignedShort()
+                if (len < 12 || len > 4_096) error("bad TCP DNS len=$len")
+                val resp = ByteArray(len)
+                inp.readFully(resp)
+                if (resp[0] != query[0] || resp[1] != query[1]) error("TXID mismatch")
+            }
+            ValidationCheck(
+                id = "tor.dns.bootstrap_relay",
+                label = "DNSCrypt bootstrap (TCP DNS via Tor resolve/DoH)",
+                status = ValidationStatus.Pass,
+                detail = "$host:$port (TCP)",
+            )
+        }.getOrElse { err ->
+            ValidationCheck(
+                id = "tor.dns.bootstrap_relay",
+                label = "DNSCrypt bootstrap (TCP DNS via Tor resolve/DoH)",
+                status = ValidationStatus.Fail,
+                detail = err.message ?: "TCP unreachable",
+                tripsKillSwitch = false,
+            )
+        }
+        if (tcp.status == ValidationStatus.Pass) return tcp
+        val udp = checkDnsPort(
+            "tor.dns.bootstrap_relay",
+            "DNSCrypt bootstrap (UDP DNS via Tor resolve/DoH)",
+            host,
+            port,
+        )
+        return if (udp.status == ValidationStatus.Pass) {
+            udp
+        } else {
+            tcp.copy(detail = "TCP: ${tcp.detail}; UDP: ${udp.detail}")
+        }
+    }
+
     private fun checkTcp(id: String, label: String, host: String, port: Int): ValidationCheck {
         return try {
             Socket().use { socket ->
@@ -210,6 +255,10 @@ object TorPathValidator {
                 username = TunnelEndpoints.SOCKS_PROBE_USER,
                 password = TunnelEndpoints.SOCKS_PROBE_PASS,
                 connectTimeoutMs = REMOTE_DNS_TIMEOUT_MS,
+                // Must stay under TunnelForegroundService VALIDATION_TIMEOUT — default
+                // Socks5Client handshake (120s) previously cancelled the whole startTunnel
+                // via TimeoutCancellationException on Arti cold circuits.
+                handshakeTimeoutMs = REMOTE_DNS_TIMEOUT_MS,
             ).connect("example.com", 80).use { /* handshake + CONNECT OK */ }
             ValidationCheck(
                 id = "tor.remote.dns",

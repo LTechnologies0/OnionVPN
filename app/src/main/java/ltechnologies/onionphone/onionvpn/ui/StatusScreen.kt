@@ -40,6 +40,11 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import android.content.ClipData
+import android.content.ClipDescription
+import android.content.ClipboardManager
+import android.os.Build
+import android.os.PersistableBundle
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import ltechnologies.onionphone.onionvpn.BuildConfig
@@ -74,30 +79,29 @@ fun StatusScreen(
     diagnosticsEnabled: Boolean = false,
 ) {
     var showCircuits by remember { mutableStateOf(false) }
-    var showOnionmasqCircuits by remember { mutableStateOf(false) }
     val context = LocalContext.current
     val appUidResolver = remember { AppUidResolver(context) }
     val resources by resourceSnapshot.collectAsStateWithLifecycle()
     val dataPlane by ltechnologies.onionphone.onionvpn.core.vpn.OnionVpnService.vpnDataPlane
         .collectAsStateWithLifecycle()
+    val onionmasqPlane =
+        dataPlane == ltechnologies.onionphone.onionvpn.core.model.TunDataPlane.ONIONMASQ
+    val canShowCircuits = onionmasqPlane ||
+        (circuitLifecycle != null && snapshot.torControlPlaneAvailable)
 
-    if (showOnionmasqCircuits) {
-        Column(Modifier.fillMaxSize().padding(16.dp)) {
-            OutlinedButton(onClick = { showOnionmasqCircuits = false }) {
-                Text("Back")
-            }
-            Spacer(Modifier.height(8.dp))
-            OnionmasqCircuitsPanel(appUidResolver = appUidResolver)
+    if (showCircuits) {
+        if (onionmasqPlane) {
+            OnionmasqCircuitsScreen(
+                appUidResolver = appUidResolver,
+                onBack = { showCircuits = false },
+            )
+        } else if (circuitLifecycle != null) {
+            CircuitsScreen(
+                lifecycle = circuitLifecycle,
+                appUidResolver = appUidResolver,
+                onBack = { showCircuits = false },
+            )
         }
-        return
-    }
-
-    if (showCircuits && circuitLifecycle != null) {
-        CircuitsScreen(
-            lifecycle = circuitLifecycle,
-            appUidResolver = appUidResolver,
-            onBack = { showCircuits = false },
-        )
         return
     }
 
@@ -316,31 +320,18 @@ fun StatusScreen(
                         )
                     }
                 }
-                if (circuitLifecycle != null && snapshot.torControlPlaneAvailable) {
+                if (canShowCircuits) {
                     OutlinedButton(
                         onClick = { showCircuits = true },
                         modifier = Modifier
                             .fillMaxWidth()
                             .height(52.dp),
-                        enabled = snapshot.torControlPlaneAvailable,
+                        enabled = canShowCircuits,
                         shape = MaterialTheme.shapes.large,
                     ) {
                         Icon(Icons.Filled.Hub, contentDescription = null)
                         Spacer(modifier = Modifier.width(8.dp))
                         Text("Circuits")
-                    }
-                }
-                if (dataPlane == ltechnologies.onionphone.onionvpn.core.model.TunDataPlane.ONIONMASQ) {
-                    OutlinedButton(
-                        onClick = { showOnionmasqCircuits = true },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(52.dp),
-                        shape = MaterialTheme.shapes.large,
-                    ) {
-                        Icon(Icons.Filled.Hub, contentDescription = null)
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text("App circuits (onionmasq)")
                     }
                 }
             }
@@ -371,13 +362,7 @@ fun StatusScreen(
                     style = MaterialTheme.typography.bodySmall,
                 )
                 OutlinedButton(
-                    onClick = {
-                        val cm = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE)
-                            as android.content.ClipboardManager
-                        cm.setPrimaryClip(
-                            android.content.ClipData.newPlainText("OnionVPN PAC", snapshot.pacUrl),
-                        )
-                    },
+                    onClick = { copySensitiveClip(context, "OnionVPN PAC", snapshot.pacUrl) },
                     modifier = Modifier.fillMaxWidth(),
                     shape = MaterialTheme.shapes.medium,
                 ) {
@@ -393,13 +378,10 @@ fun StatusScreen(
                     )
                     OutlinedButton(
                         onClick = {
-                            val cm = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE)
-                                as android.content.ClipboardManager
-                            cm.setPrimaryClip(
-                                android.content.ClipData.newPlainText(
-                                    "OnionVPN SOCKS",
-                                    "socks5://${snapshot.socksProxy}",
-                                ),
+                            copySensitiveClip(
+                                context,
+                                "OnionVPN SOCKS",
+                                "socks5://${snapshot.socksProxy}",
                             )
                         },
                         modifier = Modifier.fillMaxWidth(),
@@ -413,19 +395,24 @@ fun StatusScreen(
             }
         }
 
-        if (snapshot.torEntryGuards.isNotBlank() || snapshot.torLastCircEvent.isNotBlank()) {
+        if (diagnosticsEnabled &&
+            (snapshot.torEntryGuards.isNotBlank() || snapshot.torLastCircEvent.isNotBlank())
+        ) {
             TonalSection {
-                SectionHeader(title = "Tor detail")
+                SectionHeader(
+                    title = "Tor detail",
+                    subtitle = "Diagnostics only — fingerprints truncated",
+                )
                 if (snapshot.torEntryGuards.isNotBlank()) {
                     Text(
-                        text = "Guards: ${snapshot.torEntryGuards}",
+                        text = "Guards: ${redactTorFingerprints(snapshot.torEntryGuards)}",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
                 if (snapshot.torLastCircEvent.isNotBlank()) {
                     Text(
-                        text = "Last CIRC: ${snapshot.torLastCircEvent}",
+                        text = "Last CIRC: ${redactTorFingerprints(snapshot.torLastCircEvent)}",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -494,3 +481,22 @@ private fun statusLabel(status: ValidationStatus): String = when (status) {
     ValidationStatus.Fail -> "Fail"
     ValidationStatus.Skipped -> "Skip"
 }
+
+/** Truncate `$HEX40` / long hex blobs so Status UI does not dump full relay identities. */
+private fun redactTorFingerprints(raw: String): String =
+    raw.replace(Regex("""\$?[0-9A-Fa-f]{40}""")) { m ->
+        val s = m.value.removePrefix("$")
+        "$${s.take(8)}…"
+    }
+
+private fun copySensitiveClip(context: android.content.Context, label: String, text: String) {
+    val cm = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as ClipboardManager
+    val clip = ClipData.newPlainText(label, text)
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        clip.description.extras = PersistableBundle().apply {
+            putBoolean(ClipDescription.EXTRA_IS_SENSITIVE, true)
+        }
+    }
+    cm.setPrimaryClip(clip)
+}
+

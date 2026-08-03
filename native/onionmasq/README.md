@@ -28,7 +28,8 @@ App DNS still goes TunDnsMux → DNSCrypt. Upstream SOCKS:
    failure returns RFC1929 status `0x01`. JNI: `OnionMasq.getSocksSidecarPort()`.
 2. **Cutover (single TorClient):** DNSCrypt starts after onionmasq ready against
    the sidecar (`INTERIM_USES_ARTI_MOBILE = false`). Bootstrap DNS uses
-   `SocksDnsBootstrapRelay` over the sidecar — no parallel arti-mobile.
+   `SocksDnsBootstrapRelay` (TCP+UDP; force_tcp) over the sidecar — no parallel arti-mobile.
+   Resolve: DoH via CONNECT (sidecar has no Tor SOCKS RESOLVE).
 
 Re-apply OnionVPN patches after a clean onionmasq clone:
 
