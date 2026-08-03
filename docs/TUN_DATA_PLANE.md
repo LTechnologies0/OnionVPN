@@ -19,7 +19,7 @@ Blocking TUN (kill-switch)
   → Connected TUN → TunDnsMux → socketpair → OnionMasq.start(fd)
        → wait BootstrapEvent ready_for_traffic ∧ pct≥100 (sticky; Tor VPN gate)
        → SOCKS sidecar (same TorClient; IsolationToken by user; password allowlist)
-  → SocksDnsBootstrapRelay :torDnsPort → sidecar → 1.1.1.1:53 (TCP DNS, 4 workers)
+  → SocksDnsBootstrapRelay :torDnsPort → sidecar → DoH https://1.1.1.1/dns-query (not :53)
   → DNSCrypt proxy=@sidecar bootstrap=@relay
   → Validating → Connected UI
 ```

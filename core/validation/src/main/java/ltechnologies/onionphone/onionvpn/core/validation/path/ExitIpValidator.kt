@@ -4,8 +4,10 @@ import android.content.Context
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import androidx.core.content.getSystemService
+import java.net.Authenticator
 import java.net.InetAddress
 import java.net.InetSocketAddress
+import java.net.PasswordAuthentication
 import java.net.Proxy
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers
@@ -23,22 +25,28 @@ import timber.log.Timber
  * Tor Project check.torproject.org).
  *
  * Fetches [https://check.torproject.org/api/ip] over the **probe** Tor SocksPort
- * (SessionGroup PROBE — path-spec proxy-address isolation from app/hev traffic)
+ * (SessionGroup PROBE / onionmasq sidecar IsolationToken `probe`)
  * and compares the reported IP to every non-VPN interface address Android still exposes
  * (Tor VPN Threat Model §5.1.1 — apps can see those; egress must not equal them).
+ *
+ * Java [Proxy.Type.SOCKS] needs [Authenticator] for USERNAME/PASSWORD — the onionmasq
+ * sidecar rejects empty credentials (0.3.52+). TorPathValidator already uses Socks5Client.
  */
 object ExitIpValidator {
     private const val TOR_CHECK_URL = "https://check.torproject.org/api/ip"
     private val IPV4_REGEX = Regex("""^(\d{1,3}\.){3}\d{1,3}$""")
     private val httpClients = java.util.concurrent.ConcurrentHashMap<Int, OkHttpClient>()
+    private val socksAuthLock = Any()
 
     suspend fun validate(
         context: Context,
         socksHost: String = TunnelEndpoints.LOOPBACK,
         socksPort: Int = TunnelEndpoints.TOR_SOCKS_PORT,
+        socksUser: String = TunnelEndpoints.SOCKS_PROBE_USER,
+        socksPass: String = TunnelEndpoints.SOCKS_PROBE_PASS,
     ): List<ValidationCheck> = withContext(Dispatchers.IO) {
         val underlying = collectUnderlyingAddresses(context)
-        val egress = fetchTorCheck(socksHost, socksPort)
+        val egress = fetchTorCheck(socksHost, socksPort, socksUser, socksPass)
         buildList {
             add(checkEgressNotLocal(egress, underlying))
             add(checkReportedAsTor(egress))
@@ -56,7 +64,12 @@ object ExitIpValidator {
         val error: String? = null,
     )
 
-    private fun fetchTorCheck(socksHost: String, socksPort: Int): TorCheckResult {
+    private fun fetchTorCheck(
+        socksHost: String,
+        socksPort: Int,
+        socksUser: String,
+        socksPass: String,
+    ): TorCheckResult {
         val proxy = Proxy(Proxy.Type.SOCKS, InetSocketAddress(socksHost, socksPort))
         val client = httpClients.getOrPut(socksPort) {
             OkHttpClient.Builder()
@@ -68,29 +81,56 @@ object ExitIpValidator {
                 .followRedirects(true)
                 .build()
         }
-        return try {
-            val body = client.newCall(
-                Request.Builder().url(TOR_CHECK_URL).header("User-Agent", "OnionVPN").build(),
-            ).execute().use { response ->
-                if (!response.isSuccessful) {
-                    return@use null to "HTTP ${response.code}"
+        return withSocksAuthenticator(socksUser, socksPass) {
+            try {
+                val body = client.newCall(
+                    Request.Builder().url(TOR_CHECK_URL).header("User-Agent", "OnionVPN").build(),
+                ).execute().use { response ->
+                    if (!response.isSuccessful) {
+                        return@use null to "HTTP ${response.code}"
+                    }
+                    response.body?.string().orEmpty() to null
                 }
-                response.body?.string().orEmpty() to null
+                val err = body.second
+                if (err != null) {
+                    return@withSocksAuthenticator TorCheckResult(null, null, err)
+                }
+                val json = JSONObject(body.first.orEmpty())
+                TorCheckResult(
+                    ip = json.optString("IP").takeIf { it.isNotBlank() },
+                    isTor = if (json.has("IsTor")) json.getBoolean("IsTor") else null,
+                )
+            } catch (error: Exception) {
+                Timber.w(error, "Tor exit IP check failed")
+                TorCheckResult(null, null, error.message ?: "fetch failed")
             }
-            val err = body.second
-            if (err != null) {
-                return TorCheckResult(null, null, err)
-            }
-            val json = JSONObject(body.first.orEmpty())
-            TorCheckResult(
-                ip = json.optString("IP").takeIf { it.isNotBlank() },
-                isTor = if (json.has("IsTor")) json.getBoolean("IsTor") else null,
-            )
-        } catch (error: Exception) {
-            Timber.w(error, "Tor exit IP check failed")
-            TorCheckResult(null, null, error.message ?: "fetch failed")
         }
     }
+
+    /**
+     * Scope SOCKS5 USERNAME/PASSWORD for Java [Proxy] (OkHttp). Global Authenticator is
+     * process-wide — lock + restore so concurrent callers cannot steal wrong tokens.
+     */
+    private fun <T> withSocksAuthenticator(user: String, pass: String, block: () -> T): T {
+        synchronized(socksAuthLock) {
+            // Android stubs omit Authenticator.getDefault() on some API levels — replace + clear.
+            Authenticator.setDefault(
+                object : Authenticator() {
+                    override fun getPasswordAuthentication(): PasswordAuthentication? {
+                        val proto = requestingProtocol ?: return null
+                        if (!proto.startsWith("SOCKS", ignoreCase = true)) return null
+                        return PasswordAuthentication(user, pass.toCharArray())
+                    }
+                },
+            )
+            try {
+                return block()
+            } finally {
+                Authenticator.setDefault(null)
+            }
+        }
+    }
+
     private fun checkEgressNotLocal(
         egress: TorCheckResult,
         underlying: Set<String>,
@@ -102,7 +142,6 @@ object ExitIpValidator {
                 label = "Egress IP is Tor exit (not ISP/LAN)",
                 status = ValidationStatus.Fail,
                 detail = egress.error ?: "No IP from check.torproject.org via SOCKS",
-                // Soft: probe flake — Tor SOCKS may still route apps correctly.
                 tripsKillSwitch = false,
             )
         }
@@ -149,7 +188,6 @@ object ExitIpValidator {
                 status = ValidationStatus.Fail,
                 detail = "IsTor=false IP=${egress.ip} — Soft warn (API/unlisted exit); " +
                     "Hard only if egress equals ISP (tor.exit.ip)",
-                // Soft: check.tp.org can lag for new exits — do not blackhole working Tor.
                 tripsKillSwitch = false,
             )
             null -> ValidationCheck(
@@ -162,10 +200,6 @@ object ExitIpValidator {
         }
     }
 
-    /**
-     * VPN LinkAddresses must be OnionVPN ULA/CGNAT only — never a public or Wi‑Fi IP
-     * (Orbot/InviZible virtual gateway pattern).
-     */
     private fun checkVpnOnlyAddresses(context: Context): ValidationCheck {
         val cm = context.getSystemService<ConnectivityManager>()
             ?: return ValidationCheck(
@@ -190,7 +224,6 @@ object ExitIpValidator {
                 label = "VPN addresses are virtual (not ISP)",
                 status = ValidationStatus.Fail,
                 detail = "No VPN link addresses found (CM race while TUN up) — Soft",
-                // Soft: ConnectivityManager can briefly omit VPN addrs during rebind.
                 tripsKillSwitch = false,
             )
         }
@@ -241,7 +274,6 @@ object ExitIpValidator {
         if (host == TunnelEndpoints.VPN_CLIENT_ADDRESS_V6) return true
         if (host.startsWith("10.8.0.")) return true
         if (host.startsWith("fd00:8:8:8:")) return true
-        // FakeDNS CGNAT pool (Orbot-style mapdns)
         if (host.startsWith("100.")) {
             val parts = host.split('.')
             if (parts.size == 4) {
@@ -256,11 +288,9 @@ object ExitIpValidator {
         if (host == "::1" || host == "127.0.0.1" || host.startsWith("127.")) return true
         if (host.startsWith("fe80:", ignoreCase = true)) return true
         if (host.startsWith("fc", ignoreCase = true) || host.startsWith("fd", ignoreCase = true)) {
-            // ULA — private (includes OnionVPN fd00:8:8:8::2)
             return true
         }
         if (!IPV4_REGEX.matches(host)) {
-            // Global IPv6 is not private; only ULA/link-local handled above.
             return false
         }
         return try {
@@ -268,7 +298,7 @@ object ExitIpValidator {
             addr.isAnyLocalAddress || addr.isLoopbackAddress ||
                 addr.isLinkLocalAddress || addr.isSiteLocalAddress ||
                 isOnionVpnVirtual(host) ||
-                host.startsWith("100.") // CGNAT
+                host.startsWith("100.")
         } catch (_: Exception) {
             false
         }
