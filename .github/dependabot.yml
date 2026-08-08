@@ -1,0 +1,31 @@
+version: 2
+updates:
+  - package-ecosystem: gradle
+    directory: /
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: "build"
+      include: scope
+    groups:
+      gradle-all:
+        patterns:
+          - "*"
+    open-pull-requests-limit: 1
+    labels:
+      - dependencies
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: "ci"
+    groups:
+      actions-all:
+        patterns:
+          - "*"
+    open-pull-requests-limit: 1
+    labels:
+      - dependencies
+      - ci/cd
