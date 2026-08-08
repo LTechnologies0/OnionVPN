@@ -20,7 +20,21 @@ INVIZIBLE_X86_URL="https://github.com/Gedsh/InviZible/releases/download/v7.5.0-s
 INVIZIBLE_ARM64_URL="https://github.com/Gedsh/InviZible/releases/download/v7.5.0-stable/Invizible_Lite_ver.7.5.0_arm64.apk"
 SOCKSTUN_URL="https://github.com/heiher/sockstun/releases/download/7.0/hev.sockstun-7.0-release.apk"
 
-TOR_RELEASE_BASE="https://github.com/LTechnologies0/Tor-Android-build-script/releases/latest/download"
+# Tor release pin: TOR_RELEASE_TAG env > gradle/native-versions.properties > latest
+NATIVE_PROPS="${ROOT}/gradle/native-versions.properties"
+TOR_REPO="${TOR_REPO:-LTechnologies0/Tor-Android-build-script}"
+if [[ -z "${TOR_RELEASE_TAG:-}" && -f "$NATIVE_PROPS" ]]; then
+  TOR_RELEASE_TAG="$(grep -E '^tor\.release\.tag=' "$NATIVE_PROPS" | cut -d= -f2- | tr -d '[:space:]' || true)"
+fi
+if [[ "${TOR_USE_LATEST:-0}" == "1" || -z "${TOR_RELEASE_TAG:-}" ]]; then
+  TOR_RELEASE_BASE="https://github.com/${TOR_REPO}/releases/latest/download"
+  TOR_RELEASE_LABEL="latest"
+else
+  TOR_RELEASE_BASE="https://github.com/${TOR_REPO}/releases/download/${TOR_RELEASE_TAG}"
+  TOR_RELEASE_LABEL="$TOR_RELEASE_TAG"
+fi
+echo "Tor+PTs source: ${TOR_REPO} @ ${TOR_RELEASE_LABEL}"
+
 TOR_ARM64_URL="${TOR_RELEASE_BASE}/libtor-arm64-v8a.so"
 TOR_X86_64_URL="${TOR_RELEASE_BASE}/libtor-x86_64.so"
 PT_ARM64_LYREBIRD_URL="${TOR_RELEASE_BASE}/libLyrebird-arm64-v8a.so"
@@ -122,4 +136,4 @@ print("Wrote", path)
 PY
 
 echo "Native binaries installed under app/src/main/jniLibs/"
-echo "Tor+PTs: LTechnologies0/Tor-Android-build-script | presets: TBA ${TBA_VERSION}"
+echo "Tor+PTs: ${TOR_REPO} @ ${TOR_RELEASE_LABEL} | presets: TBA ${TBA_VERSION}"

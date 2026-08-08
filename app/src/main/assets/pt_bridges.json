@@ -1,5 +1,5 @@
 {
-  "source": "Tor Browser Android 15.0 pt_config.json (16KB-aligned PTs)",
+  "source": "Tor Browser Android 15.0 pt_config.json (bridge lines; PTs from LTechnologies0 build)",
   "bridges": {
     "obfs4": [
       "obfs4 192.95.36.142:443 CDF2E852BF539B82BD10E27E9115A31734E378C2 cert=qUVQ0srL1JI/vO6V6m/24anYXiJD3QP2HgzUKQtQ7GRqqUvs7P+tG43RtAqdhLOALP7DJQ iat-mode=1",
