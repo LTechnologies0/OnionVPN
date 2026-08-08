@@ -21,7 +21,7 @@ dependencies {
     implementation(libs.androidx.appcompat)
     implementation("androidx.annotation:annotation:1.9.1")
     implementation(libs.androidx.lifecycle.livedata.ktx)
-    implementation("com.google.code.gson:gson:2.13.1")
+    implementation("com.google.code.gson:gson:2.14.0")
     // Pluggable transports used by OnionMasq.start(fd, bridgeLines)
-    implementation("com.netzarchitekten:IPtProxy:5.4.2")
+    implementation("com.netzarchitekten:IPtProxy:5.5.1")
 }
