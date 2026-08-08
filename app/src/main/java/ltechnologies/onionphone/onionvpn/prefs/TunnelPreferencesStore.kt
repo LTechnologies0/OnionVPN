@@ -135,7 +135,9 @@ class TunnelPreferencesStore @Inject constructor(
             ?.let { runCatching { FirewallDefaultAction.valueOf(it) }.getOrNull() }
             ?: FirewallDefaultAction.ASK,
         firewallTempMinutes = this[Keys.firewallTempMin] ?: 5,
-        appLockEnabled = this[Keys.appLock] ?: true,
+        // Debug defaults off so MCP/adb can launch MainActivity without device PIN.
+        appLockEnabled = this[Keys.appLock]
+            ?: ((context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) == 0),
         allowScreenshots = this[Keys.allowScreenshots] ?: false,
         autoStartOnAppLaunch = this[Keys.autoStartOnLaunch] ?: true,
         autoStartOnBoot = this[Keys.autoStartOnBoot] ?: false,

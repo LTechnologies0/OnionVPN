@@ -1,3 +1,5 @@
+// 64-bit only: GrapheneOS hardened_malloc + extended VA require a 64-bit primary ABI.
+// Do not add armeabi-v7a / x86 — that forces those OS mitigations off for the app.
 def ONIONPHONE_ABIS = ["arm64-v8a", "x86_64"] as String[]
 def devAbi = (findProperty("onionphone.devAbi") ?: "arm64-v8a").toString()
 def isDebugBuild = gradle.startParameter.taskNames.any { it.toString().toLowerCase().contains("debug") }

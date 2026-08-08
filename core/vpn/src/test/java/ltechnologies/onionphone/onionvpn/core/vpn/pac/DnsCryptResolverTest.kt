@@ -41,17 +41,68 @@ class DnsCryptResolverTest {
                 resp[p++] = 60 // TTL
                 resp[p++] = 0
                 resp[p++] = 4
-                resp[p++] = 192.toByte()
-                resp[p++] = 0
-                resp[p++] = 2
-                resp[p++] = 1
+                // Globally routable (not TEST-NET) — resolver blackholes documentation/LAN.
+                resp[p++] = 93.toByte()
+                resp[p++] = 184.toByte()
+                resp[p++] = 216.toByte()
+                resp[p++] = 34
                 stub.send(DatagramPacket(resp, p, packet.address, packet.port))
             }
             val addr = DnsCryptResolver.resolveIpv4("example.com", "127.0.0.1", port)
-            assertEquals("192.0.2.1", addr.hostAddress)
+            assertEquals("93.184.216.34", addr.hostAddress)
         }
         executor.shutdownNow()
         executor.awaitTermination(2, TimeUnit.SECONDS)
         assertTrue(true)
+    }
+
+    @Test(expected = java.net.UnknownHostException::class)
+    fun rejectsPrivateLanARecord() {
+        val executor = Executors.newSingleThreadExecutor()
+        DatagramSocket(0, InetAddress.getByName("127.0.0.1")).use { stub ->
+            val port = stub.localPort
+            executor.execute {
+                val buf = ByteArray(512)
+                val packet = DatagramPacket(buf, buf.size)
+                stub.soTimeout = 5_000
+                stub.receive(packet)
+                val qLen = packet.length
+                val resp = ByteArray(qLen + 16)
+                System.arraycopy(buf, 0, resp, 0, qLen)
+                resp[2] = (resp[2].toInt() or 0x80).toByte()
+                resp[3] = (resp[3].toInt() or 0x80).toByte()
+                resp[6] = 0
+                resp[7] = 1
+                var p = qLen
+                resp[p++] = 0xC0.toByte()
+                resp[p++] = 0x0C
+                resp[p++] = 0
+                resp[p++] = 1
+                resp[p++] = 0
+                resp[p++] = 1
+                resp[p++] = 0
+                resp[p++] = 0
+                resp[p++] = 0
+                resp[p++] = 60
+                resp[p++] = 0
+                resp[p++] = 4
+                resp[p++] = 192.toByte()
+                resp[p++] = 168.toByte()
+                resp[p++] = 1
+                resp[p++] = 1
+                stub.send(DatagramPacket(resp, p, packet.address, packet.port))
+            }
+            try {
+                DnsCryptResolver.resolveIpv4("evil.example", "127.0.0.1", port, timeoutMs = 3_000)
+            } finally {
+                executor.shutdownNow()
+                executor.awaitTermination(2, TimeUnit.SECONDS)
+            }
+        }
+    }
+
+    @Test(expected = java.net.UnknownHostException::class)
+    fun rejectsLoopbackLiteral() {
+        DnsCryptResolver.resolveIpv4("127.0.0.1", "127.0.0.1", 53)
     }
 }

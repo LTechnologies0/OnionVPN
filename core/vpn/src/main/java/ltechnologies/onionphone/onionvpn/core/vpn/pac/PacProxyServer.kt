@@ -115,9 +115,58 @@ class PacProxyServer(
             sock.soTimeout = 5_000
             val reader = BufferedReader(InputStreamReader(sock.getInputStream(), StandardCharsets.US_ASCII))
             val requestLine = reader.readLine() ?: return
-            while (true) {
+            if (requestLine.length > MAX_REQUEST_LINE) {
+                writePlain(
+                    OutputStreamWriter(sock.getOutputStream(), StandardCharsets.UTF_8),
+                    400,
+                    "bad request",
+                )
+                return
+            }
+            val method = requestLine.substringBefore(' ').trim().uppercase()
+            if (method != "GET") {
+                writePlain(
+                    OutputStreamWriter(sock.getOutputStream(), StandardCharsets.UTF_8),
+                    405,
+                    "method not allowed",
+                )
+                return
+            }
+            var hostHeader: String? = null
+            var headerCount = 0
+            while (headerCount < MAX_HEADERS) {
                 val line = reader.readLine() ?: break
                 if (line.isEmpty()) break
+                if (line.length > MAX_HEADER_LINE) {
+                    writePlain(
+                        OutputStreamWriter(sock.getOutputStream(), StandardCharsets.UTF_8),
+                        400,
+                        "bad request",
+                    )
+                    return
+                }
+                headerCount++
+                val name = line.substringBefore(':').trim()
+                if (name.equals("Host", ignoreCase = true)) {
+                    hostHeader = line.substringAfter(':').trim().lowercase()
+                }
+            }
+            if (headerCount >= MAX_HEADERS) {
+                writePlain(
+                    OutputStreamWriter(sock.getOutputStream(), StandardCharsets.UTF_8),
+                    400,
+                    "bad request",
+                )
+                return
+            }
+            // Loopback-only bind is the primary control; Host check blocks odd local proxies.
+            if (hostHeader != null && !isLoopbackHostHeader(hostHeader)) {
+                writePlain(
+                    OutputStreamWriter(sock.getOutputStream(), StandardCharsets.UTF_8),
+                    400,
+                    "bad host",
+                )
+                return
             }
             val path = requestLine.substringAfter(' ').substringBefore(' ').trim()
             val writer = OutputStreamWriter(sock.getOutputStream(), StandardCharsets.UTF_8)
@@ -152,9 +201,16 @@ class PacProxyServer(
         }
     }
 
+    private fun isLoopbackHostHeader(host: String): Boolean {
+        val h = host.substringBefore(':').trim().lowercase()
+        return h == "127.0.0.1" || h == "localhost" || h == "[::1]" || h == "::1"
+    }
+
     private fun writePlain(writer: OutputStreamWriter, code: Int, body: String) {
         val reason = when (code) {
             200 -> "OK"
+            400 -> "Bad Request"
+            405 -> "Method Not Allowed"
             503 -> "Service Unavailable"
             else -> "Not Found"
         }
@@ -166,5 +222,11 @@ class PacProxyServer(
         writer.write("\r\n")
         writer.write(body)
         writer.flush()
+    }
+
+    companion object {
+        private const val MAX_REQUEST_LINE = 512
+        private const val MAX_HEADER_LINE = 512
+        private const val MAX_HEADERS = 32
     }
 }

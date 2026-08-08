@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# Gradle wrapper for aarch64 hosts: native JDK 21 + aapt2 override (no x86 QEMU).
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$ROOT"
+
+if [[ ! -f gradle/arm-host.local.properties ]]; then
+  ./scripts/configure-arm-host.sh || true
+fi
+
+EXTRA=()
+if [[ -f gradle/arm-host.local.properties ]]; then
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%%#*}"
+    line="$(echo "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+    [[ -z "$line" || "$line" != *=* ]] && continue
+    key="${line%%=*}"
+    val="${line#*=}"
+    case "$key" in
+      android.aapt2FromMavenOverride)
+        EXTRA+=("-Pandroid.aapt2FromMavenOverride=$val")
+        ;;
+      org.gradle.java.home)
+        export JAVA_HOME="$val"
+        export PATH="$JAVA_HOME/bin:$PATH"
+        ;;
+    esac
+  done <gradle/arm-host.local.properties
+fi
+
+# Env overrides win over the properties file.
+if [[ -n "${AAPT2_OVERRIDE:-}" ]]; then
+  EXTRA+=("-Pandroid.aapt2FromMavenOverride=$AAPT2_OVERRIDE")
+elif [[ -n "${AAPT2_PATH:-}" ]]; then
+  EXTRA+=("-Pandroid.aapt2FromMavenOverride=$AAPT2_PATH")
+fi
+
+exec ./gradlew "${EXTRA[@]}" "$@"

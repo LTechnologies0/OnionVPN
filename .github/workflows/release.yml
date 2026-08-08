@@ -112,6 +112,7 @@ jobs:
       - name: Package APKs with checksums
         run: |
           VERSION="${{ steps.meta.outputs.version }}"
+          TAG="${{ steps.meta.outputs.tag }}"
           mkdir -p dist/release
           shopt -s nullglob
           for apk in app/build/outputs/apk/release/*-release.apk; do
@@ -125,8 +126,28 @@ jobs:
           {
             echo "## OnionVPN ${VERSION}"
             echo
-            echo "Per-ABI release APKs (Tor + DNSCrypt + hev-socks5-tunnel)."
-            echo
+            NOTES=""
+            for candidate in \
+              "docs/releases/${TAG}.md" \
+              "docs/releases/v${VERSION}.md"
+            do
+              if [ -f "$candidate" ]; then
+                NOTES="$candidate"
+                break
+              fi
+            done
+            if [ -n "$NOTES" ]; then
+              cat "$NOTES"
+              echo
+            elif [ -f CHANGELOG.md ]; then
+              # Emit the matching ## [VERSION] section from CHANGELOG.md (until next ##).
+              awk -v ver="$VERSION" '
+                $0 ~ "^## \\[" ver "\\]" {keep=1; print; next}
+                keep && $0 ~ /^## / {exit}
+                keep {print}
+              ' CHANGELOG.md
+              echo
+            fi
             echo "### Assets"
             cat dist/release/ABI_LIST.md
             echo
@@ -135,6 +156,7 @@ jobs:
             echo "Phones: prefer **arm64-v8a**. Obtainium APK filter: \`arm64-v8a\`."
           } > dist/release/RELEASE_NOTES.md
           ls -lh dist/release/
+          cat dist/release/RELEASE_NOTES.md
           cat dist/release/SHA256SUMS.txt
 
       - name: Create GitHub Release

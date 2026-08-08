@@ -20,6 +20,8 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import ltechnologies.onionphone.onionvpn.core.dnscrypt.DnsCryptProcessManager
+import ltechnologies.onionphone.onionvpn.core.model.TorEngine
+import ltechnologies.onionphone.onionvpn.core.model.TunDataPlane
 import ltechnologies.onionphone.onionvpn.core.model.TunnelPhase
 import ltechnologies.onionphone.onionvpn.core.model.TunnelPreferences
 import ltechnologies.onionphone.onionvpn.core.model.TunnelSnapshot
@@ -53,6 +55,26 @@ class MainViewModel @Inject constructor(
 
     /** First DataStore emission (not the Compose initialValue). */
     suspend fun awaitStoredPreferences(): TunnelPreferences = preferencesStore.preferences.first()
+
+    /**
+     * DEBUG MCP path: persist engine/plane from intent extras before auto-start so we do not
+     * race the broadcast receiver's async DataStore write (which previously left LITTLE_T running).
+     */
+    suspend fun applyDebugTunnelIntent(engineRaw: String?, planeRaw: String?): TunnelPreferences {
+        preferencesStore.update { prefs ->
+            prefs.copy(
+                torEngine = TorEngine.fromPreference(engineRaw ?: TorEngine.ARTI.name),
+                tunDataPlane = TunDataPlane.fromPreference(
+                    planeRaw ?: TunDataPlane.ONIONMASQ.name,
+                ),
+                appLockEnabled = false,
+                autoStartOnAppLaunch = true,
+                allowAdbClearnetLeak = true,
+                killSwitchEnabled = true,
+            )
+        }
+        return preferencesStore.preferences.first()
+    }
 
     fun currentTorSocksPort(): Int? = tor.currentProbeSocksPort()
 

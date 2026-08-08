@@ -63,6 +63,7 @@ class OnionVpnService : VpnService() {
 
     override fun onCreate() {
         super.onCreate()
+        instance = this
         // Do not bind onionmasq here: OnionMasq.init() has not run yet (getInstance throws).
         // OnionmasqTunForwarder rebinds after init.
     }
@@ -92,20 +93,55 @@ class OnionVpnService : VpnService() {
                 ACTION_DESTROY -> stopTunnel(destroyService = true)
             }
         }
-        return START_STICKY
+        // User/coordinator teardown must not sticky-restart and leave hev/vpn threads alive.
+        return when (action) {
+            ACTION_STOP, ACTION_DESTROY -> START_NOT_STICKY
+            else -> START_STICKY
+        }
     }
 
     override fun onDestroy() {
         runCatching { OnionMasq.unbindVPNService() }
-        // Run teardown on the VPN thread and wait — shutdown() alone can drop stopTunnel.
-        try {
-            executor.submit { stopTunnel() }.get(8, java.util.concurrent.TimeUnit.SECONDS)
-        } catch (e: Exception) {
-            Timber.w(e, "VPN onDestroy stopTunnel wait failed — forcing local cleanup")
-            runCatching { stopTunnel() }
+        // Avoid deadlock if onDestroy runs on the VPN executor thread after stopSelf().
+        if (Thread.currentThread().name == "onionvpn-vpn") {
+            runCatching { stopTunnel(destroyService = false) }
+        } else {
+            try {
+                executor.submit { stopTunnel(destroyService = false) }
+                    .get(8, java.util.concurrent.TimeUnit.SECONDS)
+            } catch (e: Exception) {
+                Timber.w(e, "VPN onDestroy stopTunnel wait failed — forcing local cleanup")
+                runCatching { stopTunnel(destroyService = false) }
+            }
         }
-        executor.shutdown()
+        executor.shutdownNow()
+        runCatching {
+            if (!executor.awaitTermination(3, java.util.concurrent.TimeUnit.SECONDS)) {
+                Timber.w("VPN executor did not terminate cleanly")
+            }
+        }
+        if (instance === this) {
+            instance = null
+        }
         super.onDestroy()
+    }
+
+    /**
+     * Same-process teardown for [TunnelVpnBridge] — avoids racing Always-On / sticky
+     * [startService] delivery that previously left TunDnsMux threads alive after Idle.
+     */
+    private fun teardownSync(destroyService: Boolean) {
+        if (Thread.currentThread().name == "onionvpn-vpn") {
+            stopTunnel(destroyService = destroyService)
+            return
+        }
+        try {
+            executor.submit { stopTunnel(destroyService = destroyService) }
+                .get(15, java.util.concurrent.TimeUnit.SECONDS)
+        } catch (e: Exception) {
+            Timber.w(e, "teardownSync wait failed — forcing local cleanup")
+            runCatching { stopTunnel(destroyService = destroyService) }
+        }
     }
 
     /**
@@ -611,6 +647,29 @@ class OnionVpnService : VpnService() {
 
         private val generationSeq = AtomicInteger(0)
 
+        /** Live instance for same-process [teardownInProcess] (null when unbound). */
+        @Volatile
+        private var instance: OnionVpnService? = null
+
+        /**
+         * Tear down TUN/forwarder in-process (preferred over [ACTION_DESTROY] intents).
+         * Falls back to no-op if the service was never created.
+         */
+        fun teardownInProcess(destroyService: Boolean) {
+            val svc = instance
+            if (svc == null) {
+                Timber.i("teardownInProcess — no OnionVpnService instance")
+                // Clear sticky flags so waiters do not hang on a dead session.
+                isEstablished.value = false
+                forwarderSocksPort.value = -1
+                forwarderDnsCryptPort.value = -1
+                forwarderAlive.value = false
+                profileMode.value = null
+                return
+            }
+            svc.teardownSync(destroyService)
+        }
+
         fun preferencesFromVpnIntent(intent: Intent): TunnelPreferences {
             val mode = intent.getStringExtra(EXTRA_VPN_APP_MODE)
                 ?.let { runCatching { VpnAppRoutingMode.valueOf(it) }.getOrNull() }
@@ -658,7 +717,7 @@ class OnionVpnService : VpnService() {
         private val profileMode = MutableStateFlow<VpnProfileMode?>(null)
         val vpnProfileMode: StateFlow<VpnProfileMode?> = profileMode.asStateFlow()
 
-        private val forwarderAlive = MutableStateFlow(true)
+        private val forwarderAlive = MutableStateFlow(false)
         val tunForwarderAlive: StateFlow<Boolean> = forwarderAlive.asStateFlow()
 
         private val activeDataPlane = MutableStateFlow(TunDataPlane.HEV_SOCKS)

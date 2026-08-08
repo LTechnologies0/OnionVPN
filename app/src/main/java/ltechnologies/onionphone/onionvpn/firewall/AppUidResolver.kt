@@ -50,7 +50,10 @@ class AppUidResolver(
     @Volatile private var receiverRegistered = false
 
     /** getInstalledApplications is multi‑100ms — never on the package-broadcast / main thread. */
-    private val indexExecutor = Executors.newSingleThreadExecutor { r ->
+    @Volatile
+    private var indexExecutor = newIndexExecutor()
+
+    private fun newIndexExecutor() = Executors.newSingleThreadExecutor { r ->
         Thread(r, "onionvpn-uid-index").apply { isDaemon = true }
     }
 
@@ -86,9 +89,13 @@ class AppUidResolver(
     }
 
     fun stop() {
-        if (!receiverRegistered) return
-        runCatching { appContext.unregisterReceiver(packageReceiver) }
-        receiverRegistered = false
+        if (receiverRegistered) {
+            runCatching { appContext.unregisterReceiver(packageReceiver) }
+            receiverRegistered = false
+        }
+        // Release the idle pool thread so Status "Threads" drops after tunnel stop.
+        indexExecutor.shutdownNow()
+        indexExecutor = newIndexExecutor()
     }
 
     fun resolve(uid: Int): Identity {

@@ -57,6 +57,7 @@ import ltechnologies.onionphone.onionvpn.core.validation.TunnelValidator
 import ltechnologies.onionphone.onionvpn.core.vpn.OnionVpnService
 import ltechnologies.onionphone.onionvpn.core.vpn.dns.DnsHostnameCache
 import ltechnologies.onionphone.onionvpn.core.vpn.dns.OnionAutomapAllocator
+import ltechnologies.onionphone.onionvpn.core.vpn.forwarder.TcpFlowUidIndex
 import ltechnologies.onionphone.onionvpn.core.vpn.forwarder.ArtiSocksRoleMux
 import ltechnologies.onionphone.onionvpn.core.vpn.forwarder.TunDataPlaneFactory
 import ltechnologies.onionphone.onionvpn.core.vpn.net.TorBandwidthSampler
@@ -1476,6 +1477,11 @@ class TunnelForegroundService : Service() {
         tor.clearExternalRuntimePorts()
         tor.stop()
         releaseTunnelWakeLock()
+        // Drop rebuildable maps left by TUN/DNS/firewall so Idle RSS/heap can fall.
+        DnsHostnameCache.clear()
+        OnionAutomapAllocator.clear()
+        TcpFlowUidIndex.clear()
+        MemoryHygiene.onTrim(MemoryHygiene.TrimLevel.HARD)
         MemoryHygiene.afterHeavyWork("tunnel_teardown")
         if (resetSnapshot) {
             runtimePorts = null

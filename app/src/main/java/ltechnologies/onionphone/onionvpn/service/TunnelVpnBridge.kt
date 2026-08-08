@@ -83,17 +83,14 @@ internal class TunnelVpnBridge(
     fun destroy() {
         OnionAutomapAllocator.clear()
         DnsHostnameCache.clear()
-        context.startService(
-            Intent(context, OnionVpnService::class.java).setAction(OnionVpnService.ACTION_DESTROY),
-        )
+        // Same-process stop — startService(DESTROY) raced Always-On and left TunDnsMux alive.
+        OnionVpnService.teardownInProcess(destroyService = true)
     }
 
     fun stop() {
         OnionAutomapAllocator.clear()
         DnsHostnameCache.clear()
-        context.startService(
-            Intent(context, OnionVpnService::class.java).setAction(OnionVpnService.ACTION_STOP),
-        )
+        OnionVpnService.teardownInProcess(destroyService = false)
     }
 
     suspend fun waitForBlocking(generation: Int): Boolean {
@@ -134,10 +131,18 @@ internal class TunnelVpnBridge(
 
     suspend fun waitUntilDown() {
         repeat(VPN_DOWN_POLLS) {
-            if (!OnionVpnService.vpnEstablished.value && OnionVpnService.hevSocksPort.value < 0) return
+            val down = !OnionVpnService.vpnEstablished.value &&
+                OnionVpnService.hevSocksPort.value < 0 &&
+                !OnionVpnService.tunForwarderAlive.value
+            if (down) return
             delay(VPN_READY_POLL_MS)
         }
-        Timber.w("VPN still marked established after stop wait")
+        Timber.w(
+            "VPN still marked up after stop wait established=%s socks=%s forwarderAlive=%s",
+            OnionVpnService.vpnEstablished.value,
+            OnionVpnService.hevSocksPort.value,
+            OnionVpnService.tunForwarderAlive.value,
+        )
     }
 
     fun hevPortsMatch(ports: TunnelRuntimePorts, useDnsCrypt: Boolean): Boolean {

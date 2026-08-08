@@ -228,7 +228,8 @@ fun StatusScreen(
             }
         }
 
-        if (diagnosticsEnabled && resources.timestampMs > 0L) {
+        // Only while tunnel is up — profiler clears on stop; avoid stale RSS/CPU chips on Idle.
+        if (diagnosticsEnabled && (active || bootstrapping) && resources.timestampMs > 0L) {
             SectionHeader(
                 title = "Resources",
                 subtitle = "JVM + native process footprint (disabled when No logs is on).",

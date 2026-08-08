@@ -14,6 +14,7 @@ import ltechnologies.onionphone.onionvpn.core.model.SocksJavaProxyAuth
 import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
 import ltechnologies.onionphone.onionvpn.core.model.ValidationCheck
 import ltechnologies.onionphone.onionvpn.core.model.ValidationStatus
+import ltechnologies.onionphone.onionvpn.core.vpn.net.SecureTorHttp.applyTorClientHardening
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONObject
@@ -78,7 +79,7 @@ object ExitIpValidator {
                 .writeTimeout(45, TimeUnit.SECONDS)
                 .callTimeout(60, TimeUnit.SECONDS)
                 .retryOnConnectionFailure(true)
-                .followRedirects(true)
+                .applyTorClientHardening()
                 .build()
         }
         return SocksJavaProxyAuth.withCredentials(socksUser, socksPass) {

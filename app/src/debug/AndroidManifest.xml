@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- MCP/adb entry point: start Arti/onionmasq without unlocking UI. -->
+    <application>
+        <receiver
+            android:name=".debug.DebugTunnelStartReceiver"
+            android:exported="true"
+            android:enabled="true">
+            <intent-filter>
+                <action android:name="ltechnologies.onionphone.onionvpn.DEBUG_START_TUNNEL" />
+            </intent-filter>
+        </receiver>
+    </application>
+</manifest>

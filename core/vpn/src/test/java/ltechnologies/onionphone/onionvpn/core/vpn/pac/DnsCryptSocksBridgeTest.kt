@@ -103,4 +103,41 @@ class DnsCryptSocksBridgeTest {
             TimeUnit.MILLISECONDS.sleep(50)
         }
     }
+
+    @Test
+    fun privateLanConnectIsRejected() {
+        val free = java.net.ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))
+        val port = free.localPort
+        free.close()
+
+        val underTest = DnsCryptSocksBridge(listenPort = port)
+        underTest.updateUpstream(9_050, 9_051)
+        underTest.start()
+        try {
+            Socket("127.0.0.1", port).use { sock ->
+                sock.soTimeout = 5_000
+                val out = DataOutputStream(sock.getOutputStream())
+                val inp = DataInputStream(sock.getInputStream())
+                out.write(byteArrayOf(0x05, 0x01, 0x00))
+                out.flush()
+                assertEquals(0x05, inp.readUnsignedByte())
+                assertEquals(0x00, inp.readUnsignedByte())
+
+                // CONNECT 192.168.1.1:443
+                out.writeByte(0x05)
+                out.writeByte(0x01) // CONNECT
+                out.writeByte(0x00)
+                out.writeByte(0x01) // IPv4
+                out.write(byteArrayOf(192.toByte(), 168.toByte(), 1, 1))
+                out.writeShort(443)
+                out.flush()
+
+                assertEquals(0x05, inp.readUnsignedByte())
+                assertEquals(0x02, inp.readUnsignedByte()) // not allowed
+            }
+        } finally {
+            underTest.stop()
+            TimeUnit.MILLISECONDS.sleep(50)
+        }
+    }
 }

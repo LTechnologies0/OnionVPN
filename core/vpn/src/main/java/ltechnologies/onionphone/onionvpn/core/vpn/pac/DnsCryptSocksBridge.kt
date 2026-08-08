@@ -16,6 +16,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
+import ltechnologies.onionphone.onionvpn.core.model.TorNetPolicy
 import ltechnologies.onionphone.onionvpn.core.vpn.firewall.ConnectionOwnerResolver
 import ltechnologies.onionphone.onionvpn.core.vpn.firewall.FirewallBridge
 import ltechnologies.onionphone.onionvpn.core.vpn.forwarder.Socks5Client
@@ -154,6 +155,19 @@ class DnsCryptSocksBridge(
                     return
                 }
                 val (host, port) = dest
+                if (!TorNetPolicy.isValidSocksDestination(host) || !TorNetPolicy.isValidPort(port)) {
+                    Timber.v("PAC SOCKS reject invalid dest host=%s port=%d", host, port)
+                    safeReply(output, REP_GENERAL_FAILURE)
+                    return
+                }
+                // Literal private/LAN/CGNAT — never burn Tor circuits (parity with SocksUidBridge).
+                TunnelEndpoints.parseIpv4Literal(host)?.let { ipInt ->
+                    if (TorNetPolicy.mustBlackholeIpv4Destination(ipInt)) {
+                        Timber.v("PAC SOCKS reject blackholed literal %s", host)
+                        safeReply(output, REP_NOT_ALLOWED)
+                        return
+                    }
+                }
                 val torPort = torSocksPort.get()
                 val dnsPort = dnsCryptPort.get()
                 if (torPort <= 0 || dnsPort <= 0) {
@@ -201,6 +215,14 @@ class DnsCryptSocksBridge(
                         }
                     }
                     resolvedIp = connectHost
+                    // Rebinding: DNSCrypt A may still be private after resolve.
+                    TunnelEndpoints.parseIpv4Literal(resolvedIp)?.let { ipInt ->
+                        if (TorNetPolicy.mustBlackholeIpv4Destination(ipInt)) {
+                            Timber.v("PAC SOCKS reject blackholed resolved %s", resolvedIp)
+                            safeReply(output, REP_NOT_ALLOWED)
+                            return
+                        }
+                    }
                     if (!FirewallBridge.engine.allowSocksConnect(
                             uid = clientUid,
                             destHost = host,

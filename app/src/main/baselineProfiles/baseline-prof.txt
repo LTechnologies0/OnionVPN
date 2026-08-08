@@ -3,7 +3,6 @@
 # Regenerate with a connected arm64 device:
 #   ./gradlew :app:generateBaselineProfile
 # Seeded manually so release/sideload builds still ship AOT hints without a device.
-# Kept in sync with src/main/baselineProfiles/baseline-prof.txt (plugin / generator output).
 
 # --- App process entry / DI ---
 Lltechnologies/onionphone/onionvpn/OnionVpnApplication;

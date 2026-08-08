@@ -1,0 +1,16 @@
+# Startup Profile — DEX layout / first-frame critical (subset of baseline).
+# ART uses these for early AOT and method ordering.
+
+Lltechnologies/onionphone/onionvpn/OnionVpnApplication;
+Lltechnologies/onionphone/onionvpn/MainActivity;
+Lltechnologies/onionphone/onionvpn/MainViewModel;
+Lltechnologies/onionphone/onionvpn/ui/StatusScreenKt;
+Lltechnologies/onionphone/onionvpn/ui/theme/ThemeKt;
+Lltechnologies/onionphone/onionvpn/ui/applock/AppLockGateKt;
+Lltechnologies/onionphone/onionvpn/prefs/TunnelPreferencesStore;
+Lltechnologies/onionphone/onionvpn/tunnel/TunnelOrchestrator;
+Landroidx/activity/ComponentActivity;
+Landroidx/activity/compose/ComponentActivityKt;
+Landroidx/compose/ui/platform/ComposeView;
+Landroidx/compose/runtime/ComposerImpl;
+Landroidx/profileinstaller/ProfileInstaller;

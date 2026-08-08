@@ -16,10 +16,13 @@ import java.util.concurrent.ThreadFactory
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import javax.net.ssl.HttpsURLConnection
+import javax.net.ssl.SSLPeerUnverifiedException
 import javax.net.ssl.SSLSocketFactory
 import ltechnologies.onionphone.onionvpn.core.model.SocksJavaProxyAuth
 import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
 import ltechnologies.onionphone.onionvpn.core.vpn.forwarder.Socks5Client
+import ltechnologies.onionphone.onionvpn.core.vpn.net.SecureTorHttp.applyTorClientHardening
 import okhttp3.Dns
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -359,9 +362,8 @@ class SocksDnsBootstrapRelay(
                 .readTimeout(25, TimeUnit.SECONDS)
                 .writeTimeout(20, TimeUnit.SECONDS)
                 .callTimeout(45, TimeUnit.SECONDS)
-                .followRedirects(false)
-                .followSslRedirects(false)
                 .retryOnConnectionFailure(true)
+                .applyTorClientHardening()
                 .build()
             val url = "https://${endpoint.sniHost}:${endpoint.port}${endpoint.path}"
             val body = udpQuery.toRequestBody(DNS_MESSAGE_MEDIA)
@@ -428,6 +430,12 @@ class SocksDnsBootstrapRelay(
                     }
                     ssl.soTimeout = 25_000
                     ssl.startHandshake()
+                    val hv = HttpsURLConnection.getDefaultHostnameVerifier()
+                    if (!hv.verify(endpoint.sniHost, ssl.session)) {
+                        throw SSLPeerUnverifiedException(
+                            "DoH hostname mismatch sni=${endpoint.sniHost}",
+                        )
+                    }
                     val out = BufferedOutputStream(ssl.getOutputStream())
                     val inp = BufferedInputStream(ssl.getInputStream())
                     val headers = buildString {

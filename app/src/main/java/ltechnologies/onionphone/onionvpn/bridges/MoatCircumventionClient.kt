@@ -8,6 +8,7 @@ import kotlinx.coroutines.withContext
 import ltechnologies.onionphone.onionvpn.core.model.SocksJavaProxyAuth
 import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
 import ltechnologies.onionphone.onionvpn.core.validation.path.TorSocksDns
+import ltechnologies.onionphone.onionvpn.core.vpn.net.SecureTorHttp.applyTorClientHardening
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -250,7 +251,7 @@ object MoatCircumventionClient {
         val b = OkHttpClient.Builder()
             .connectTimeout(30, TimeUnit.SECONDS)
             .readTimeout(60, TimeUnit.SECONDS)
-            .followRedirects(true)
+            .applyTorClientHardening()
         if (viaTor) {
             val port = socksPort?.takeIf { it > 0 }
                 ?: error("Tor SOCKS not ready — connect the tunnel or disable “Request via Tor”")

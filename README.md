@@ -30,7 +30,7 @@ Privacy-focused Android VPN that routes **all device traffic through Tor**, with
 | VPN | `OnionVpnService` + hev **or** onionmasq; client `10.8.0.2`, DNS `10.8.0.1` |
 | Firewall | `InteractiveFirewallEngine` on the TUN; DNS hostname cache + local reputation DB (HaGeZi / URLhaus / Yoyo / uAssets) for prompt UI |
 
-Modules: `app`, `core:model`, `core:tor`, `core:dnscrypt`, `core:vpn`, `core:validation`.
+Modules: `app`, `baselineprofile`, `core:model`, `core:tor`, `core:dnscrypt`, `core:vpn`, `core:validation`.
 
 ## Build
 
@@ -46,6 +46,28 @@ Modules: `app`, `core:model`, `core:tor`, `core:dnscrypt`, `core:vpn`, `core:val
 ```
 
 Requires JDK 21 and Android SDK. Create `local.properties` with `sdk.dir=...` (not committed).
+
+### Baseline Profiles (AOT after install)
+
+Seeded rules under `app/src/main/baselineProfiles/` cover Status, tunnel start, Compose, and VPN/Tor/DNSCrypt hot paths. `profileinstaller` compiles them on first run (sideload / Graphene / no Play).
+
+```bash
+# Optional: regenerate on a connected arm64 device (not required for normal builds)
+./gradlew :app:generateBaselineProfile
+```
+
+`automaticGenerationDuringBuild` is off so CI without a device still ships the seeded profiles.
+
+### ARM64 host builds (Termux / aarch64 CI)
+
+AGP’s Maven `aapt2` is `linux-x86_64` and otherwise needs QEMU. On aarch64:
+
+```bash
+./scripts/configure-arm-host.sh   # writes gradle/arm-host.local.properties (gitignored)
+./scripts/gradlew-arm :app:assembleDebug -Ponionphone.devAbi=arm64-v8a
+```
+
+Or copy `gradle/arm-host.local.properties.example` → `gradle/arm-host.local.properties` and set a native `aapt2` plus optional `org.gradle.java.home` (aarch64 JDK 21). `settings.gradle.kts` also auto-detects `/usr/bin/aapt2` / Termux `$PREFIX/bin/aapt2` when unset.
 
 ### Tests
 
@@ -123,6 +145,33 @@ OnionVPN ships a patched `libarti_mobile_ex.so` under `app/src/main/jniLibs/` (s
 `native/arti-mobile-ex/`) that exports `ArtiControlNative` control-api≥2 on top of the
 Maven AAR Java API. Rebuild with `./native/arti-mobile-ex/build-onionvpn.sh`.
 Uses `[patch.crates-io]` → `third_party/arti-1.7.0-onionvpn` for SOCKS exit-country.
+
+## Security / GrapheneOS
+
+OnionVPN opts into hardware **memory tagging (MTE)** with `android:memtagMode="async"` on
+`<application>` (same pattern as GrapheneOS Auditor / Camera). On MTE-capable devices the OS
+enables tagging for the app process; on other devices the attribute is ignored.
+
+**hardened_malloc** and **extended virtual address space (48-bit VA)** are GrapheneOS system
+features, not something an APK can embed. For this 64-bit-only app they are **on by default** on
+GrapheneOS. Do not disable *Native code memory tagging*, *Hardened malloc*, or *Extended virtual
+address space* for OnionVPN unless you are debugging a confirmed native memory bug.
+
+Coverage note: MTE applies most strongly to the JVM and JNI-loaded libraries (e.g. hev, arti).
+Exec’d child processes (`libtor.so`, `libdnscrypt-proxy.so`, pluggable transports via
+`ProcessBuilder`) run as separate processes under OS defaults. After enabling the tunnel on a
+GrapheneOS Pixel 8+, check logcat for `SEGV_MTEAERR` or hardened_malloc fatal notifications:
+
+```bash
+adb logcat -d | grep -E 'SEGV_MTEAERR|hardened_malloc|memtag'
+```
+
+Local packaging check (no device):
+
+```bash
+./gradlew :app:processDebugMainManifest
+./scripts/verify-memtag-manifest.sh
+```
 
 ## License
 

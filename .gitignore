@@ -2,6 +2,7 @@
 .gradle/
 **/build/
 /local.properties
+gradle/arm-host.local.properties
 /.idea/
 .DS_Store
 /captures/

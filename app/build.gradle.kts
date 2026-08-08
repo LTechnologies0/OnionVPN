@@ -4,6 +4,7 @@ plugins {
     alias(libs.plugins.kotlin.parcelize)
     alias(libs.plugins.ksp)
     alias(libs.plugins.hilt)
+    alias(libs.plugins.androidx.baselineprofile)
 }
 
 android {
@@ -14,8 +15,8 @@ android {
         applicationId = "ltechnologies.onionphone.onionvpn"
         minSdk = libs.versions.minSdk.get().toInt()
         targetSdk = libs.versions.targetSdk.get().toInt()
-        versionCode = 73
-        versionName = "0.3.66"
+        versionCode = 74
+        versionName = "0.3.67"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
@@ -29,6 +30,12 @@ android {
                 "proguard-rules.pro",
                 rootProject.file("gradle/privacy-logging.pro"),
             )
+        }
+        create("benchmark") {
+            initWith(getByName("release"))
+            signingConfig = signingConfigs.getByName("debug")
+            matchingFallbacks += listOf("release")
+            isDebuggable = false
         }
     }
 
@@ -57,6 +64,12 @@ android {
             excludes += "META-INF/versions/9/OSGI-INF/MANIFEST.MF"
         }
     }
+}
+
+// Do not regenerate profiles on every assembleRelease (needs a device / GMD).
+baselineProfile {
+    automaticGenerationDuringBuild = false
+    saveInSrc = true
 }
 
 apply(from = rootProject.file("gradle/abi-release.gradle"))
@@ -91,6 +104,10 @@ dependencies {
     implementation(libs.androidx.datastore.preferences)
     implementation(libs.androidx.navigation.compose)
     implementation(libs.androidx.biometric)
+    // Sideload / Graphene / no Play Services: ART compiles baseline.prof on first run.
+    implementation(libs.androidx.profileinstaller)
+
+    baselineProfile(project(":baselineprofile"))
 
     debugImplementation(libs.androidx.compose.ui.test.manifest)
     testImplementation(libs.junit)

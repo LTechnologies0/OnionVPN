@@ -1,0 +1,14 @@
+# ARM64 / Termux / aarch64 CI — copy to gradle/arm-host.local.properties (gitignored).
+# Or run: ./scripts/configure-arm-host.sh
+#
+# AGP downloads linux-x86_64 aapt2 from Maven; on aarch64 that needs QEMU.
+# Point at a native aapt2 instead:
+
+android.aapt2FromMavenOverride=/usr/bin/aapt2
+
+# Optional: pin aarch64 JDK 21 so the Gradle daemon does not use an x86_64 JDK via QEMU.
+# org.gradle.java.home=/usr/lib/jvm/java-21-openjdk
+#
+# Termux example:
+# android.aapt2FromMavenOverride=/data/data/com.termux/files/usr/bin/aapt2
+# org.gradle.java.home=/data/data/com.termux/files/usr/lib/jvm/java-21-openjdk

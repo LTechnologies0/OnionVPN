@@ -32,6 +32,7 @@ import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
 import ltechnologies.onionphone.onionvpn.core.model.observability.MemoryHygiene
 import ltechnologies.onionphone.onionvpn.core.tor.TorProcessManager
 import ltechnologies.onionphone.onionvpn.core.validation.path.TorSocksDns
+import ltechnologies.onionphone.onionvpn.core.vpn.net.SecureTorHttp.applyTorClientHardening
 import okhttp3.Call
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -366,8 +367,7 @@ class DomainReputationRepository @Inject constructor(
                 .connectTimeout(30, TimeUnit.SECONDS)
                 .readTimeout(45, TimeUnit.SECONDS)
                 .writeTimeout(30, TimeUnit.SECONDS)
-                .followRedirects(true)
-                .followSslRedirects(true)
+                .applyTorClientHardening()
                 .build()
                 .also { cachedHttpClient.set(probePort to it) }
         Timber.i("Domain reputation download via Tor probe SOCKS :%d", probePort)

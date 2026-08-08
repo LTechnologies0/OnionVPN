@@ -85,6 +85,8 @@ class NativeResourceProfiler(
         }
         lastCpu = null
         lastCpuAtMs = 0L
+        // Drop last Connected sample so Status "Resources" does not stay open on Idle.
+        _snapshot.value = ResourceSnapshot()
     }
 
     fun sampleNow(): ResourceSnapshot {

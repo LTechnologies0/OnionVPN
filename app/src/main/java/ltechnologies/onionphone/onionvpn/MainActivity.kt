@@ -48,6 +48,7 @@ import ltechnologies.onionphone.onionvpn.OnionVpnApplication
 import ltechnologies.onionphone.onionvpn.firewall.InteractiveFirewallEngine
 import ltechnologies.onionphone.onionvpn.security.AppLockAuthenticator
 import ltechnologies.onionphone.onionvpn.security.AppLockManager
+import timber.log.Timber
 import ltechnologies.onionphone.onionvpn.threat.repo.DomainReputationRepository
 import ltechnologies.onionphone.onionvpn.core.model.observability.DiagnosticsGate
 import ltechnologies.onionphone.onionvpn.core.tor.control.lifecycle.CircuitLifecycleManager
@@ -60,7 +61,6 @@ import ltechnologies.onionphone.onionvpn.ui.applock.AppLockGate
 import ltechnologies.onionphone.onionvpn.ui.theme.OnionVpnTheme
 import ltechnologies.onionphone.onionvpn.util.BatteryOptimization
 import ltechnologies.onionphone.onionvpn.util.WindowSecureHelper
-import timber.log.Timber
 
 @AndroidEntryPoint
 class MainActivity : FragmentActivity() {
@@ -112,10 +112,39 @@ class MainActivity : FragmentActivity() {
                         WindowSecureHelper.apply(this@MainActivity, preferences.allowScreenshots)
                     }
                     // Auto-start tunnel on app open (before / regardless of UI lock).
+                    // Debug broadcast DEBUG_START_TUNNEL also lands here (FGS-safe foreground).
                     LaunchedEffect(Unit) {
-                        val prefs = viewModel.awaitStoredPreferences()
-                        if (viewModel.shouldAutoStartTunnel(prefs)) {
+                        val debugStart = intent?.getBooleanExtra(
+                            "debug_start_tunnel",
+                            false,
+                        ) == true
+                        val debugStop = intent?.getBooleanExtra(
+                            "debug_stop_tunnel",
+                            false,
+                        ) == true
+                        if (debugStop) {
+                            appLockManager.enabled = false
+                            appLockManager.markUnlocked()
+                            Timber.i("debug_stop_tunnel — stopping tunnel")
+                            viewModel.stopTunnel()
+                        } else if (debugStart) {
+                            appLockManager.enabled = false
+                            appLockManager.markUnlocked()
+                            val prefs = viewModel.applyDebugTunnelIntent(
+                                intent?.getStringExtra("tor_engine"),
+                                intent?.getStringExtra("tun_data_plane"),
+                            )
+                            Timber.i(
+                                "debug_start_tunnel applied engine=%s plane=%s",
+                                prefs.torEngine,
+                                prefs.tunDataPlane,
+                            )
                             requestNotificationsThenStart()
+                        } else {
+                            val prefs = viewModel.awaitStoredPreferences()
+                            if (viewModel.shouldAutoStartTunnel(prefs)) {
+                                requestNotificationsThenStart()
+                            }
                         }
                     }
 
