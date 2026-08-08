@@ -37,7 +37,7 @@ jobs:
       upstream_tag: ${{ steps.cmp.outputs.new }}
       upstream_pin: ${{ steps.cmp.outputs.pin }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Latest stable tag from tpo/core/tor
         id: gl
@@ -114,7 +114,7 @@ jobs:
     if: ${{ github.event.inputs.check_upstream_only != 'true' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Resolve Tor-Android-build-script release
         id: tag
