@@ -1,5 +1,8 @@
-# Refresh Tor + PT natives when Tor-Android-build-script publishes a new release.
-# Dependabot cannot manage GitHub Release .so assets — this workflow fills that gap.
+# Tor natives updater — Dependabot cannot watch GitLab or GitHub Release .so files.
+#
+# 1) Our built binaries: LTechnologies0/Tor-Android-build-script releases → jniLibs
+# 2) Upstream little-t: https://gitlab.torproject.org/tpo/core/tor tags → tor.upstream.tag
+#    (signals when Tor-Android-build-script should rebuild from a newer Tor)
 name: Update Tor natives
 
 on:
@@ -8,27 +11,118 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tor-Android-build-script release tag (empty = latest tor-* / latest)"
+        description: "Tor-Android-build-script release tag (empty = latest tor-*)"
         required: false
         default: ""
+      check_upstream_only:
+        description: "Only check tpo/core/tor GitLab tags (no binary fetch)"
+        type: boolean
+        default: false
   repository_dispatch:
     types: [tor-natives-release]
 
 permissions:
   contents: write
   pull-requests: write
+  issues: write
 
 concurrency:
   group: update-tor-natives
   cancel-in-progress: true
 
 jobs:
-  bump:
+  # Track https://gitlab.torproject.org/tpo/core/tor — Dependabot has no GitLab ecosystem.
+  upstream-gitlab:
+    runs-on: ubuntu-latest
+    outputs:
+      upstream_new: ${{ steps.cmp.outputs.changed }}
+      upstream_tag: ${{ steps.cmp.outputs.new }}
+      upstream_pin: ${{ steps.cmp.outputs.pin }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Latest stable tag from tpo/core/tor
+        id: gl
+        run: |
+          set -euo pipefail
+          PROJECT=$(grep -E '^tor\.upstream\.project=' gradle/native-versions.properties | cut -d= -f2- | tr -d '[:space:]')
+          PROJECT="${PROJECT:-tpo/core/tor}"
+          ENC=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=''))" "$PROJECT")
+          # Prefer latest tor-0.4.9.x (stable series); skip *-alpha* / *-dev*
+          TAG=$(curl -fsSL "https://gitlab.torproject.org/api/v4/projects/${ENC}/repository/tags?per_page=30" \
+            | python3 -c '
+import json,sys,re
+tags=json.load(sys.stdin)
+pat=re.compile(r"^tor-0\.4\.9\.\d+$")
+for t in tags:
+  if pat.match(t["name"]):
+    print(t["name"]); break
+else:
+  for t in tags:
+    n=t["name"]
+    if n.startswith("tor-") and "alpha" not in n and "dev" not in n and "rc" not in n:
+      print(n); break
+')
+          test -n "$TAG"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "GitLab $PROJECT latest stable-ish: $TAG"
+
+      - name: Compare tor.upstream.tag pin
+        id: cmp
+        run: |
+          set -euo pipefail
+          PIN=$(grep -E '^tor\.upstream\.tag=' gradle/native-versions.properties | cut -d= -f2- | tr -d '[:space:]')
+          NEW="${{ steps.gl.outputs.tag }}"
+          echo "pin=$PIN" >> "$GITHUB_OUTPUT"
+          echo "new=$NEW" >> "$GITHUB_OUTPUT"
+          if [ "$PIN" = "$NEW" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: PR — bump upstream pin (rebuild Tor-Android-build-script next)
+        if: steps.cmp.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          NEW="${{ steps.cmp.outputs.new }}"
+          PIN="${{ steps.cmp.outputs.pin }}"
+          BRANCH="deps/tor-upstream-${NEW}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "$BRANCH"
+          sed -i "s/^tor\\.upstream\\.tag=.*/tor.upstream.tag=${NEW}/" gradle/native-versions.properties
+          git add gradle/native-versions.properties
+          git commit -m "build(tor): track upstream ${NEW} from tpo/core/tor"
+          git push -u origin "$BRANCH" --force
+          if ! gh pr list --head "$BRANCH" --json number -q '.[0].number' | grep -q '[0-9]'; then
+            gh pr create \
+              --title "build(tor): upstream tpo/core/tor ${NEW}" \
+              --label dependencies \
+              --body "$(cat <<EOF
+          ## Summary
+          [tpo/core/tor](https://gitlab.torproject.org/tpo/core/tor) has \`${NEW}\` (was \`${PIN}\`).
+
+          **Dependabot cannot subscribe to GitLab.** This workflow tracks upstream tags.
+
+          ### Next steps
+          1. Rebuild [Tor-Android-build-script](https://github.com/LTechnologies0/Tor-Android-build-script) against this Tor (or merge Gedsh \`prod-*\` that includes it).
+          2. Publish a \`tor-*\` GitHub Release.
+          3. Let **Update Tor natives** refresh \`tor.release.tag\` + jniLibs.
+
+          EOF
+          )"
+          fi
+
+  bump-binaries:
+    if: ${{ github.event.inputs.check_upstream_only != 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Resolve target release tag
+      - name: Resolve Tor-Android-build-script release
         id: tag
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -42,46 +136,41 @@ jobs:
           if [ -n "$INPUT" ]; then
             TAG="$INPUT"
           else
-            # Prefer newest tag matching tor-* with libtor-arm64 asset; else latest release.
-            TAG=$(gh release list --repo "$REPO" --limit 20 --json tagName,isLatest \
+            TAG=$(gh release list --repo "$REPO" --limit 20 --json tagName \
               --jq '[.[] | select(.tagName|test("^tor-"))][0].tagName // empty')
             if [ -z "$TAG" ]; then
               TAG=$(gh release view --repo "$REPO" --json tagName -q .tagName)
             fi
           fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "Resolved Tor release: $TAG"
           gh release view "$TAG" --repo "$REPO" --json assets -q '.assets[].name' | grep -q 'libtor-arm64-v8a.so'
 
-      - name: Compare with pin
+      - name: Compare tor.release.tag
         id: cmp
         run: |
           set -euo pipefail
           PIN=$(grep -E '^tor\.release\.tag=' gradle/native-versions.properties | cut -d= -f2- | tr -d '[:space:]')
           NEW="${{ steps.tag.outputs.tag }}"
           echo "pin=$PIN" >> "$GITHUB_OUTPUT"
-          echo "Pinned=$PIN  New=$NEW"
           if [ "$PIN" = "$NEW" ]; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
           else
             echo "changed=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Bump pin and fetch natives
+      - name: Bump pin and fetch natives (no InviZible)
         if: steps.cmp.outputs.changed == 'true'
         run: |
           set -euo pipefail
           NEW="${{ steps.tag.outputs.tag }}"
           sed -i "s/^tor\\.release\\.tag=.*/tor.release.tag=${NEW}/" gradle/native-versions.properties
           chmod +x scripts/fetch-native-binaries.sh
-          # Force re-download Tor/PT objects
           rm -f "${TMPDIR:-/tmp}/onionvpn-bin-fetch"/libtor-*.so \
                 "${TMPDIR:-/tmp}/onionvpn-bin-fetch"/libLyrebird-*.so \
                 "${TMPDIR:-/tmp}/onionvpn-bin-fetch"/libConjure-*.so || true
-          TOR_RELEASE_TAG="$NEW" ./scripts/fetch-native-binaries.sh
-          git status --short
+          REFRESH_HEV=0 TOR_RELEASE_TAG="$NEW" ./scripts/fetch-native-binaries.sh
 
-      - name: Open pull request
+      - name: Open pull request (binaries)
         if: steps.cmp.outputs.changed == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -99,27 +188,19 @@ jobs:
             app/src/main/jniLibs/*/libConjure.so \
             app/src/main/assets/pt_bridges.json || true
           if git diff --cached --quiet; then
-            echo "Nothing to commit"
             exit 0
           fi
           git commit -m "build(natives): bump Tor+PTs to ${NEW}"
           git push -u origin "$BRANCH" --force
-          if gh pr list --head "$BRANCH" --json number -q '.[0].number' | grep -q '[0-9]'; then
-            echo "PR already open"
-          else
+          if ! gh pr list --head "$BRANCH" --json number -q '.[0].number' | grep -q '[0-9]'; then
             gh pr create \
               --title "build(natives): Tor+PTs ${NEW}" \
               --label dependencies \
               --body "$(cat <<EOF
           ## Summary
-          - Bump \`tor.release.tag\` \`${PIN}\` → \`${NEW}\`
-          - Refresh \`libtor\` / \`libLyrebird\` / \`libConjure\` from [Tor-Android-build-script](https://github.com/LTechnologies0/Tor-Android-build-script/releases/tag/${NEW})
+          - \`tor.release.tag\` \`${PIN}\` → \`${NEW}\`
+          - Refresh libtor / Lyrebird / Conjure (DNSCrypt stays vendored — no InviZible)
 
-          Dependabot cannot update these Release assets; this workflow is the Tor/PT updater.
-
-          ## Test plan
-          - [ ] CI green
-          - [ ] Smoke: start tunnel (C Tor) on arm64 device
           EOF
           )"
           fi

@@ -1,26 +1,23 @@
 #!/usr/bin/env bash
-# Fetches Tor, DNSCrypt, hev-socks5-tunnel, and Tor pluggable transports into jniLibs.
-# Supported ABIs (matching release splits): arm64-v8a, x86_64
+# Fetches Tor + PTs (+ optional hev) into jniLibs. Does NOT download InviZible.
 #
-# Tor (C / little-t, default engine) + PTs:
-#   LTechnologies0/Tor-Android-build-script GitHub Releases (built from source there)
-#   https://github.com/LTechnologies0/Tor-Android-build-script
-#   arm64 libtor may include -fsanitize=memtag (ENABLE_MTE=1)
-#   PTs built with -Wl,-z,max-page-size=16384 (Android 16 KB pages)
-# Arti (Rust, optional engine): org.torproject:arti-mobile Maven AAR (Gradle), not this script
-# DNSCrypt + hev: InviZible Lite / sockstun APKs
-# Bridge presets JSON: Tor Browser Android pt_config.json (builtin lines only)
+# Tor (C / little-t) + PTs:
+#   LTechnologies0/Tor-Android-build-script GitHub Releases (from-source builds)
+#   Pin: gradle/native-versions.properties → tor.release.tag
+# DNSCrypt: kept as vendored app/src/main/jniLibs/*/libdnscrypt-proxy.so (not re-fetched)
+# hev-socks5-tunnel: optional refresh from sockstun APK
+# Bridge presets: Tor Browser Android pt_config.json
+#
+# Upstream Tor (tpo/core/tor) is tracked separately — see tor.upstream.tag and
+# .github/workflows/update-tor-natives.yml (Dependabot cannot watch GitLab).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="${TMPDIR:-/tmp}/onionvpn-bin-fetch"
 mkdir -p "$TMP"
 
-INVIZIBLE_X86_URL="https://github.com/Gedsh/InviZible/releases/download/v7.5.0-stable/Invizible_Lite_ver.7.5.0_x86_64.apk"
-INVIZIBLE_ARM64_URL="https://github.com/Gedsh/InviZible/releases/download/v7.5.0-stable/Invizible_Lite_ver.7.5.0_arm64.apk"
 SOCKSTUN_URL="https://github.com/heiher/sockstun/releases/download/7.0/hev.sockstun-7.0-release.apk"
 
-# Tor release pin: TOR_RELEASE_TAG env > gradle/native-versions.properties > latest
 NATIVE_PROPS="${ROOT}/gradle/native-versions.properties"
 TOR_REPO="${TOR_REPO:-LTechnologies0/Tor-Android-build-script}"
 if [[ -z "${TOR_RELEASE_TAG:-}" && -f "$NATIVE_PROPS" ]]; then
@@ -42,7 +39,6 @@ PT_ARM64_CONJURE_URL="${TOR_RELEASE_BASE}/libConjure-arm64-v8a.so"
 PT_X86_LYREBIRD_URL="${TOR_RELEASE_BASE}/libLyrebird-x86_64.so"
 PT_X86_CONJURE_URL="${TOR_RELEASE_BASE}/libConjure-x86_64.so"
 
-# Builtin bridge *lines* (not binaries) from Tor Browser Android.
 TBA_VERSION="${TBA_VERSION:-15.0}"
 TBA_ARM64_URL="https://archive.torproject.org/tor-package-archive/torbrowser/${TBA_VERSION}/tor-browser-android-aarch64-${TBA_VERSION}.apk"
 
@@ -70,9 +66,21 @@ fetch_optional() {
   return 1
 }
 
-fetch "$INVIZIBLE_X86_URL" "$TMP/invizible_x86.apk"
-fetch "$INVIZIBLE_ARM64_URL" "$TMP/invizible_arm64.apk"
-fetch "$SOCKSTUN_URL" "$TMP/sockstun.apk"
+# Require vendored DNSCrypt (no InviZible download).
+for abi in arm64-v8a x86_64; do
+  dnscrypt="$ROOT/app/src/main/jniLibs/$abi/libdnscrypt-proxy.so"
+  if [[ ! -f "$dnscrypt" ]]; then
+    echo "ERROR: missing vendored $dnscrypt" >&2
+    echo "DNSCrypt is no longer extracted from InviZible. Restore the .so or add a dedicated fetch." >&2
+    exit 1
+  fi
+  echo "OK keep DNSCrypt $abi ($(wc -c <"$dnscrypt") bytes)"
+done
+
+# Optional hev refresh (skip if REFRESH_HEV=0)
+if [[ "${REFRESH_HEV:-1}" == "1" ]]; then
+  fetch "$SOCKSTUN_URL" "$TMP/sockstun.apk"
+fi
 fetch "$TBA_ARM64_URL" "$TMP/tba_arm64.apk"
 fetch_force "$TOR_ARM64_URL" "$TMP/libtor-arm64.so"
 fetch_force "$TOR_X86_64_URL" "$TMP/libtor-x86_64.so"
@@ -83,12 +91,14 @@ fetch_optional "$PT_X86_LYREBIRD_URL" "$TMP/libLyrebird-x86_64.so" || true
 fetch_optional "$PT_X86_CONJURE_URL" "$TMP/libConjure-x86_64.so" || true
 
 install_abi() {
-  local invizible_apk="$1" jni_abi="$2" tor_so="$3" lyrebird_so="$4" conjure_so="$5"
+  local jni_abi="$1" tor_so="$2" lyrebird_so="$3" conjure_so="$4"
   local lib_dir="$ROOT/app/src/main/jniLibs/$jni_abi"
   mkdir -p "$lib_dir"
   cp -f "$tor_so" "$lib_dir/libtor.so"
-  unzip -p "$invizible_apk" "lib/$jni_abi/libdnscrypt-proxy.so" >"$lib_dir/libdnscrypt-proxy.so"
-  unzip -p "$TMP/sockstun.apk" "lib/$jni_abi/libhev-socks5-tunnel.so" >"$lib_dir/libhev-socks5-tunnel.so"
+  # DNSCrypt: leave existing vendored binary in place
+  if [[ "${REFRESH_HEV:-1}" == "1" && -f "$TMP/sockstun.apk" ]]; then
+    unzip -p "$TMP/sockstun.apk" "lib/$jni_abi/libhev-socks5-tunnel.so" >"$lib_dir/libhev-socks5-tunnel.so"
+  fi
 
   rm -f "$lib_dir"/libobfs4proxy.so "$lib_dir"/libsnowflake.so \
         "$lib_dir"/libLyrebird.so "$lib_dir"/libConjure.so
@@ -105,15 +115,14 @@ install_abi() {
   chmod +x "$lib_dir"/*.so
   local conjure_sz=0
   [[ -f "$lib_dir/libConjure.so" ]] && conjure_sz=$(wc -c <"$lib_dir/libConjure.so")
-  echo "OK $jni_abi tor=$(wc -c <"$lib_dir/libtor.so") lyrebird=$(wc -c <"$lib_dir/libLyrebird.so") conjure=$conjure_sz"
+  echo "OK $jni_abi tor=$(wc -c <"$lib_dir/libtor.so") lyrebird=$(wc -c <"$lib_dir/libLyrebird.so") conjure=$conjure_sz dnscrypt=$(wc -c <"$lib_dir/libdnscrypt-proxy.so")"
 }
 
-install_abi "$TMP/invizible_arm64.apk" "arm64-v8a" "$TMP/libtor-arm64.so" \
+install_abi "arm64-v8a" "$TMP/libtor-arm64.so" \
   "$TMP/libLyrebird-arm64.so" "$TMP/libConjure-arm64.so"
-install_abi "$TMP/invizible_x86.apk" "x86_64" "$TMP/libtor-x86_64.so" \
+install_abi "x86_64" "$TMP/libtor-x86_64.so" \
   "${TMP}/libLyrebird-x86_64.so" "${TMP}/libConjure-x86_64.so"
 
-# Builtin bridge lines from TBA pt_config.json
 python3 - "$ROOT" "$TMP/tba_arm64.apk" "$TBA_VERSION" <<'PY'
 import json, zipfile, pathlib, sys
 root = pathlib.Path(sys.argv[1])
@@ -136,4 +145,4 @@ print("Wrote", path)
 PY
 
 echo "Native binaries installed under app/src/main/jniLibs/"
-echo "Tor+PTs: ${TOR_REPO} @ ${TOR_RELEASE_LABEL} | presets: TBA ${TBA_VERSION}"
+echo "Tor+PTs: ${TOR_REPO} @ ${TOR_RELEASE_LABEL} | DNSCrypt: vendored | presets: TBA ${TBA_VERSION}"

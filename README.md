@@ -115,8 +115,16 @@ Refresh with `scripts/fetch-native-binaries.sh`:
   (from-source GitHub Actions builds; GitHub Release `libtor-*.so`, MTE on arm64) — default engine
 - **Arti (Rust)** — [arti-mobile](https://gitlab.com/guardianproject/tormobile/arti-mobile) Maven AAR
   (`org.torproject:arti-mobile`) ships `libarti_mobile_ex.so`; select **Arti** under Settings → Tor
-- **DNSCrypt** — InviZible Lite **v7.5.0** APK extract
-- **hev-socks5-tunnel** — sockstun APK extract
+- **DNSCrypt** — vendored `libdnscrypt-proxy.so` in `jniLibs` (no longer extracted from InviZible)
+- **hev-socks5-tunnel** — sockstun APK extract (optional refresh via `REFRESH_HEV=1`)
+
+Pins live in `gradle/native-versions.properties` (`tor.release.tag`, `tor.upstream.tag`).
+**Dependabot** only covers Gradle + Actions — it cannot watch GitLab or Release `.so` files.
+Weekly workflow [`.github/workflows/update-tor-natives.yml`](.github/workflows/update-tor-natives.yml) polls
+[tpo/core/tor](https://gitlab.torproject.org/tpo/core/tor) tags and our Tor-Android-build-script releases.
+
+Standalone check (Bionic-only `NEEDED`): `./scripts/verify-jniLibs-standalone.sh`
+(CI runs it soft-fail until a Tor release with static zlib lands).
 
 There is **no** runtime Tor binary OTA; ship updates by refreshing jniLibs / AAR and releasing a new OnionVPN APK.
 

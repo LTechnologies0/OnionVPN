@@ -1,8 +1,11 @@
-# Dependabot cannot bump GitHub Release .so assets (libtor / Lyrebird / Conjure).
-# Those are pinned in gradle/native-versions.properties and refreshed by
-# .github/workflows/update-tor-natives.yml (weekly + manual).
+# Dependabot covers Maven/Gradle (e.g. arti-mobile) and GitHub Actions only.
 #
-# This file covers Maven/Gradle deps (e.g. arti-mobile) and Actions only.
+# It CANNOT watch:
+#   - https://gitlab.torproject.org/tpo/core/tor  (no GitLab ecosystem)
+#   - GitHub Release .so assets (libtor / Lyrebird / Conjure)
+#
+# Those are handled by .github/workflows/update-tor-natives.yml using pins in
+# gradle/native-versions.properties (tor.release.tag + tor.upstream.tag).
 version: 2
 updates:
   - package-ecosystem: gradle
@@ -19,8 +22,6 @@ updates:
     open-pull-requests-limit: 3
     labels:
       - dependencies
-    # Surface Tor-related Maven artifacts in their own PR when they move.
-    ignore: []
 
   - package-ecosystem: github-actions
     directory: /

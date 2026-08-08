@@ -100,6 +100,13 @@ jobs:
           done < <(find app/src/main/jniLibs -name '*.so' -type f 2>/dev/null || true)
           exit "$found"
 
+      - name: Native .so standalone NEEDED allowlist
+        run: |
+          chmod +x scripts/verify-jniLibs-standalone.sh
+          ./scripts/verify-jniLibs-standalone.sh
+        # Soft-fail until Tor rebuild ships static zlib (libtor currently NEEDs libz.so).
+        continue-on-error: true
+
       - name: Verify MTE memtagMode=async (merged manifest)
         run: |
           chmod +x scripts/verify-memtag-manifest.sh
