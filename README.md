@@ -124,7 +124,7 @@ Weekly workflow [`.github/workflows/update-tor-natives.yml`](.github/workflows/u
 [tpo/core/tor](https://gitlab.torproject.org/tpo/core/tor) tags and our Tor-Android-build-script releases.
 
 Standalone check (Bionic-only `NEEDED`): `./scripts/verify-jniLibs-standalone.sh`
-(CI runs it soft-fail until a Tor release with static zlib lands).
+(CI enforces this; Tor ships with static zlib).
 
 There is **no** runtime Tor binary OTA; ship updates by refreshing jniLibs / AAR and releasing a new OnionVPN APK.
 

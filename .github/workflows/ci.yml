@@ -104,8 +104,6 @@ jobs:
         run: |
           chmod +x scripts/verify-jniLibs-standalone.sh
           ./scripts/verify-jniLibs-standalone.sh
-        # Soft-fail until Tor rebuild ships static zlib (libtor currently NEEDs libz.so).
-        continue-on-error: true
 
       - name: Verify MTE memtagMode=async (merged manifest)
         run: |
