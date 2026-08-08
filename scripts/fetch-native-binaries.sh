@@ -3,8 +3,9 @@
 # Supported ABIs (matching release splits): arm64-v8a, x86_64
 #
 # Tor (C / little-t, default engine) + PTs:
-#   LTechnologies0/Tor-Android-build-script GitHub Releases
+#   LTechnologies0/Tor-Android-build-script GitHub Releases (built from source there)
 #   https://github.com/LTechnologies0/Tor-Android-build-script
+#   arm64 libtor may include -fsanitize=memtag (ENABLE_MTE=1)
 #   PTs built with -Wl,-z,max-page-size=16384 (Android 16 KB pages)
 # Arti (Rust, optional engine): org.torproject:arti-mobile Maven AAR (Gradle), not this script
 # DNSCrypt + hev: InviZible Lite / sockstun APKs

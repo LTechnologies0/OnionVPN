@@ -100,6 +100,11 @@ jobs:
           done < <(find app/src/main/jniLibs -name '*.so' -type f 2>/dev/null || true)
           exit "$found"
 
+      - name: Verify MTE memtagMode=async (merged manifest)
+        run: |
+          chmod +x scripts/verify-memtag-manifest.sh
+          ./scripts/verify-memtag-manifest.sh
+
       - name: Upload debug APK artifact
         uses: actions/upload-artifact@v4
         with:

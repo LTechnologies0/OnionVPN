@@ -112,7 +112,7 @@ Prebuilt Tor / DNSCrypt and hev-socks5-tunnel live under `app/src/main/jniLibs/{
 Refresh with `scripts/fetch-native-binaries.sh`:
 
 - **Tor (C / little-t)** — [LTechnologies0/Tor-Android-build-script](https://github.com/LTechnologies0/Tor-Android-build-script)
-  (our fork of Gedsh’s Android Tor build; GitHub Release `libtor-*.so`) — default engine
+  (from-source GitHub Actions builds; GitHub Release `libtor-*.so`, MTE on arm64) — default engine
 - **Arti (Rust)** — [arti-mobile](https://gitlab.com/guardianproject/tormobile/arti-mobile) Maven AAR
   (`org.torproject:arti-mobile`) ships `libarti_mobile_ex.so`; select **Arti** under Settings → Tor
 - **DNSCrypt** — InviZible Lite **v7.5.0** APK extract
@@ -150,17 +150,26 @@ Uses `[patch.crates-io]` → `third_party/arti-1.7.0-onionvpn` for SOCKS exit-co
 
 OnionVPN opts into hardware **memory tagging (MTE)** with `android:memtagMode="async"` on
 `<application>` (same pattern as GrapheneOS Auditor / Camera). On MTE-capable devices the OS
-enables tagging for the app process; on other devices the attribute is ignored.
+enables tagging for the **app process**; on other devices the attribute is ignored.
+
+CI runs `./scripts/verify-memtag-manifest.sh` after assemble so a dependency merge cannot
+silently clear `memtagMode` or set it to `off`/`none`.
+
+**What MTE covers in this app**
+
+| Component | How loaded | MTE |
+|-----------|------------|-----|
+| JVM / Compose / Hilt | app process | Yes (`memtagMode=async`) |
+| JNI `.so` (hev, arti, onionmasq, …) | `System.loadLibrary` in app process | Yes (same process) |
+| `libtor.so` (C Tor) | `ProcessBuilder` / exec | Child process; **arm64 builds from [Tor-Android-build-script](https://github.com/LTechnologies0/Tor-Android-build-script) use `-fsanitize=memtag`** when `ENABLE_MTE=1` |
+| DNSCrypt / Lyrebird / Conjure | exec | Child process under OS defaults (Go PTs are not MTE-instrumented) |
 
 **hardened_malloc** and **extended virtual address space (48-bit VA)** are GrapheneOS system
 features, not something an APK can embed. For this 64-bit-only app they are **on by default** on
 GrapheneOS. Do not disable *Native code memory tagging*, *Hardened malloc*, or *Extended virtual
 address space* for OnionVPN unless you are debugging a confirmed native memory bug.
 
-Coverage note: MTE applies most strongly to the JVM and JNI-loaded libraries (e.g. hev, arti).
-Exec’d child processes (`libtor.so`, `libdnscrypt-proxy.so`, pluggable transports via
-`ProcessBuilder`) run as separate processes under OS defaults. After enabling the tunnel on a
-GrapheneOS Pixel 8+, check logcat for `SEGV_MTEAERR` or hardened_malloc fatal notifications:
+After enabling the tunnel on a GrapheneOS Pixel 8+, check logcat:
 
 ```bash
 adb logcat -d | grep -E 'SEGV_MTEAERR|hardened_malloc|memtag'
@@ -172,6 +181,9 @@ Local packaging check (no device):
 ./gradlew :app:processDebugMainManifest
 ./scripts/verify-memtag-manifest.sh
 ```
+
+Tor / PT binaries are built from source by LTechnologies0 (no third-party CI republish); refresh with
+`./scripts/fetch-native-binaries.sh` after a new `tor-*` release.
 
 ## License
 
