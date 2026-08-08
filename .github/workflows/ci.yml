@@ -79,7 +79,10 @@ jobs:
       - name: Native .so strings denylist
         run: |
           set -euo pipefail
-          DENY='(api[_-]?key|secret[_-]?key|BEGIN (RSA |OPENSSH )?PRIVATE KEY|AKIA[0-9A-Z]{16})'
+          # High-confidence leaked material only. Do NOT match bare secret_key /
+          # api_key — Tor, Arti, DNSCrypt, and PTs embed those as crypto API names
+          # (ed25519_secret_key_*, SecretKey, TLS "master secret", …).
+          DENY='(-----BEGIN ([A-Z0-9]+ )?PRIVATE KEY-----|AKIA[0-9A-Z]{16})'
           found=0
           while IFS= read -r so; do
             size=$(stat -c%s "$so" 2>/dev/null || stat -f%z "$so")
@@ -87,8 +90,10 @@ jobs:
               echo "::warning::$so is >50MB — track with Git LFS (see docs/TUN_DATA_PLANE.md)"
             fi
             if command -v strings >/dev/null 2>&1; then
-              if strings -n 8 "$so" | grep -Eiq "$DENY"; then
+              hits=$(strings -n 8 "$so" | grep -Ei "$DENY" || true)
+              if [ -n "$hits" ]; then
                 echo "::error::Suspicious strings in $so"
+                printf '%s\n' "$hits" | head -20
                 found=1
               fi
             fi
