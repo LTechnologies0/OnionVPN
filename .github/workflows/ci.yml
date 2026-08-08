@@ -60,13 +60,12 @@ jobs:
             ./scripts/fetch-native-binaries.sh
           fi
 
-      # Instrument before the only compile pass so CodeQL sees kotlinc/javac
-      # without a second clean --rerun-tasks rebuild.
+      # Extract without traced build — Gradle daemon/build-cache often hides kotlinc from CodeQL.
       - name: Initialize CodeQL
         uses: github/codeql-action/init@v4
         with:
           languages: java-kotlin
-          build-mode: manual
+          build-mode: none
 
       - name: Test and assemble debug (arm64-v8a)
         run: >

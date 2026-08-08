@@ -2,12 +2,11 @@
 #
 # 1) Our built binaries: LTechnologies0/Tor-Android-build-script releases → jniLibs
 # 2) Upstream little-t: https://gitlab.torproject.org/tpo/core/tor tags → tor.upstream.tag
-#    (signals when Tor-Android-build-script should rebuild from a newer Tor)
 name: Update Tor natives
 
 on:
   schedule:
-    - cron: "0 8 * * 1" # Mondays 08:00 UTC
+    - cron: "0 8 * * 1"
   workflow_dispatch:
     inputs:
       tag:
@@ -31,7 +30,6 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Track https://gitlab.torproject.org/tpo/core/tor — Dependabot has no GitLab ecosystem.
   upstream-gitlab:
     runs-on: ubuntu-latest
     outputs:
@@ -47,22 +45,31 @@ jobs:
           set -euo pipefail
           PROJECT=$(grep -E '^tor\.upstream\.project=' gradle/native-versions.properties | cut -d= -f2- | tr -d '[:space:]')
           PROJECT="${PROJECT:-tpo/core/tor}"
-          ENC=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=''))" "$PROJECT")
-          # Prefer latest tor-0.4.9.x (stable series); skip *-alpha* / *-dev*
-          TAG=$(curl -fsSL "https://gitlab.torproject.org/api/v4/projects/${ENC}/repository/tags?per_page=30" \
-            | python3 -c '
-import json,sys,re
-tags=json.load(sys.stdin)
-pat=re.compile(r"^tor-0\.4\.9\.\d+$")
-for t in tags:
-  if pat.match(t["name"]):
-    print(t["name"]); break
-else:
-  for t in tags:
-    n=t["name"]
-    if n.startswith("tor-") and "alpha" not in n and "dev" not in n and "rc" not in n:
-      print(n); break
-')
+          export PROJECT
+          TAG=$(python3 <<'PY'
+          import json, os, re, urllib.parse, urllib.request
+
+          project = os.environ["PROJECT"]
+          enc = urllib.parse.quote(project, safe="")
+          req = urllib.request.Request(
+              f"https://gitlab.torproject.org/api/v4/projects/{enc}/repository/tags?per_page=30",
+              headers={"User-Agent": "onionvpn-tor-natives"},
+          )
+          with urllib.request.urlopen(req) as r:
+              tags = json.load(r)
+          pat = re.compile(r"^tor-0\.4\.9\.\d+$")
+          for t in tags:
+              if pat.match(t["name"]):
+                  print(t["name"])
+                  break
+          else:
+              for t in tags:
+                  n = t["name"]
+                  if n.startswith("tor-") and "alpha" not in n and "dev" not in n and "rc" not in n:
+                      print(n)
+                      break
+          PY
+          )
           test -n "$TAG"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "GitLab $PROJECT latest stable-ish: $TAG"
@@ -81,7 +88,7 @@ else:
             echo "changed=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: PR — bump upstream pin (rebuild Tor-Android-build-script next)
+      - name: PR — bump upstream pin
         if: steps.cmp.outputs.changed == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -100,20 +107,7 @@ else:
           if ! gh pr list --head "$BRANCH" --json number -q '.[0].number' | grep -q '[0-9]'; then
             gh pr create \
               --title "build(tor): upstream tpo/core/tor ${NEW}" \
-              --label dependencies \
-              --body "$(cat <<EOF
-          ## Summary
-          [tpo/core/tor](https://gitlab.torproject.org/tpo/core/tor) has \`${NEW}\` (was \`${PIN}\`).
-
-          **Dependabot cannot subscribe to GitLab.** This workflow tracks upstream tags.
-
-          ### Next steps
-          1. Rebuild [Tor-Android-build-script](https://github.com/LTechnologies0/Tor-Android-build-script) against this Tor (or merge Gedsh \`prod-*\` that includes it).
-          2. Publish a \`tor-*\` GitHub Release.
-          3. Let **Update Tor natives** refresh \`tor.release.tag\` + jniLibs.
-
-          EOF
-          )"
+              --body "tpo/core/tor has ${NEW} (was ${PIN}). Rebuild Tor-Android-build-script, then refresh OnionVPN natives."
           fi
 
   bump-binaries:
@@ -158,7 +152,7 @@ else:
             echo "changed=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Bump pin and fetch natives (no InviZible)
+      - name: Bump pin and fetch natives
         if: steps.cmp.outputs.changed == 'true'
         run: |
           set -euo pipefail
@@ -195,12 +189,5 @@ else:
           if ! gh pr list --head "$BRANCH" --json number -q '.[0].number' | grep -q '[0-9]'; then
             gh pr create \
               --title "build(natives): Tor+PTs ${NEW}" \
-              --label dependencies \
-              --body "$(cat <<EOF
-          ## Summary
-          - \`tor.release.tag\` \`${PIN}\` → \`${NEW}\`
-          - Refresh libtor / Lyrebird / Conjure (DNSCrypt stays vendored — no InviZible)
-
-          EOF
-          )"
+              --body "tor.release.tag ${PIN} → ${NEW}. DNSCrypt stays vendored."
           fi
