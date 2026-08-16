@@ -202,6 +202,23 @@ object TorNetPolicy {
         return true
     }
 
+    /**
+     * True when this IPv4 datagram is a fragment (offset > 0 or MF set).
+     * Non-first fragments lack a full L4 header — must never be torrified as TCP/UDP.
+     * Bytes 6-7: flags (3 bits) + fragment offset (13 bits). MF = 0x2000.
+     */
+    fun isIpv4Fragment(packet: ByteArray, length: Int): Boolean {
+        if (length < 8 || packet.size < 8) return false
+        val fragField = ((packet[6].toInt() and 0xff) shl 8) or (packet[7].toInt() and 0xff)
+        val offset = fragField and 0x1fff
+        val moreFragments = (fragField and 0x2000) != 0
+        return offset != 0 || moreFragments
+    }
+
+    /** First-fragment / unfragmented IPv4 with sane header — safe to inspect L4. */
+    fun isTorrifiableIpv4Datagram(packet: ByteArray, length: Int): Boolean =
+        isWellFormedIpv4Packet(packet, length) && !isIpv4Fragment(packet, length)
+
     fun isWellFormedIpv6Packet(packet: ByteArray, length: Int): Boolean {
         if (length < 40 || packet.size < length) return false
         val version = (packet[0].toInt() ushr 4) and 0x0f

@@ -35,6 +35,7 @@ import ltechnologies.onionphone.onionvpn.core.tor.lifecycle.TorReadiness
 import okhttp3.Dns
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import ltechnologies.onionphone.onionvpn.core.model.net.SecureTorHttp.applyTorClientHardening
 import org.torproject.arti.ArtiControlNative
 import timber.log.Timber
 
@@ -1378,9 +1379,7 @@ class TorProcessManager(
                     .dns(GeoIpTorSocksDns)
                     .connectTimeout(20, TimeUnit.SECONDS)
                     .readTimeout(180, TimeUnit.SECONDS)
-                    .followRedirects(false)
-                    .followSslRedirects(false)
-                    .connectionSpecs(listOf(okhttp3.ConnectionSpec.MODERN_TLS))
+                    .applyTorClientHardening()
                     .build()
                 val request = Request.Builder()
                     .url(url)
@@ -1432,12 +1431,12 @@ class TorProcessManager(
 
     private fun killOrphanedProcesses() {
         runCatching {
-            val proc = Runtime.getRuntime()
-                .exec(arrayOf("sh", "-c", "pkill -f ${binaryFile.name} 2>/dev/null || true"))
+            // No shell: binaryFile.name is our extracted .so basename (no user input).
+            val proc = ProcessBuilder("pkill", "-f", "--", binaryFile.name)
+                .redirectErrorStream(true)
+                .start()
             try {
-                // Drain pipes so the helper cannot fill buffers and hang; close FDs.
                 proc.inputStream.use { it.readBytes() }
-                proc.errorStream.use { it.readBytes() }
                 proc.waitFor()
             } finally {
                 proc.destroyForcibly()

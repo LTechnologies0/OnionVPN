@@ -1,11 +1,12 @@
 package ltechnologies.onionphone.onionvpn.core.vpn.forwarder
 
-import java.util.concurrent.atomic.AtomicLong
-
 /**
  * Inject ICMP/ICMPv6 "port unreachable" into the TUN when we blackhole UDP
  * (QUIC/HTTP3, STUN, …). Silent drops make Chromium wait a long QUIC timeout
  * before falling back to TCP; an unreachable error triggers that fallback fast.
+ *
+ * Rate-limiting is per-flow via [TunRejectEmitGate] so Happy-Eyeballs bursts
+ * still get a reject on each distinct 5-tuple.
  */
 internal object IcmpUnreachable {
     private const val PROTO_ICMP = 1
@@ -16,21 +17,19 @@ internal object IcmpUnreachable {
     private const val ICMPV6_DEST_UNREACH = 1
     private const val ICMPV6_PORT_UNREACH = 4
 
-    /** Min spacing between ICMP replies (DoS / TUN flood guard). */
-    private const val MIN_INTERVAL_NS = 2_000_000L // 2ms
-    private val lastEmitNs = AtomicLong(0)
-
     /**
      * @return IPv4 or IPv6 ICMP packet, or null if not applicable / rate-limited.
      */
     fun buildForBlackholedUdp(original: ByteArray, length: Int): ByteArray? {
         if (length < 28) return null
-        val now = System.nanoTime()
-        val prev = lastEmitNs.get()
-        if (now - prev < MIN_INTERVAL_NS) return null
-        if (!lastEmitNs.compareAndSet(prev, now)) return null
-
         val version = (original[0].toInt() ushr 4) and 0x0f
+        val key = when (version) {
+            4 -> TunRejectEmitGate.flowKeyUdpV4(original, length)
+            6 -> TunRejectEmitGate.flowKeyUdpV6(original, length)
+            else -> null
+        } ?: return null
+        if (!TunRejectEmitGate.tryAcquire(key)) return null
+
         return when (version) {
             4 -> buildIpv4PortUnreachable(original, length)
             6 -> buildIpv6PortUnreachable(original, length)

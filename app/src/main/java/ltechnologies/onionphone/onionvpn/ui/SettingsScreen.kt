@@ -38,6 +38,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import android.content.Intent
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -68,6 +69,8 @@ import ltechnologies.onionphone.onionvpn.ui.settings.TorCountryCatalog
 import ltechnologies.onionphone.onionvpn.ui.settings.TorNodePickerDialog
 import ltechnologies.onionphone.onionvpn.util.BatteryOptimization
 import ltechnologies.onionphone.onionvpn.util.SystemSecurityIntents
+import ltechnologies.onionphone.onionvpn.service.TunnelForegroundService
+
 @Composable
 fun SettingsScreen(
     preferences: TunnelPreferences,
@@ -1135,7 +1138,11 @@ fun SettingsScreen(
                                 } else {
                                     org.torproject.onionmasq.OnionMasq.setCountryCode(cc.uppercase())
                                 }
-                                org.torproject.onionmasq.OnionMasq.refreshCircuits()
+                                // NEWNYM path also refreshCircuits + rotates IsolationTokens.
+                                bridgeCtx.startService(
+                                    Intent(bridgeCtx, TunnelForegroundService::class.java)
+                                        .setAction(TunnelForegroundService.ACTION_NEWNYM),
+                                )
                             }.onFailure { timber.log.Timber.w(it, "live exit country apply") }
                         }
                     }

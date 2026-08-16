@@ -51,6 +51,8 @@ class TorStatusListParserTest {
         assertEquals(10087, TunnelEndpoints.uidFromSocksUser("u10087-n3"))
         assertEquals("u10087-n2", TunnelEndpoints.socksUserForUid(10087, epoch = 2))
         assertEquals("dnscrypt-n2", TunnelEndpoints.dnsCryptSocksUser(2))
+        assertEquals(TunnelEndpoints.SOCKS_DNSCRYPT_PASS, TunnelEndpoints.socksDnsCryptPass())
+        assertEquals(TunnelEndpoints.SOCKS_PROBE_PASS, TunnelEndpoints.socksProbePass())
     }
 
     @Test

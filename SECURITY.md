@@ -11,6 +11,10 @@ Report vulnerabilities privately via GitHub **Security → Advisories → New dr
 - DNS bypass of DNSCrypt / FakeDNS path
 - Credential or keystore exposure in CI or repo
 
+## CVE tracking
+
+Known public CVEs mapped to pins and mitigations: [docs/CVE_INVENTORY.md](docs/CVE_INVENTORY.md).
+
 ## CI signing
 
 Release keystores are provided only via GitHub Actions secrets (`RELEASE_KEYSTORE_*`). Never commit `keystore.properties` or `.jks` files.

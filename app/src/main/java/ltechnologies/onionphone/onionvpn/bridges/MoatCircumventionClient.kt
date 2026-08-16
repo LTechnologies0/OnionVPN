@@ -8,7 +8,7 @@ import kotlinx.coroutines.withContext
 import ltechnologies.onionphone.onionvpn.core.model.SocksJavaProxyAuth
 import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
 import ltechnologies.onionphone.onionvpn.core.validation.path.TorSocksDns
-import ltechnologies.onionphone.onionvpn.core.vpn.net.SecureTorHttp.applyTorClientHardening
+import ltechnologies.onionphone.onionvpn.core.model.net.SecureTorHttp.applyTorClientHardening
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request

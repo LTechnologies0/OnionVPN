@@ -217,19 +217,24 @@ object TunnelEndpoints {
     /**
      * Global app SOCKS IsolationToken epoch. Bumped on NEWNYM (all planes) so
      * KeepAliveIsolateSOCKSAuth cannot reuse pre-NEWNYM identity.
+     *
+     * Passwords stay deterministic (`p{uid}`, `resolver`, `check`) so the onionmasq
+     * SOCKS sidecar allowlist (`socks_auth_ok`) and C Tor IsolateSOCKSAuth agree.
+     * Local forging of `u{uid}/p{uid}` is mitigated by SocksPolicy 127.0.0.1 +
+     * [SocksUidBridge] peer-UID gate — not by password entropy.
      */
-    @JvmField
-    @Volatile
-    var appSocksNymEpoch: Int = 0
+    private val appSocksNymEpochRef = java.util.concurrent.atomic.AtomicInteger(0)
 
-    fun bumpAppSocksNymEpoch(): Int {
-        val next = appSocksNymEpoch + 1
-        appSocksNymEpoch = next
-        return next
-    }
+    var appSocksNymEpoch: Int
+        get() = appSocksNymEpochRef.get()
+        set(value) {
+            appSocksNymEpochRef.set(value)
+        }
+
+    fun bumpAppSocksNymEpoch(): Int = appSocksNymEpochRef.incrementAndGet()
 
     fun resetAppSocksNymEpoch() {
-        appSocksNymEpoch = 0
+        appSocksNymEpochRef.set(0)
     }
 
     fun socksUserForUid(uid: Int, epoch: Int = appSocksNymEpoch): String {
@@ -241,6 +246,15 @@ object TunnelEndpoints {
         if (uid < 0) return SOCKS_UNKNOWN_PASS
         return if (epoch > 0) "p$uid-n$epoch" else "p$uid"
     }
+
+    /** DNSCrypt SOCKS password (fixed role secret — must match onionmasq allowlist). */
+    fun socksDnsCryptPass(): String = SOCKS_DNSCRYPT_PASS
+
+    /** Probe SOCKS password (fixed role secret — must match onionmasq allowlist). */
+    fun socksProbePass(): String = SOCKS_PROBE_PASS
+
+    /** PAC fallback password (prefer per-UID [socksPassForUid]). */
+    fun socksPacPass(): String = SOCKS_PAC_PASS
 
     /** Parse `u{uid}`, `u{uid}-n{epoch}`, or unknown sentinel. */
     fun uidFromSocksUser(user: String): Int? {

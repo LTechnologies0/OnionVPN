@@ -79,7 +79,7 @@ object LeakPacketFilter {
      * IPv4 or IPv6 TCP (except TCP DNS/DoT) → true.
      */
     fun isTorrifiableTcp(packet: ByteArray, length: Int): Boolean {
-        if (length < 20) return false
+        if (length < 20 || length > packet.size) return false
         val version = (packet[0].toInt() ushr 4) and 0x0f
         return when (version) {
             4 -> isTorrifiableIpv4Tcp(packet, length)
@@ -90,7 +90,8 @@ object LeakPacketFilter {
 
     /** @deprecated Prefer [isTorrifiableTcp]. */
     fun isTorrifiableIpv4Tcp(packet: ByteArray, length: Int): Boolean {
-        if (length < 20) return false
+        if (length < 20 || length > packet.size) return false
+        if (!TorNetPolicy.isTorrifiableIpv4Datagram(packet, length)) return false
         val version = (packet[0].toInt() ushr 4) and 0x0f
         if (version != 4) return false
         if (isMulticastOrBroadcastV4(packet)) return false
@@ -101,7 +102,8 @@ object LeakPacketFilter {
     }
 
     fun isTorrifiableIpv6Tcp(packet: ByteArray, length: Int): Boolean {
-        if (length < 40) return false
+        if (length < 40 || length > packet.size) return false
+        if (!TorNetPolicy.isWellFormedIpv6Packet(packet, length)) return false
         val version = (packet[0].toInt() ushr 4) and 0x0f
         if (version != 6) return false
         if (isMulticastOrLinkLocalV6(packet)) return false
@@ -121,10 +123,13 @@ object LeakPacketFilter {
 
     /** True when IPv4 or IPv6 UDP dest port is 53 (TunDnsMux → DNSCrypt). */
     fun isDnsUdpPort53(packet: ByteArray, length: Int): Boolean {
-        if (length < 28) return false
+        if (length < 28 || length > packet.size) return false
         val version = (packet[0].toInt() ushr 4) and 0x0f
         return when (version) {
             4 -> {
+                // Non-first / MF fragments: L4 ports are not trustworthy — never divert.
+                if (TorNetPolicy.isIpv4Fragment(packet, length)) return false
+                if (!TorNetPolicy.isWellFormedIpv4Packet(packet, length)) return false
                 val ihl = (packet[0].toInt() and 0x0f) * 4
                 if (length < ihl + 8) return false
                 if (packet[9].toInt() and 0xff != PROTO_UDP) return false
@@ -139,7 +144,7 @@ object LeakPacketFilter {
 
     /** IPv6 UDP/53 — diverted by TunDnsMux (same as IPv4). */
     fun isIpv6DnsUdpPort53(packet: ByteArray, length: Int): Boolean {
-        if (length < 40 + 8) return false
+        if (length < 40 + 8 || length > packet.size) return false
         val version = (packet[0].toInt() and 0xf0) ushr 4
         if (version != 6) return false
         if (packet[6].toInt() and 0xff != PROTO_UDP) return false
@@ -150,10 +155,12 @@ object LeakPacketFilter {
 
     /** TCP DNS (53) or DoT (853) — blackhole so apps use UDP/53 → DNSCrypt. */
     fun isDnsTcpPort(packet: ByteArray, length: Int): Boolean {
-        if (length < 40) return false
+        if (length < 40 || length > packet.size) return false
         val version = (packet[0].toInt() ushr 4) and 0x0f
         return when (version) {
             4 -> {
+                if (TorNetPolicy.isIpv4Fragment(packet, length)) return false
+                if (!TorNetPolicy.isWellFormedIpv4Packet(packet, length)) return false
                 val ihl = (packet[0].toInt() and 0x0f) * 4
                 if (length < ihl + 20) return false
                 if (packet[9].toInt() and 0xff != PROTO_TCP) return false
@@ -162,6 +169,7 @@ object LeakPacketFilter {
                 destPort == 53 || destPort == 853
             }
             6 -> {
+                if (!TorNetPolicy.isWellFormedIpv6Packet(packet, length)) return false
                 if (length < 40 + 20) return false
                 if (packet[6].toInt() and 0xff != PROTO_TCP) return false
                 val destPort = ((packet[40 + 2].toInt() and 0xff) shl 8) or
@@ -181,7 +189,7 @@ object LeakPacketFilter {
     }
 
     fun classifyBlackholeReason(packet: ByteArray, length: Int): BlackholeReason {
-        if (length < 20) return BlackholeReason.GenericUdp
+        if (length < 20 || length > packet.size) return BlackholeReason.GenericUdp
         val version = (packet[0].toInt() ushr 4) and 0x0f
         if (version == 6) {
             if (isMulticastOrLinkLocalV6(packet)) return BlackholeReason.Multicast
@@ -273,10 +281,13 @@ object LeakPacketFilter {
      * Private / CGNAT / loopback / VpnTun / documentation IPv4 TCP and non-DNS UDP drop.
      */
     fun shouldDropEarly(packet: ByteArray, length: Int): Boolean {
-        if (length < 20) return true
+        if (length < 20 || length > packet.size) return true
         val version = (packet[0].toInt() ushr 4) and 0x0f
         return when (version) {
             4 -> {
+                if (!TorNetPolicy.isWellFormedIpv4Packet(packet, length)) return true
+                // Fragments lack a reliable L4 header on non-first pieces — never divert/torrify.
+                if (TorNetPolicy.isIpv4Fragment(packet, length)) return true
                 if (isMulticastOrBroadcastV4(packet)) return true
                 if (isLinkLocalV4(packet)) return true
                 val proto = packet[9].toInt() and 0xff
@@ -295,6 +306,7 @@ object LeakPacketFilter {
             }
             6 -> {
                 if (length < 40) return true
+                if (!TorNetPolicy.isWellFormedIpv6Packet(packet, length)) return true
                 if (isMulticastOrLinkLocalV6(packet)) return true
                 val next = packet[6].toInt() and 0xff
                 when (next) {

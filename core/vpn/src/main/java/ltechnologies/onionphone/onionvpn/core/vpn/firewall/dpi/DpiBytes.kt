@@ -9,9 +9,19 @@ internal object DpiBytes {
         length: Int,
         info: IpPacketInfo,
     ): Int? {
-        if (length < 20) return null
-        val ihl = (packet[0].toInt() and 0x0f) * 4
-        if (ihl < 20 || length < ihl) return null
+        if (length < 20 || length > packet.size) return null
+        val ihl = when {
+            info.isIpv6 -> {
+                if (!info.isTcp && !info.isUdp) return null
+                if (length < 40) return null
+                40
+            }
+            else -> {
+                val v4 = (packet[0].toInt() and 0x0f) * 4
+                if (v4 < 20 || length < v4) return null
+                v4
+            }
+        }
         return when {
             info.isTcp -> {
                 if (length < ihl + 20) return null

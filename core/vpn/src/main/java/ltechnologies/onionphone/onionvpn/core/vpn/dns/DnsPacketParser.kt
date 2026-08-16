@@ -13,6 +13,8 @@ object DnsPacketParser {
         val queryId: Int,
         val isResponse: Boolean,
         val qname: String?,
+        /** First question QTYPE (1=A, 28=AAAA, …); 0 if no question. */
+        val qtype: Int = 0,
         val aRecords: List<String>,
     )
 
@@ -28,8 +30,10 @@ object DnsPacketParser {
         val end = offset + length
 
         var qname: String? = null
+        var qtype = 0
         if (qdCount > 0) {
-            val name = readName(dns, offset, pos, end) ?: return ParsedDns(id, isResponse, null, emptyList())
+            // Fail-closed: malformed first QNAME → reject entire message (no soft null qname).
+            val name = readName(dns, offset, pos, end) ?: return null
             qname = when {
                 name.first.isEmpty() -> ""
                 TorNetPolicy.isValidDnsHostname(name.first) -> name.first
@@ -37,13 +41,14 @@ object DnsPacketParser {
             }
             pos = name.second
             // QTYPE + QCLASS
-            if (pos + 4 > end) return ParsedDns(id, isResponse, qname, emptyList())
+            if (pos + 4 > end) return null
+            qtype = ((dns[pos].toInt() and 0xff) shl 8) or (dns[pos + 1].toInt() and 0xff)
             pos += 4
             // Skip remaining questions
             for (i in 1 until qdCount) {
-                val skip = readName(dns, offset, pos, end) ?: break
+                val skip = readName(dns, offset, pos, end) ?: return null
+                if (skip.second + 4 > end) return null
                 pos = skip.second + 4
-                if (pos > end) break
             }
         }
 
@@ -80,7 +85,7 @@ object DnsPacketParser {
                 pos += rdLength
             }
         }
-        return ParsedDns(id, isResponse, qname, answers)
+        return ParsedDns(id, isResponse, qname, qtype, answers)
     }
 
     /**

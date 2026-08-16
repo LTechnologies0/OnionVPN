@@ -26,6 +26,7 @@ object SystemLeakInspector {
             add(checkGlobalHttpProxy(context))
             add(checkVpnPermission(context))
             add(checkFirewallEngine())
+            add(checkFirewallProxyCoverage())
         }
     }
 
@@ -224,6 +225,26 @@ object SystemLeakInspector {
             } else {
                 "FirewallBridge still AllowAll — Application did not install engine"
             },
+            tripsKillSwitch = false,
+        )
+    }
+
+    /**
+     * Residual: raw Tor/onionmasq SocksPort on 127.0.0.1 accepts any local process
+     * (SocksPolicy is IP-only). TUN + PAC + SocksUidBridge are firewalled; a hostile
+     * app that dials the ephemeral SocksPort with forged `u{uid}/p{uid}` skips ASK/DENY.
+     * Still Tor-routed (not clearnet), but policy bypass.
+     */
+    private fun checkFirewallProxyCoverage(): ValidationCheck {
+        val wired = FirewallBridge.engine !== PacketFirewall.AllowAll
+        return ValidationCheck(
+            id = "firewall.proxy_coverage",
+            label = "Firewall covers TUN/PAC/UID-bridge (not raw Tor SOCKS)",
+            status = if (wired) ValidationStatus.Pass else ValidationStatus.Skipped,
+            detail = "Gated: TunDnsMux allowOutbound, PAC allowSocksConnect, SocksUidBridge " +
+                "peer-UID + allowSocksConnect, ArtiSocksRoleMux peer-UID. Residual: apps may " +
+                "dial C Tor / onionmasq sidecar SocksPort on loopback with forged IsolateSOCKSAuth " +
+                "(predictable u{uid}/p{uid}). Traffic stays on Tor — not a clearnet leak.",
             tripsKillSwitch = false,
         )
     }

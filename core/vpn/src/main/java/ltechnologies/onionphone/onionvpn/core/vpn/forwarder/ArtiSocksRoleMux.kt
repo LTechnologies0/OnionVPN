@@ -1,20 +1,36 @@
 package ltechnologies.onionphone.onionvpn.core.vpn.forwarder
 
+import android.content.Context
+import android.os.Process
+import java.net.Socket
 import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
 import ltechnologies.onionphone.onionvpn.core.model.TunnelRuntimePorts
+import ltechnologies.onionphone.onionvpn.core.vpn.firewall.ConnectionOwnerResolver
 import timber.log.Timber
 
 /**
  * Gives Arti the product equivalent of C Tor SessionGroups: distinct loopback
  * SocksPorts for DNSCrypt and probes that forward to the single Arti SOCKS
  * listener. IsolationTokens remain the SOCKS username/password from each client.
+ *
+ * Peer-UID gate: only our process may dial these ports (DNSCrypt / validators).
+ * Foreign apps forging `dnscrypt`/`probe` auth would otherwise skip the TUN firewall.
+ *
+ * Do **not** construct with a Service/`ContextWrapper` from a field initializer —
+ * [Context.getApplicationContext] NPEs before [android.app.Service.onCreate].
  */
 class ArtiSocksRoleMux {
+    private var ownerResolver: ConnectionOwnerResolver? = null
+    private val ownUid = Process.myUid()
     private var dnsCryptRelay: SocksTcpRelay? = null
     private var probeRelay: SocksTcpRelay? = null
 
-    fun start(ports: TunnelRuntimePorts) {
+    /**
+     * @param appContext application context (never a half-constructed Service).
+     */
+    fun start(ports: TunnelRuntimePorts, appContext: Context? = null) {
         stop()
+        ownerResolver = appContext?.applicationContext?.let { ConnectionOwnerResolver(it) }
         if (ports.torDnsCryptSocksPort == ports.torSocksPort &&
             ports.torProbeSocksPort == ports.torSocksPort
         ) {
@@ -27,6 +43,7 @@ class ArtiSocksRoleMux {
                 upstreamHost = TunnelEndpoints.LOOPBACK,
                 upstreamPort = ports.torSocksPort,
                 label = "dnscrypt",
+                acceptPeer = ::isTrustedPeer,
             ).also { it.start() }
         }
         if (ports.torProbeSocksPort != ports.torSocksPort &&
@@ -37,13 +54,15 @@ class ArtiSocksRoleMux {
                 upstreamHost = TunnelEndpoints.LOOPBACK,
                 upstreamPort = ports.torSocksPort,
                 label = "probe",
+                acceptPeer = ::isTrustedPeer,
             ).also { it.start() }
         }
         Timber.i(
-            "ArtiSocksRoleMux up arti=%d dnscrypt=%d probe=%d",
+            "ArtiSocksRoleMux up arti=%d dnscrypt=%d probe=%d peerGate=%s",
             ports.torSocksPort,
             ports.torDnsCryptSocksPort,
             ports.torProbeSocksPort,
+            ownerResolver != null,
         )
     }
 
@@ -52,5 +71,16 @@ class ArtiSocksRoleMux {
         probeRelay?.stop()
         dnsCryptRelay = null
         probeRelay = null
+        ownerResolver = null
+    }
+
+    private fun isTrustedPeer(client: Socket): Boolean {
+        val resolver = ownerResolver ?: return true
+        val peer = resolver.resolveAcceptedClientUid(client)
+        if (!ConnectionOwnerResolver.isValidUid(peer)) {
+            // Pre-Q: getConnectionOwnerUid unavailable. API ≥ Q: fail-closed on miss.
+            return android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.Q
+        }
+        return peer == ownUid
     }
 }

@@ -178,6 +178,50 @@ class LeakPacketFilterTest {
         )
     }
 
+    @Test
+    fun ipv4Fragment_udp53_notDiverted() {
+        val pkt = ipv4Udp(
+            srcIp = byteArrayOf(10, 0, 0, 2),
+            dstIp = byteArrayOf(8, 8, 8, 8),
+            srcPort = 53_000,
+            dstPort = 53,
+            payload = byteArrayOf(0x12, 0x34),
+        )
+        pkt[6] = 0x20 // MF
+        assertFalse(LeakPacketFilter.isDnsUdpPort53(pkt, pkt.size))
+        assertTrue(LeakPacketFilter.shouldDropEarly(pkt, pkt.size))
+    }
+
+    @Test
+    fun ipv4Fragment_notTorrifiable_andDroppedEarly() {
+        val pkt = ipv4TcpSyn(
+            srcIp = byteArrayOf(10, 0, 0, 2),
+            dstIp = byteArrayOf(1, 1, 1, 1),
+            srcPort = 40_000,
+            dstPort = 443,
+        )
+        // MF set on first fragment — still must not torrify as complete TCP.
+        pkt[6] = 0x20
+        pkt[7] = 0x00
+        assertFalse(LeakPacketFilter.isTorrifiableIpv4Tcp(pkt, pkt.size))
+        assertTrue(LeakPacketFilter.shouldDropEarly(pkt, pkt.size))
+    }
+
+    @Test
+    fun ipv4NonFirstFragment_droppedEarly() {
+        val pkt = ipv4TcpSyn(
+            srcIp = byteArrayOf(10, 0, 0, 2),
+            dstIp = byteArrayOf(1, 1, 1, 1),
+            srcPort = 40_000,
+            dstPort = 443,
+        )
+        // Fragment offset = 1 (8-byte units)
+        pkt[6] = 0x00
+        pkt[7] = 0x01
+        assertFalse(LeakPacketFilter.isTorrifiableIpv4Tcp(pkt, pkt.size))
+        assertTrue(LeakPacketFilter.shouldDropEarly(pkt, pkt.size))
+    }
+
     private fun ipv4Udp(
         srcIp: ByteArray,
         dstIp: ByteArray,

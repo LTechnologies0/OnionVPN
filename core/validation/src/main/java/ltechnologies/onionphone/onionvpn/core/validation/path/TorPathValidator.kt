@@ -49,6 +49,15 @@ object TorPathValidator {
     ): ValidationCheck = checkRemoteDns(socksHost, socksPort)
 
     /**
+     * SOCKS5A CONNECT to a well-known v3 onion — Soft Fail only (HS rendezvous can be slow
+     * or briefly unavailable; must not trip kill-switch).
+     */
+    fun validateOnionService(
+        socksHost: String = TunnelEndpoints.LOOPBACK,
+        socksPort: Int = TunnelEndpoints.TOR_SOCKS_PORT,
+    ): ValidationCheck = checkOnionService(socksHost, socksPort)
+
+    /**
      * Validates Arti runtime status file written by
      * [ltechnologies.onionphone.onionvpn.core.tor.arti.ArtiRuntime].
      */
@@ -72,15 +81,19 @@ object TorPathValidator {
         }
         val sharedOk = config.contains("shared_socks=1")
         val automapOk = config.contains("synthesize_onion_automap=1")
+        val onionAddrsOk = config.contains("allow_onion_addrs=1") ||
+            !config.contains("allow_onion_addrs=") // older status files pre-onion fix
         val authIsoOk = config.contains("socks_auth_isolation=1") ||
             !config.contains("socks_auth_isolation=") // older status files
-        val ok = engineOk && readyOk && socksOk && dnsOk && sharedOk && automapOk && authIsoOk
+        val ok = engineOk && readyOk && socksOk && dnsOk && sharedOk && automapOk &&
+            onionAddrsOk && authIsoOk
         return ValidationCheck(
             id = "tor.arti.status",
             label = "Arti runtime status",
             status = if (ok) ValidationStatus.Pass else ValidationStatus.Fail,
             detail = "$source: engine=$engineOk ready=$readyOk socks=$socksOk dns=$dnsOk " +
-                "shared=$sharedOk synthAutomap=$automapOk authIso=$authIsoOk" +
+                "shared=$sharedOk synthAutomap=$automapOk allowOnion=$onionAddrsOk " +
+                "authIso=$authIsoOk" +
                 (if (socksPort != null) " ports=$socksPort/$dnsPort" else ""),
             tripsKillSwitch = !readyOk,
         )
@@ -253,7 +266,7 @@ object TorPathValidator {
                 proxyHost = host,
                 proxyPort = port,
                 username = TunnelEndpoints.SOCKS_PROBE_USER,
-                password = TunnelEndpoints.SOCKS_PROBE_PASS,
+                password = TunnelEndpoints.socksProbePass(),
                 connectTimeoutMs = REMOTE_DNS_TIMEOUT_MS,
                 // Must stay under TunnelForegroundService VALIDATION_TIMEOUT — default
                 // Socks5Client handshake (120s) previously cancelled the whole startTunnel
@@ -272,6 +285,34 @@ object TorPathValidator {
                 label = "SOCKS5A remote DNS via Tor",
                 status = ValidationStatus.Fail,
                 detail = error.message ?: "remote DNS failed",
+                tripsKillSwitch = false,
+            )
+        }
+    }
+
+    private fun checkOnionService(host: String, port: Int): ValidationCheck {
+        val onion = TunnelEndpoints.WELL_KNOWN_ONION_DDG
+        return try {
+            Socks5Client(
+                proxyHost = host,
+                proxyPort = port,
+                username = TunnelEndpoints.SOCKS_PROBE_USER,
+                password = TunnelEndpoints.socksProbePass(),
+                connectTimeoutMs = ONION_CONNECT_TIMEOUT_MS,
+                handshakeTimeoutMs = ONION_CONNECT_TIMEOUT_MS,
+            ).connect(onion, 80).use { /* HS CONNECT OK */ }
+            ValidationCheck(
+                id = "tor.onion.socks5a",
+                label = "SOCKS5A .onion (native HS client)",
+                status = ValidationStatus.Pass,
+                detail = "Connected $onion:80 via SOCKS5A (probe auth)",
+            )
+        } catch (error: Exception) {
+            ValidationCheck(
+                id = "tor.onion.socks5a",
+                label = "SOCKS5A .onion (native HS client)",
+                status = ValidationStatus.Fail,
+                detail = error.message ?: "onion CONNECT failed",
                 tripsKillSwitch = false,
             )
         }
@@ -311,4 +352,6 @@ object TorPathValidator {
 
     private const val DNS_PORT_TIMEOUT_MS = 15_000
     private const val REMOTE_DNS_TIMEOUT_MS = 25_000
+    /** Hidden-service rendezvous often exceeds clearnet SOCKS CONNECT time. */
+    private const val ONION_CONNECT_TIMEOUT_MS = 45_000
 }

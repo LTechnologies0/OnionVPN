@@ -22,7 +22,7 @@ import javax.net.ssl.SSLSocketFactory
 import ltechnologies.onionphone.onionvpn.core.model.SocksJavaProxyAuth
 import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
 import ltechnologies.onionphone.onionvpn.core.vpn.forwarder.Socks5Client
-import ltechnologies.onionphone.onionvpn.core.vpn.net.SecureTorHttp.applyTorClientHardening
+import ltechnologies.onionphone.onionvpn.core.model.net.SecureTorHttp.applyTorClientHardening
 import okhttp3.Dns
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -49,8 +49,9 @@ class SocksDnsBootstrapRelay(
     private val listenPort: Int,
     private val socksHost: String = TunnelEndpoints.LOOPBACK,
     private val socksPort: Int,
-    private val socksUser: String = TunnelEndpoints.SOCKS_DNSCRYPT_USER,
-    private val socksPass: String = TunnelEndpoints.SOCKS_DNSCRYPT_PASS,
+    private val socksUser: String = TunnelEndpoints.dnsCryptSocksUser(),
+    private val socksPass: String = TunnelEndpoints.socksDnsCryptPass(),
+
     private val dohConnectHost: String = DEFAULT_DOH_CONNECT_HOST,
     private val dohSniHost: String = DEFAULT_DOH_SNI_HOST,
     private val dohPort: Int = DEFAULT_DOH_PORT,
@@ -84,11 +85,17 @@ class SocksDnsBootstrapRelay(
         var tcpOk = false
         if (bindTcp) {
             val server = ServerSocket()
-            server.reuseAddress = true
-            server.bind(
-                java.net.InetSocketAddress(TunnelEndpoints.LOOPBACK, listenPort),
-                32,
-            )
+            try {
+                server.reuseAddress = true
+                server.bind(
+                    java.net.InetSocketAddress(TunnelEndpoints.LOOPBACK, listenPort),
+                    32,
+                )
+            } catch (error: Exception) {
+                runCatching { server.close() }
+                running.set(false)
+                throw error
+            }
             tcpServer = server
             tcpOk = true
             tcpThread = Thread({ tcpAcceptLoop(server) }, "socks-dns-bootstrap-tcp").apply {
@@ -240,12 +247,16 @@ class SocksDnsBootstrapRelay(
         while (running.get()) {
             try {
                 val client = server.accept()
-                pool.execute {
-                    try {
-                        handleTcpClient(client)
-                    } finally {
-                        runCatching { client.close() }
+                try {
+                    pool.execute {
+                        try {
+                            handleTcpClient(client)
+                        } finally {
+                            runCatching { client.close() }
+                        }
                     }
+                } catch (_: java.util.concurrent.RejectedExecutionException) {
+                    runCatching { client.close() }
                 }
             } catch (error: Exception) {
                 if (running.get()) {
@@ -384,7 +395,9 @@ class SocksDnsBootstrapRelay(
                         )
                         return@withCredentials null
                     }
-                    response.body?.bytes()?.takeIf { it.size >= 12 }
+                    response.body?.bytes()?.let { raw ->
+                        bindDohResponse(udpQuery, raw)
+                    }
                 }
             }
         } catch (error: Exception) {
@@ -451,7 +464,9 @@ class SocksDnsBootstrapRelay(
                     out.write(headers)
                     out.write(udpQuery)
                     out.flush()
-                    parseHttpDnsMessage(inp)?.let { return it }
+                    parseHttpDnsMessage(inp)?.let { body ->
+                        bindDohResponse(udpQuery, body)?.let { return it }
+                    }
                 }
             } catch (error: Exception) {
                 if (running.get()) {
@@ -495,6 +510,33 @@ class SocksDnsBootstrapRelay(
             else -> null
         } ?: return null
         return body.takeIf { it.size >= 12 }
+    }
+
+    /**
+     * DoH cache/poison defense: accept only responses that echo our query ID and QNAME.
+     */
+    private fun bindDohResponse(query: ByteArray, response: ByteArray): ByteArray? {
+        if (response.size < 12) return null
+        val q = DnsPacketParser.parse(query, 0, query.size) ?: return null
+        val r = DnsPacketParser.parse(response, 0, response.size) ?: return null
+        if (!r.isResponse) return null
+        if (r.queryId != q.queryId) {
+            Timber.d(
+                "SocksDnsBootstrapRelay DoH ID mismatch q=%04x r=%04x",
+                q.queryId,
+                r.queryId,
+            )
+            return null
+        }
+        val qn = q.qname?.lowercase()?.trimEnd('.')
+        val rn = r.qname?.lowercase()?.trimEnd('.')
+        if (!qn.isNullOrEmpty()) {
+            if (rn.isNullOrEmpty() || rn != qn) {
+                Timber.d("SocksDnsBootstrapRelay DoH QNAME mismatch q=%s r=%s", qn, rn)
+                return null
+            }
+        }
+        return response
     }
 
     private fun readChunkedBody(inp: BufferedInputStream): ByteArray? {

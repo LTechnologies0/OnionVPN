@@ -4,8 +4,13 @@ package ltechnologies.onionphone.onionvpn.core.vpn.dns
  * Builds a minimal DNS response with a single A record for app-side Automap (Arti).
  *
  * Copies the question section from the query and appends one A RR pointing at [ipv4].
+ * Also builds NOERROR/NODATA replies for AAAA (and other non-A) so stubs fail fast
+ * instead of hanging on silent TUN drops.
  */
 object DnsOnionAutomapReply {
+    const val TYPE_A = 1
+    const val TYPE_AAAA = 28
+
     /**
      * @param queryDns DNS payload (not including IP/UDP headers)
      * @param ipv4 dotted-quad in Tor Automap pool
@@ -16,48 +21,13 @@ object DnsOnionAutomapReply {
         val octets = ipv4.split('.').mapNotNull { it.toIntOrNull()?.takeIf { v -> v in 0..255 } }
         if (octets.size != 4) return null
 
-        // Find end of first question (QNAME + QTYPE + QCLASS).
-        var pos = queryOffset + 12
-        val end = queryOffset + queryLen
-        while (pos < end) {
-            val len = queryDns[pos].toInt() and 0xff
-            when {
-                len == 0 -> {
-                    pos += 1
-                    break
-                }
-                (len and 0xc0) == 0xc0 -> {
-                    pos += 2
-                    break
-                }
-                else -> {
-                    pos += 1 + len
-                    if (pos > end) return null
-                }
-            }
-        }
-        if (pos + 4 > end) return null
-        val questionEnd = pos + 4
+        val questionEnd = questionSectionEnd(queryDns, queryOffset, queryLen) ?: return null
         val questionLen = questionEnd - queryOffset
 
         // Header (12) + question + answer (name ptr 2 + type/class/ttl/rdlen 10 + rdata 4)
         val out = ByteArray(questionLen + 16)
         System.arraycopy(queryDns, queryOffset, out, 0, questionLen)
-        // Flags: QR|AA|RD, copy RD from query if set
-        val queryFlags = ((queryDns[queryOffset + 2].toInt() and 0xff) shl 8) or
-            (queryDns[queryOffset + 3].toInt() and 0xff)
-        val rd = queryFlags and 0x0100
-        val flags = 0x8400 or rd // QR + AA + RA-ish response
-        out[2] = ((flags ushr 8) and 0xff).toByte()
-        out[3] = (flags and 0xff).toByte()
-        out[4] = 0
-        out[5] = 1 // QDCOUNT
-        out[6] = 0
-        out[7] = 1 // ANCOUNT
-        out[8] = 0
-        out[9] = 0
-        out[10] = 0
-        out[11] = 0
+        writeResponseHeader(out, queryDns, queryOffset, anCount = 1)
 
         var w = questionLen
         // NAME = pointer to offset 12 (start of QNAME in this message)
@@ -78,5 +48,66 @@ object DnsOnionAutomapReply {
         out[w++] = octets[2].toByte()
         out[w++] = octets[3].toByte()
         return out
+    }
+
+    /**
+     * NOERROR with empty answer (NODATA) — name is synthesizable as A, but this QTYPE
+     * has no Automap record (AAAA / other). Prevents Happy-Eyeballs / stub hangs.
+     */
+    fun buildNoDataResponse(queryDns: ByteArray, queryOffset: Int, queryLen: Int): ByteArray? {
+        if (queryLen < 12 || queryOffset < 0 || queryOffset + queryLen > queryDns.size) return null
+        val questionEnd = questionSectionEnd(queryDns, queryOffset, queryLen) ?: return null
+        val questionLen = questionEnd - queryOffset
+        val out = ByteArray(questionLen)
+        System.arraycopy(queryDns, queryOffset, out, 0, questionLen)
+        writeResponseHeader(out, queryDns, queryOffset, anCount = 0)
+        return out
+    }
+
+    private fun writeResponseHeader(
+        out: ByteArray,
+        queryDns: ByteArray,
+        queryOffset: Int,
+        anCount: Int,
+    ) {
+        val queryFlags = ((queryDns[queryOffset + 2].toInt() and 0xff) shl 8) or
+            (queryDns[queryOffset + 3].toInt() and 0xff)
+        val rd = queryFlags and 0x0100
+        val flags = 0x8400 or rd // QR + AA
+        out[2] = ((flags ushr 8) and 0xff).toByte()
+        out[3] = (flags and 0xff).toByte()
+        out[4] = 0
+        out[5] = 1 // QDCOUNT
+        out[6] = 0
+        out[7] = (anCount and 0xff).toByte()
+        out[8] = 0
+        out[9] = 0
+        out[10] = 0
+        out[11] = 0
+    }
+
+    /** End offset (exclusive) of first question section within the DNS message. */
+    private fun questionSectionEnd(queryDns: ByteArray, queryOffset: Int, queryLen: Int): Int? {
+        var pos = queryOffset + 12
+        val end = queryOffset + queryLen
+        while (pos < end) {
+            val len = queryDns[pos].toInt() and 0xff
+            when {
+                len == 0 -> {
+                    pos += 1
+                    break
+                }
+                (len and 0xc0) == 0xc0 -> {
+                    pos += 2
+                    break
+                }
+                else -> {
+                    pos += 1 + len
+                    if (pos > end) return null
+                }
+            }
+        }
+        if (pos + 4 > end) return null
+        return pos + 4
     }
 }

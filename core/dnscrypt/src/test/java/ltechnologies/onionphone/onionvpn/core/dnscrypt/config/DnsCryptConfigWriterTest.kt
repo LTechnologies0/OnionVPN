@@ -12,7 +12,7 @@ class DnsCryptConfigWriterTest {
         val config = DnsCryptConfigWriter.write(configDirectory = "/tmp")
 
         val proxy =
-            "socks5://${TunnelEndpoints.SOCKS_DNSCRYPT_USER}:${TunnelEndpoints.SOCKS_DNSCRYPT_PASS}" +
+            "socks5://${TunnelEndpoints.SOCKS_DNSCRYPT_USER}:${TunnelEndpoints.socksDnsCryptPass()}" +
                 "@${TunnelEndpoints.LOOPBACK}:${TunnelEndpoints.TOR_SOCKS_PORT}"
         assertTrue(config.contains("proxy = '$proxy'"))
         assertTrue(
@@ -79,7 +79,7 @@ class DnsCryptConfigWriterTest {
             torDnsPort = 19053,
         )
         val proxy =
-            "socks5://${TunnelEndpoints.SOCKS_DNSCRYPT_USER}:${TunnelEndpoints.SOCKS_DNSCRYPT_PASS}" +
+            "socks5://${TunnelEndpoints.SOCKS_DNSCRYPT_USER}:${TunnelEndpoints.socksDnsCryptPass()}" +
                 "@${TunnelEndpoints.LOOPBACK}:$sidecar"
         assertTrue(config.contains("proxy = '$proxy'"))
         assertTrue(config.contains("bootstrap_resolvers = ['${TunnelEndpoints.LOOPBACK}:19053']"))

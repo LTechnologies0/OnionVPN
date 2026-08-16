@@ -160,12 +160,14 @@ class TunDnsMux(
                             val blackhole = LeakPacketFilter.blackholeBeforeTorTcp(buf, n)
                             if (blackhole != null) {
                                 LeakPacketFilter.noteBlackhole(blackhole)
-                                // Silent UDP drops stall Chromium QUIC→TCP fallback; ICMP
-                                // port-unreachable makes the stack fail over promptly.
-                                IcmpUnreachable.buildForBlackholedUdp(buf, n)?.let { icmp ->
+                                // Silent drops stall app failover: UDP→ICMP port-unreachable
+                                // (QUIC→TCP); clearnet IPv6 TCP→RST (Happy Eyeballs→IPv4).
+                                val reject = IcmpUnreachable.buildForBlackholedUdp(buf, n)
+                                    ?: TcpRstUnreachable.buildForBlackholedTcp(buf, n)
+                                reject?.let { pkt ->
                                     synchronized(tunWriteLock) {
                                         if (running.get() && generation.get() == gen) {
-                                            localTunOut.write(icmp, 0, icmp.size)
+                                            localTunOut.write(pkt, 0, pkt.size)
                                         }
                                     }
                                 }
@@ -370,11 +372,18 @@ class TunDnsMux(
     /** Learn IP→host from inbound DNS replies (hev FakeDNS → TUN). */
     private fun snoopDnsInbound(packet: ByteArray, length: Int) {
         val payload = udpDnsPayload(packet, length, expectDestPort53 = false) ?: return
-        // Source port 53 = DNS response toward the client.
-        val ihl = (packet[0].toInt() and 0x0f) * 4
-        val srcPort = ((packet[ihl].toInt() and 0xff) shl 8) or (packet[ihl + 1].toInt() and 0xff)
+        val version = (packet[0].toInt() ushr 4) and 0x0f
+        val udpOff = when (version) {
+            4 -> (packet[0].toInt() and 0x0f) * 4
+            6 -> 40
+            else -> return
+        }
+        if (length < udpOff + 4) return
+        val srcPort = ((packet[udpOff].toInt() and 0xff) shl 8) or
+            (packet[udpOff + 1].toInt() and 0xff)
         if (srcPort != 53) return
-        val dstPort = ((packet[ihl + 2].toInt() and 0xff) shl 8) or (packet[ihl + 3].toInt() and 0xff)
+        val dstPort = ((packet[udpOff + 2].toInt() and 0xff) shl 8) or
+            (packet[udpOff + 3].toInt() and 0xff)
         learnFromDnsPayload(packet, payload.first, payload.second, clientSport = dstPort)
     }
 
@@ -466,19 +475,27 @@ class TunDnsMux(
 
             if (useTorAutomap && synthesizeOnionAutomap) {
                 val host = qname ?: return
-                // Automap AAAA on IPv6 DNS would need virtual v6; keep A-only Automap on IPv4 path.
-                if (version != 4) {
-                    Timber.d("Onion Automap over IPv6 DNS skipped — use IPv4 DNS q=$qname")
-                    return
+                // A-only Automap (DNSCrypt/Tor exits are IPv4-biased). Answer A on any
+                // IP version transport; NODATA for AAAA/other so stubs do not hang.
+                val dnsPayload = when (parsedQuery.qtype) {
+                    DnsOnionAutomapReply.TYPE_A -> {
+                        val virtIp = OnionAutomapAllocator.ipv4ForHostname(host)
+                        DnsOnionAutomapReply.buildAResponse(
+                            packet,
+                            dnsOffset,
+                            queryLen,
+                            virtIp,
+                        )
+                    }
+                    else -> DnsOnionAutomapReply.buildNoDataResponse(
+                        packet,
+                        dnsOffset,
+                        queryLen,
+                    )
+                } ?: return
+                if (parsedQuery.qtype == DnsOnionAutomapReply.TYPE_A) {
+                    learnFromDnsPayload(dnsPayload, 0, dnsPayload.size)
                 }
-                val virtIp = OnionAutomapAllocator.ipv4ForHostname(host)
-                val dnsPayload = DnsOnionAutomapReply.buildAResponse(
-                    packet,
-                    dnsOffset,
-                    queryLen,
-                    virtIp,
-                ) ?: return
-                learnFromDnsPayload(dnsPayload, 0, dnsPayload.size)
                 val replyLen = buildDnsReplyInto(
                     request = packet,
                     requestLen = length,

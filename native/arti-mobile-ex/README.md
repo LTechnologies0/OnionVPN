@@ -7,6 +7,8 @@
 #   state_dir/onionvpn_circuit_timing
 # - SocksTimeout parity: circuit_timing.request_timeout=120s; stream
 #   connect=90s / resolve=60s / resolve_ptr=30s (Arti defaults were 60/10/10)
+# - address_filter.allow_onion_addrs=true + Cargo feature onion-service-client
+#   (otherwise SOCKS CONNECT *.onion fails immediately with general-failure)
 # - ExitNodes country via patched SOCKS StreamPrefs::exit_country (geoip)
 # - Conjure TransportConfig from state_dir/onionvpn_pt_plugins
 # - JNI Ext class org.torproject.arti.ArtiControlNative (control-api=2):

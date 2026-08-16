@@ -365,11 +365,9 @@ class DnsCryptSocksBridge(
      */
     private fun pacSocksAuth(uid: Int): Pair<String, String> {
         val epoch = TunnelEndpoints.appSocksNymEpoch
-        return if (epoch > 0) {
-            "pac$uid-n$epoch" to "p$uid-n$epoch"
-        } else {
-            "pac$uid" to "p$uid"
-        }
+        val user = if (epoch > 0) "pac$uid-n$epoch" else "pac$uid"
+        // Password mirrors app IsolateSOCKSAuth (`p{uid}` / `p{uid}-nN`) — sidecar allowlist.
+        return user to TunnelEndpoints.socksPassForUid(uid, epoch)
     }
 
     companion object {

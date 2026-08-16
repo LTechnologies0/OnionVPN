@@ -19,6 +19,7 @@ import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
 import ltechnologies.onionphone.onionvpn.core.model.TunnelFailure
 import ltechnologies.onionphone.onionvpn.core.vpn.dns.DnsHostnameCache
 import ltechnologies.onionphone.onionvpn.core.vpn.firewall.ConnectionOwnerResolver
+import ltechnologies.onionphone.onionvpn.core.vpn.firewall.FirewallBridge
 import ltechnologies.onionphone.onionvpn.core.vpn.firewall.IpPacketInfo
 import ltechnologies.onionphone.onionvpn.core.vpn.firewall.IpPacketParser
 import ltechnologies.onionphone.onionvpn.core.vpn.profile.TunForwarder
@@ -175,6 +176,11 @@ class UidIsolatingTunForwarder(
             // Never IsolateSOCKSAuth as uunknown — wait for owner (matches firewall fail-closed).
             if (!ConnectionOwnerResolver.isValidUid(uid)) {
                 VpnForwarderDebug.uidLog { "Drop SYN — UID not resolved yet $destIp:${meta.dstPort}" }
+                return
+            }
+            // Landmine path (not wired by TunDataPlaneFactory): still honor firewall.
+            if (!FirewallBridge.engine.allowOutbound(buf, length)) {
+                VpnForwarderDebug.uidLog { "Drop SYN — firewall DENY uid=$uid $remoteHost:${meta.dstPort}" }
                 return
             }
             val user = TunnelEndpoints.socksUserForUid(uid)

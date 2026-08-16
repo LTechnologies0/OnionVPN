@@ -55,6 +55,33 @@ class DnsPacketParserTest {
         assertNull(DnsPacketParser.parse(dns, 0, dns.size))
     }
 
+    @Test
+    fun parse_lengthExceedsBuffer_failsClosed() {
+        val dns = buildDnsQuery("www.example.com")
+        assertNull(DnsPacketParser.parse(dns, 0, dns.size + 50))
+    }
+
+    @Test
+    fun parse_pointerLoop_failsClosed() {
+        val dns = ByteArray(20)
+        dns[0] = 0x12
+        dns[1] = 0x34
+        dns[5] = 0x01 // QDCOUNT=1
+        // QNAME = compression pointer to itself (offset 12)
+        dns[12] = 0xc0.toByte()
+        dns[13] = 0x0c
+        assertNull(DnsPacketParser.parse(dns, 0, dns.size))
+    }
+
+    @Test
+    fun parse_truncatedName_failsClosed() {
+        val dns = ByteArray(14)
+        dns[5] = 0x01
+        dns[12] = 0x05 // label len 5 but only 1 byte left
+        dns[13] = 'a'.code.toByte()
+        assertNull(DnsPacketParser.parse(dns, 0, dns.size))
+    }
+
     private fun buildDnsQuery(name: String): ByteArray {
         val labels = name.split('.')
         val nameBytes = labels.sumOf { 1 + it.length } + 1

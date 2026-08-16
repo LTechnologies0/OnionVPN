@@ -104,6 +104,11 @@ jobs:
           chmod +x scripts/verify-jniLibs-standalone.sh
           ./scripts/verify-jniLibs-standalone.sh
 
+      - name: Native CVE pin floor (Tor / OpenSSL / DNSCrypt)
+        run: |
+          chmod +x scripts/verify-native-cve-pins.sh
+          ./scripts/verify-native-cve-pins.sh
+
       - name: Verify MTE memtagMode=async (merged manifest)
         run: |
           chmod +x scripts/verify-memtag-manifest.sh

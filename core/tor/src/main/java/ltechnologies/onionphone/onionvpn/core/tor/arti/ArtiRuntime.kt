@@ -158,7 +158,7 @@ internal class ArtiRuntime(
             ports,
             preferences,
             ready = true,
-            dirtinessApplied = controlApi,
+            dirtinessApplied = liveApplied,
             predictionLifetimeApplied = pred,
         )
         OpTrace.info(
@@ -425,6 +425,10 @@ internal class ArtiRuntime(
             appendLine("bridges=$bridges")
             appendLine("pt=$pt")
             appendLine("synthesize_onion_automap=1")
+            // Honest capability bit: Ext JNI ships only in OnionVPN-patched
+            // libarti_mobile_ex.so that also sets address_filter.allow_onion_addrs.
+            // Stock AAR (control_api=0) rejects *.onion with SOCKS general-failure.
+            appendLine("allow_onion_addrs=${if (controlApi > 0) 1 else 0}")
             appendLine("max_dirtiness_sec=$dirt")
             appendLine("prediction_lifetime_sec=$predictionLifetimeApplied")
             appendLine("new_circuit_period_sec=$newCirc")

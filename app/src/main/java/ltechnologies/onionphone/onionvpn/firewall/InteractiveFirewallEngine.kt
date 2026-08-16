@@ -210,8 +210,8 @@ class InteractiveFirewallEngine @Inject constructor(
         }
 
         // Mid-flow: never open ASK/DENY prompts. Prefer sticky decision / rules when the
-        // flow-cache entry was trimmed. Miss after an allowed SYN must NOT blackhole the
-        // live TCP — fail-open without writing ALLOW (avoids DENY→ALLOW poison after trim).
+        // flow-cache entry was trimmed. DENY default: fail-closed on miss (TOCTOU).
+        // ASK/ALLOW: fail-open — default is ASK; killing mid-flow after trim stalls apps.
         if (info.isTcp && !info.isTcpSyn) {
             val matching = findRule(uid, matchDest, info)
             if (matching != null) {
@@ -223,7 +223,14 @@ class InteractiveFirewallEngine @Inject constructor(
                 rememberPacketFlow(flowKey, v, matchDest, info)
                 return v == FirewallVerdict.ALLOW
             }
-            return true
+            return when (prefs.firewallDefaultAction) {
+                // SYN already required ALLOW (or ASK accept). Cache trim must not RST live TCP.
+                FirewallDefaultAction.ALLOW,
+                FirewallDefaultAction.ASK,
+                -> true
+                // DENY default: miss after trim is fail-closed (new DENY must stick mid-flow).
+                FirewallDefaultAction.DENY -> false
+            }
         }
 
         val matching = findRule(uid, matchDest, info)

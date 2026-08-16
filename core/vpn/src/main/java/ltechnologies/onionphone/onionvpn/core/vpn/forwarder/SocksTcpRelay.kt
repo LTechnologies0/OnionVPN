@@ -23,10 +23,14 @@ class SocksTcpRelay(
     private val upstreamHost: String,
     private val upstreamPort: Int,
     private val label: String,
+    /** When set, reject clients that fail the predicate (e.g. foreign UID on loopback). */
+    private val acceptPeer: ((Socket) -> Boolean)? = null,
 ) {
     private val running = AtomicBoolean(false)
     private var server: ServerSocket? = null
     private var acceptExecutor: ThreadPoolExecutor? = null
+    /** Coordinates CONNECT + join; must not share the pipe pool (nested get() deadlock). */
+    private var sessionExecutor: ThreadPoolExecutor? = null
     private var pipeExecutor: ThreadPoolExecutor? = null
 
     fun start() {
@@ -43,8 +47,10 @@ class SocksTcpRelay(
         )
         server = ss
         val accept = newAcceptExecutor()
+        val sessions = newSessionExecutor()
         val pipe = newPipeExecutor()
         acceptExecutor = accept
+        sessionExecutor = sessions
         pipeExecutor = pipe
         accept.execute {
             Timber.i("SocksTcpRelay[$label] listen=$listenPort → $upstreamHost:$upstreamPort")
@@ -54,8 +60,13 @@ class SocksTcpRelay(
                 } catch (_: IOException) {
                     break
                 }
+                if (acceptPeer?.invoke(client) == false) {
+                    Timber.d("SocksTcpRelay[$label] reject untrusted peer")
+                    runCatching { client.close() }
+                    continue
+                }
                 try {
-                    pipe.execute { handle(client, pipe) }
+                    sessions.execute { handle(client, pipe) }
                 } catch (_: Exception) {
                     runCatching { client.close() }
                 }
@@ -68,8 +79,10 @@ class SocksTcpRelay(
         runCatching { server?.close() }
         server = null
         acceptExecutor?.shutdownNow()
+        sessionExecutor?.shutdownNow()
         pipeExecutor?.shutdownNow()
         acceptExecutor = null
+        sessionExecutor = null
         pipeExecutor = null
         Timber.i("SocksTcpRelay[$label] stopped")
     }
@@ -118,6 +131,17 @@ class SocksTcpRelay(
             ThreadPoolExecutor.AbortPolicy(),
         )
 
+    private fun newSessionExecutor(): ThreadPoolExecutor =
+        ThreadPoolExecutor(
+            2,
+            MAX_SESSION_THREADS,
+            60L,
+            TimeUnit.SECONDS,
+            ArrayBlockingQueue(64),
+            { r -> Thread(r, "onionvpn-socks-session-$label").apply { isDaemon = true } },
+            ThreadPoolExecutor.AbortPolicy(),
+        ).apply { allowCoreThreadTimeOut(true) }
+
     /**
      * Bounded pipe pool — role-mux traffic is DNSCrypt + probes only (not full TUN).
      * Avoids [java.util.concurrent.Executors.newCachedThreadPool] unbounded growth.
@@ -135,6 +159,7 @@ class SocksTcpRelay(
 
     companion object {
         private const val CONNECT_TIMEOUT_MS = 15_000
+        private const val MAX_SESSION_THREADS = 16
         private const val MAX_PIPE_THREADS = 32
     }
 }

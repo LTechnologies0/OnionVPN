@@ -32,7 +32,7 @@ import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
 import ltechnologies.onionphone.onionvpn.core.model.observability.MemoryHygiene
 import ltechnologies.onionphone.onionvpn.core.tor.TorProcessManager
 import ltechnologies.onionphone.onionvpn.core.validation.path.TorSocksDns
-import ltechnologies.onionphone.onionvpn.core.vpn.net.SecureTorHttp.applyTorClientHardening
+import ltechnologies.onionphone.onionvpn.core.model.net.SecureTorHttp.applyTorClientHardening
 import okhttp3.Call
 import okhttp3.OkHttpClient
 import okhttp3.Request

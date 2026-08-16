@@ -11,7 +11,7 @@ updates:
   - package-ecosystem: gradle
     directory: /
     schedule:
-      interval: monthly
+      interval: weekly
     commit-message:
       prefix: "build"
       include: scope
@@ -22,6 +22,7 @@ updates:
     open-pull-requests-limit: 3
     labels:
       - dependencies
+      - security
 
   - package-ecosystem: github-actions
     directory: /

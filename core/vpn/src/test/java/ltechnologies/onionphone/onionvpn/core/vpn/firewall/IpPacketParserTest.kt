@@ -109,4 +109,54 @@ class IpPacketParserTest {
         packet[33] = 0x02
         assertNull(IpPacketParser.parse(packet, packet.size))
     }
+
+    @Test
+    fun parse_lengthExceedsArray_failsClosed() {
+        val packet = ByteArray(40)
+        packet[0] = 0x45.toByte()
+        packet[9] = 6
+        assertNull(IpPacketParser.parse(packet, packet.size + 8))
+    }
+
+    @Test
+    fun parse_truncatedTcpHeader_failsClosed() {
+        // Claim IPv4 TCP but buffer stops mid-header
+        val packet = ByteArray(24)
+        packet[0] = 0x45.toByte()
+        packet[9] = 6
+        packet[16] = 192.toByte()
+        packet[17] = 0
+        packet[18] = 2
+        packet[19] = 1
+        assertNull(IpPacketParser.parse(packet, packet.size))
+    }
+
+    @Test
+    fun parse_garbageVersion_failsClosed() {
+        val packet = ByteArray(40)
+        packet[0] = 0x75.toByte() // version 7
+        assertNull(IpPacketParser.parse(packet, packet.size))
+    }
+
+    @Test
+    fun parse_ipv4Fragment_failsClosed() {
+        val packet = ByteArray(40)
+        packet[0] = 0x45.toByte()
+        packet[9] = 6 // TCP
+        packet[6] = 0x20 // MF
+        packet[12] = 10
+        packet[13] = 8
+        packet[14] = 0
+        packet[15] = 2
+        packet[16] = 192.toByte()
+        packet[17] = 0
+        packet[18] = 2
+        packet[19] = 1
+        packet[20] = 0x30
+        packet[21] = 0x39
+        packet[22] = 0x01
+        packet[23] = 0xBB.toByte()
+        packet[33] = 0x02
+        assertNull(IpPacketParser.parse(packet, packet.size))
+    }
 }

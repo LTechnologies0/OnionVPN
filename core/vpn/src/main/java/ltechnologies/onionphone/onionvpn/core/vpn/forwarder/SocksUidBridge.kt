@@ -1,6 +1,7 @@
 package ltechnologies.onionphone.onionvpn.core.vpn.forwarder
 
 import android.content.Context
+import android.os.Build
 import android.os.Process
 import java.io.DataInputStream
 import java.io.DataOutputStream
@@ -24,6 +25,7 @@ import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
 import ltechnologies.onionphone.onionvpn.core.model.observability.MemoryHygiene
 import ltechnologies.onionphone.onionvpn.core.vpn.dns.DnsHostnameCache
 import ltechnologies.onionphone.onionvpn.core.vpn.firewall.ConnectionOwnerResolver
+import ltechnologies.onionphone.onionvpn.core.vpn.firewall.FirewallBridge
 import timber.log.Timber
 
 /**
@@ -135,6 +137,13 @@ class SocksUidBridge(
     private fun handleClient(client: Socket) {
         var handedOff = false
         try {
+            if (!isTrustedBridgePeer(client)) {
+                VpnForwarderDebug.socksLog {
+                    "SocksUidBridge reject non-local peer ${client.remoteSocketAddress}"
+                }
+                runCatching { client.close() }
+                return
+            }
             client.soTimeout = 15_000
             client.tcpNoDelay = true
             val input = DataInputStream(client.getInputStream())
@@ -162,6 +171,12 @@ class SocksUidBridge(
                 val socksHost = rewriteAutomapHost(host) ?: run {
                     VpnForwarderDebug.socksLog { "SocksUidBridge drop Automap IP without hostname $host" }
                     reply(output, 0x04)
+                    return
+                }
+                // Defense-in-depth: TunDnsMux already gated the SYN, but CONNECT must
+                // re-check (stamp theft / pre-Q peer fail-open / rule flip before hev dial).
+                if (!allowFirewallSocks(uid, connectHost = host, socksHost = socksHost, port = port)) {
+                    reply(output, 0x02)
                     return
                 }
                 val user = TunnelEndpoints.socksUserForUid(uid)
@@ -258,8 +273,62 @@ class SocksUidBridge(
         return false
     }
 
+    /**
+     * hev runs in-process — only our UID may dial the loopback bridge.
+     * Foreign apps forging CONNECT would otherwise steal SYN UID stamps (isolation MITM).
+     * Pre-Q: [ConnectionOwnerResolver.resolveAcceptedClientUid] is unavailable; rely on stamps.
+     * API ≥ Q: fail-closed on lookup miss (do not trust unknown peers).
+     */
+    private fun isTrustedBridgePeer(client: Socket): Boolean {
+        val peer = ownerResolver.resolveAcceptedClientUid(client)
+        if (!ConnectionOwnerResolver.isValidUid(peer)) {
+            return Build.VERSION.SDK_INT < Build.VERSION_CODES.Q
+        }
+        return peer == Process.myUid()
+    }
+
+    /**
+     * Same policy surface as PAC [PacketFirewall.allowSocksConnect].
+     * [socksHost] is post-Automap rewrite (onion hostname or clearnet IP/host).
+     */
+    private fun allowFirewallSocks(
+        uid: Int,
+        connectHost: String,
+        socksHost: String,
+        port: Int,
+    ): Boolean {
+        val onion = TunnelEndpoints.isOnionLikeHostname(socksHost) ||
+            TunnelEndpoints.isOnionLikeHostname(connectHost)
+        val destHost = when {
+            TunnelEndpoints.isOnionLikeHostname(socksHost) -> socksHost
+            TunnelEndpoints.isOnionLikeHostname(connectHost) -> connectHost
+            TunnelEndpoints.parseIpv4Literal(connectHost) == null &&
+                connectHost.indexOf(':') < 0 -> connectHost
+            else -> ""
+        }
+        val destIp = when {
+            onion -> ""
+            TunnelEndpoints.parseIpv4Literal(socksHost) != null -> socksHost
+            TunnelEndpoints.parseIpv4Literal(connectHost) != null -> connectHost
+            else -> ""
+        }
+        val allowed = FirewallBridge.engine.allowSocksConnect(
+            uid = uid,
+            destHost = destHost,
+            destIp = destIp,
+            destPort = port,
+        )
+        if (!allowed) {
+            VpnForwarderDebug.socksLog {
+                "SocksUidBridge firewall DENY uid=$uid $socksHost:$port"
+            }
+        }
+        return allowed
+    }
+
     private fun resolveUidForConnect(host: String, port: Int): Int {
         // Peek (non-consuming): parallel streams to the same dest must not steal the stamp.
+        // Peer UID gate above blocks foreign processes from using a stolen stamp.
         TcpFlowUidIndex.peekHost(host, port)?.uid?.let { uid ->
             if (ConnectionOwnerResolver.isValidUid(uid)) return uid
         }
@@ -405,6 +474,7 @@ class SocksUidBridge(
             runCatching { upstream.close() }
         }
         val pipeStartedAt = System.nanoTime()
+        var submitted = 0
         try {
             // Two directions on the pipe pool — handshake worker returns immediately.
             pipeExecutor.execute {
@@ -422,6 +492,7 @@ class SocksUidBridge(
                     pipeSlots.release()
                 }
             }
+            submitted = 1
             pipeExecutor.execute {
                 try {
                     copyStream(
@@ -437,8 +508,12 @@ class SocksUidBridge(
                     pipeSlots.release()
                 }
             }
+            submitted = 2
         } catch (_: java.util.concurrent.RejectedExecutionException) {
-            pipeSlots.release(2)
+            // Only release slots not already owned by a submitted pipe task
+            // (that task's finally will release its own permit).
+            val orphaned = 2 - submitted
+            if (orphaned > 0) pipeSlots.release(orphaned)
             closeBoth()
             return false
         }

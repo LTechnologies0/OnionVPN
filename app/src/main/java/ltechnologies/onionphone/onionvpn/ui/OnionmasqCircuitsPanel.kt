@@ -1,5 +1,6 @@
 package ltechnologies.onionphone.onionvpn.ui
 
+import android.content.Intent
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Refresh
@@ -10,12 +11,14 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.platform.LocalContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import ltechnologies.onionphone.onionvpn.core.vpn.OnionVpnService
 import ltechnologies.onionphone.onionvpn.core.vpn.onionmasq.OnionmasqNativeGate
 import ltechnologies.onionphone.onionvpn.firewall.AppUidResolver
+import ltechnologies.onionphone.onionvpn.service.TunnelForegroundService
 import ltechnologies.onionphone.onionvpn.ui.components.AppCircuitCard
 import ltechnologies.onionphone.onionvpn.ui.components.CircuitActionButton
 import ltechnologies.onionphone.onionvpn.ui.components.CircuitsScreenScaffold
@@ -50,6 +53,7 @@ fun OnionmasqCircuitsScreen(
         }
     }
 
+    val context = LocalContext.current
     val openTotal = rows.sumOf { it.openConnections }
     CircuitsScreenScaffold(
         title = "Tor circuits",
@@ -68,11 +72,15 @@ fun OnionmasqCircuitsScreen(
                             nativeRunning = OnionMasq.isRunning(),
                         )
                     ) {
-                        Timber.w("refreshCircuits skipped — onionmasq not running")
+                        Timber.w("NEWNYM skipped — onionmasq not running")
                         return@CircuitActionButton
                     }
-                    runCatching { OnionMasq.refreshCircuits() }
-                        .onFailure { Timber.w(it, "refreshCircuits failed") }
+                    // Must go through TunnelForegroundService so SOCKS IsolationTokens
+                    // (`dnscrypt-nN` / `u{uid}-nN`) rotate with refreshCircuits().
+                    context.startService(
+                        Intent(context, TunnelForegroundService::class.java)
+                            .setAction(TunnelForegroundService.ACTION_NEWNYM),
+                    )
                     refreshTick++
                 },
                 icon = Icons.Filled.SwapHoriz,

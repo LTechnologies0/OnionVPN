@@ -18,5 +18,6 @@ android {
 
 dependencies {
     implementation(libs.kotlinx.coroutines.core)
+    implementation(libs.okhttp)
     testImplementation(libs.junit)
 }

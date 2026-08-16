@@ -30,7 +30,7 @@ object IpPacketParser {
     const val PROTO_UDP = 17
 
     fun parse(packet: ByteArray, length: Int): IpPacketInfo? {
-        if (length < 20) return null
+        if (length < 20 || length > packet.size) return null
         val version = (packet[0].toInt() ushr 4) and 0x0f
         return when (version) {
             4 -> parseV4(packet, length)
@@ -41,6 +41,8 @@ object IpPacketParser {
 
     private fun parseV4(packet: ByteArray, length: Int): IpPacketInfo? {
         if (!TorNetPolicy.isWellFormedIpv4Packet(packet, length)) return null
+        // Non-first / MF fragments: L4 header is incomplete or absent — never invent ports.
+        if (TorNetPolicy.isIpv4Fragment(packet, length)) return null
         val ihl = (packet[0].toInt() and 0x0f) * 4
         if (length < ihl + 4) return null
         val protocol = packet[9].toInt() and 0xff
@@ -175,6 +177,9 @@ object IpPacketParser {
             ((packet[offset + 2].toInt() and 0xff) shl 8) or
             (packet[offset + 3].toInt() and 0xff)
 
-    private fun u16(packet: ByteArray, offset: Int): Int =
-        ((packet[offset].toInt() and 0xff) shl 8) or (packet[offset + 1].toInt() and 0xff)
+    private fun u16(packet: ByteArray, offset: Int): Int {
+        // Callers must ensure offset+1 < length ≤ packet.size; defensive for hot path.
+        if (offset < 0 || offset + 1 >= packet.size) return -1
+        return ((packet[offset].toInt() and 0xff) shl 8) or (packet[offset + 1].toInt() and 0xff)
+    }
 }

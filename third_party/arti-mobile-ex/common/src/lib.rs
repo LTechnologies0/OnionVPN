@@ -311,6 +311,14 @@ fn build_client_config(params: &RuntimeParams) -> Result<TorClientConfig> {
         st.resolve_ptr_timeout(Duration::from_secs(30));
     }
 
+    // Onion services (.onion): arti-client defaults allow_onion_addrs=false for
+    // historical vanguards caution. Without this (and the onion-service-client
+    // Cargo feature), SOCKS CONNECT to *.onion returns general-failure (1)
+    // immediately — C Tor works; Arti looked "broken" for onion URLs.
+    client_config_builder
+        .address_filter()
+        .allow_onion_addrs(true);
+
     // NewCircuitPeriod analogue — preemptive prediction_lifetime (floor 1h; never map
     // C Tor's short NewCircuitPeriod 1:1 or Arti thrash-rebuilds look like a BW cap).
     {
@@ -736,8 +744,9 @@ fn apply_arti_circuit_timing(max_dirtiness_sec: u64, prediction_lifetime_sec: u6
         .ok_or_else(|| anyhow!("Arti runtime params missing"))?;
     params.max_dirtiness_sec = max_dirtiness_sec;
     params.prediction_lifetime_sec = prediction_lifetime_sec;
-    write_circuit_timing(&params.state_dir, max_dirtiness_sec, prediction_lifetime_sec);
+    // Live client first; only persist + cache params after reconfigure succeeds.
     reconfigure_from_params(&params)?;
+    write_circuit_timing(&params.state_dir, max_dirtiness_sec, prediction_lifetime_sec);
     if let Ok(mut g) = RUNTIME_PARAMS.lock() {
         *g = Some(params);
     }
@@ -773,11 +782,11 @@ fn apply_arti_exit_country(cc: Option<&str>) -> Result<()> {
             return Err(anyhow!("exit country must be a single ISO-3166 alpha-2 code"));
         }
     }
+    params.exit_country = normalized.clone();
+    // Fail closed: do not update SOCKS prefs / disk / cached params if reconfigure fails.
+    reconfigure_from_params(&params)?;
     write_exit_country(&params.state_dir, normalized.as_deref());
     apply_socks_exit_country(normalized.as_deref());
-    params.exit_country = normalized.clone();
-    // Reconfigure so path changes retire non-conforming circuits when possible.
-    let _ = reconfigure_from_params(&params);
     if let Ok(mut g) = RUNTIME_PARAMS.lock() {
         *g = Some(params);
     }

@@ -84,12 +84,12 @@ object DnsCryptConfigWriter {
         torDnsPort: Int = TunnelEndpoints.TOR_DNS_PORT,
         preferences: TunnelPreferences = TunnelPreferences(),
         /** SOCKS username → IsolationToken (onionmasq NEWNYM rotates via suffix). */
-        socksUser: String = TunnelEndpoints.SOCKS_DNSCRYPT_USER,
+        socksUser: String = TunnelEndpoints.dnsCryptSocksUser(),
     ): String {
         val bootstrap = "${TunnelEndpoints.LOOPBACK}:$torDnsPort"
-        val user = socksUser.ifBlank { TunnelEndpoints.SOCKS_DNSCRYPT_USER }
+        val user = socksUser.ifBlank { TunnelEndpoints.dnsCryptSocksUser() }
         val proxy =
-            "socks5://$user:${TunnelEndpoints.SOCKS_DNSCRYPT_PASS}" +
+            "socks5://$user:${TunnelEndpoints.socksDnsCryptPass()}" +
                 "@${TunnelEndpoints.LOOPBACK}:$torSocksPort"
         val resolvedList = DnsCryptPublicResolvers.resolveNames(
             serverName.ifBlank { preferences.dnsCryptServerName },

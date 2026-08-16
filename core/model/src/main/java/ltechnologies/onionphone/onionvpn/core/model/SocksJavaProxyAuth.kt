@@ -42,7 +42,7 @@ object SocksJavaProxyAuth {
     fun <T> withProbe(block: () -> T): T =
         withCredentials(
             TunnelEndpoints.SOCKS_PROBE_USER,
-            TunnelEndpoints.SOCKS_PROBE_PASS,
+            TunnelEndpoints.socksProbePass(),
             block,
         )
 }

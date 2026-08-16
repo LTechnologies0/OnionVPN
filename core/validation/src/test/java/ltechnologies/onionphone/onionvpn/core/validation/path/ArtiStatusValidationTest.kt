@@ -18,6 +18,7 @@ class ArtiStatusValidationTest {
             bridges=0
             pt=
             synthesize_onion_automap=1
+            allow_onion_addrs=1
         """.trimIndent()
         val check = TorPathValidator.validateArtiStatusContent(
             status,
@@ -28,6 +29,7 @@ class ArtiStatusValidationTest {
         assertEquals(ValidationStatus.Pass, check.status)
         assertEquals("tor.arti.status", check.id)
         assertTrue(check.detail.contains("authIso"))
+        assertTrue(check.detail.contains("allowOnion=true"))
     }
 
     @Test

@@ -123,4 +123,21 @@ class TorNetPolicyTest {
         assertFalse(TorNetPolicy.isWellFormedTransportPorts(12345, 0))
         assertTrue(TorNetPolicy.isWellFormedTransportPorts(12345, 443))
     }
+
+    @Test
+    fun ipv4Fragment_notTorrifiableDatagram() {
+        val pkt = ByteArray(40)
+        pkt[0] = 0x45
+        pkt[2] = 0
+        pkt[3] = 40
+        assertFalse(TorNetPolicy.isIpv4Fragment(pkt, 40))
+        assertTrue(TorNetPolicy.isTorrifiableIpv4Datagram(pkt, 40))
+        pkt[6] = 0x20 // MF
+        assertTrue(TorNetPolicy.isIpv4Fragment(pkt, 40))
+        assertFalse(TorNetPolicy.isTorrifiableIpv4Datagram(pkt, 40))
+        pkt[6] = 0
+        pkt[7] = 1 // non-zero offset
+        assertTrue(TorNetPolicy.isIpv4Fragment(pkt, 40))
+        assertFalse(TorNetPolicy.isTorrifiableIpv4Datagram(pkt, 40))
+    }
 }

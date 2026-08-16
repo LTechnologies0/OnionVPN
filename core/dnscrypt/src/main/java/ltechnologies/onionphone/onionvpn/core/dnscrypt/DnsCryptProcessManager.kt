@@ -80,7 +80,9 @@ class DnsCryptProcessManager(
                 this@DnsCryptProcessManager.preferences = preferences
                 lastPorts = ports
                 lastSocksOverride = socksPortOverride
-                lastSocksUser = socksUserOverride
+                // Always persist the IsolationToken actually written (epoch-aware fallback).
+                val socksUser = socksUserOverride ?: TunnelEndpoints.dnsCryptSocksUser()
+                lastSocksUser = socksUser
                 lastServerName = serverName.ifBlank { preferences.dnsCryptServerName }
                 OpTrace.debug("dnscrypt", "stop_prior")
                 stopInternal()
@@ -93,7 +95,7 @@ class DnsCryptProcessManager(
                 try {
                     OpTrace.step("dnscrypt", "ensure_binary") { ensureExecutable(binaryFile) }
                     OpTrace.step("dnscrypt", "write_config") {
-                        writeConfig(lastServerName, ports, socksPortOverride, socksUserOverride)
+                        writeConfig(lastServerName, ports, socksPortOverride, socksUser)
                     }
                     OpTrace.step("dnscrypt", "spawn") { spawnProcess() }
                     OpTrace.stepSuspending("dnscrypt", "wait_listener") {
@@ -321,7 +323,7 @@ class DnsCryptProcessManager(
                 torSocksPort = socks,
                 torDnsPort = ports.torDnsPort,
                 preferences = preferences,
-                socksUser = socksUserOverride ?: TunnelEndpoints.SOCKS_DNSCRYPT_USER,
+                socksUser = socksUserOverride ?: TunnelEndpoints.dnsCryptSocksUser(),
             ),
         )
         File(configDirectory, DnsCryptConfigWriter.BLOCKED_NAMES_FILE).writeText(
@@ -365,11 +367,11 @@ class DnsCryptProcessManager(
 
     private fun killOrphanedProcesses() {
         runCatching {
-            val proc = Runtime.getRuntime()
-                .exec(arrayOf("sh", "-c", "pkill -f ${binaryFile.name} 2>/dev/null || true"))
+            val proc = ProcessBuilder("pkill", "-f", "--", binaryFile.name)
+                .redirectErrorStream(true)
+                .start()
             try {
                 proc.inputStream.use { it.readBytes() }
-                proc.errorStream.use { it.readBytes() }
                 proc.waitFor()
             } finally {
                 proc.destroyForcibly()

@@ -73,6 +73,12 @@ object TunnelValidator {
                                 socksPort = runtimePorts.torProbeSocksPort,
                             ),
                         )
+                        OpTrace.trace("validate", "onion_hs")
+                        add(
+                            TorPathValidator.validateOnionService(
+                                socksPort = runtimePorts.torProbeSocksPort,
+                            ),
+                        )
                     }
                     OpTrace.trace("validate", "dnscrypt_path")
                     addAll(DnsCryptPathValidator.validate(listenPort = runtimePorts.dnsCryptListenPort))
@@ -353,7 +359,7 @@ object TunnelValidator {
         val listen = "${TunnelEndpoints.LOOPBACK}:${ports.dnsCryptListenPort}"
         val proxyOk = config.contains("proxy = 'socks5://") &&
             config.contains(proxyHostPort) &&
-            config.contains(":${TunnelEndpoints.SOCKS_DNSCRYPT_PASS}@")
+            config.contains(":${TunnelEndpoints.socksDnsCryptPass()}@")
         val bootstrapOk = config.contains("bootstrap_resolvers = ['$bootstrap']")
         val netprobeOk = config.contains("netprobe_address = '$bootstrap'")
         val listenOk = config.contains("listen_addresses = ['$listen']")

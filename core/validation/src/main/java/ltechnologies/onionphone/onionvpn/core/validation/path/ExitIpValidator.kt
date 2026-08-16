@@ -14,7 +14,7 @@ import ltechnologies.onionphone.onionvpn.core.model.SocksJavaProxyAuth
 import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
 import ltechnologies.onionphone.onionvpn.core.model.ValidationCheck
 import ltechnologies.onionphone.onionvpn.core.model.ValidationStatus
-import ltechnologies.onionphone.onionvpn.core.vpn.net.SecureTorHttp.applyTorClientHardening
+import ltechnologies.onionphone.onionvpn.core.model.net.SecureTorHttp.applyTorClientHardening
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONObject
@@ -42,7 +42,7 @@ object ExitIpValidator {
         socksHost: String = TunnelEndpoints.LOOPBACK,
         socksPort: Int = TunnelEndpoints.TOR_SOCKS_PORT,
         socksUser: String = TunnelEndpoints.SOCKS_PROBE_USER,
-        socksPass: String = TunnelEndpoints.SOCKS_PROBE_PASS,
+        socksPass: String = TunnelEndpoints.socksProbePass(),
     ): List<ValidationCheck> = withContext(Dispatchers.IO) {
         val underlying = collectUnderlyingAddresses(context)
         val egress = fetchTorCheck(socksHost, socksPort, socksUser, socksPass)

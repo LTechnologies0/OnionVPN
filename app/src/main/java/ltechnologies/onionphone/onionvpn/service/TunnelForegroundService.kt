@@ -121,6 +121,8 @@ class TunnelForegroundService : Service() {
     private val artiSocksRoleMux = ArtiSocksRoleMux()
     private var socksDnsBootstrapRelay:
         ltechnologies.onionphone.onionvpn.core.vpn.dns.SocksDnsBootstrapRelay? = null
+    /** Serializes stop/start — NEWNYM and Tor downtime resume can overlap. */
+    private val socksDnsBootstrapRelayLock = Any()
     /** Bumps SOCKS IsolationToken username after onionmasq NEWNYM (`dnscrypt-nN`). */
     @Volatile private var onionmasqDnsNymEpoch: Int = 0
     /** Match C Tor / Arti ~10.5s NEWNYM rate limit on onionmasq refreshCircuits. */
@@ -151,29 +153,60 @@ class TunnelForegroundService : Service() {
     private fun ensureSocksDnsBootstrapRelay(
         listenPort: Int,
         socksPort: Int,
-        socksUser: String = TunnelEndpoints.SOCKS_DNSCRYPT_USER,
+        socksUser: String = TunnelEndpoints.dnsCryptSocksUser(),
+        socksPass: String = TunnelEndpoints.socksDnsCryptPass(),
         bindUdp: Boolean = true,
         useSocksResolve: Boolean = true,
         hostnameResolver: ((String) -> String?)? = null,
     ) {
-        socksDnsBootstrapRelay?.stop()
-        val relay = ltechnologies.onionphone.onionvpn.core.vpn.dns.SocksDnsBootstrapRelay(
+        fun newRelay() = ltechnologies.onionphone.onionvpn.core.vpn.dns.SocksDnsBootstrapRelay(
             listenPort = listenPort,
             socksPort = socksPort,
             socksUser = socksUser,
+            socksPass = socksPass,
             bindUdp = bindUdp,
             bindTcp = true,
             useSocksResolve = useSocksResolve,
             hostnameResolver = hostnameResolver,
         )
-        relay.start()
-        socksDnsBootstrapRelay = relay
+        synchronized(socksDnsBootstrapRelayLock) {
+            // Port exclusive: must stop previous before bind. If the replacement
+            // fails, best-effort rebind so DNSCrypt force_tcp is not left dark.
+            socksDnsBootstrapRelay?.stop()
+            socksDnsBootstrapRelay = null
+            val relay = newRelay()
+            try {
+                relay.start()
+                socksDnsBootstrapRelay = relay
+            } catch (error: Exception) {
+                runCatching { relay.stop() }
+                val recovery = newRelay()
+                try {
+                    recovery.start()
+                    socksDnsBootstrapRelay = recovery
+                    Timber.e(error, "bootstrap relay replace failed — recovered with fresh bind")
+                } catch (recoveryError: Exception) {
+                    runCatching { recovery.stop() }
+                    socksDnsBootstrapRelay = null
+                    Timber.e(recoveryError, "bootstrap relay recovery bind failed")
+                    throw error
+                }
+            }
+        }
+    }
+
+    private fun stopSocksDnsBootstrapRelay() {
+        synchronized(socksDnsBootstrapRelayLock) {
+            socksDnsBootstrapRelay?.stop()
+            socksDnsBootstrapRelay = null
+        }
     }
 
     /** Fail-closed gate: DNSCrypt bootstrap needs TCP DNS answers. */
     private suspend fun awaitBootstrapRelayTcpReady(attempts: Int = 8, timeoutMs: Int = 2_000): Boolean {
         repeat(attempts) { attempt ->
-            if (socksDnsBootstrapRelay?.probeOnceTcp(timeoutMs = timeoutMs) == true) {
+            val relay = synchronized(socksDnsBootstrapRelayLock) { socksDnsBootstrapRelay }
+            if (relay?.probeOnceTcp(timeoutMs = timeoutMs) == true) {
                 return true
             }
             Timber.d("TCP DNS bootstrap probe miss attempt=%d/%d", attempt + 1, attempts)
@@ -281,7 +314,13 @@ class TunnelForegroundService : Service() {
                 }.onFailure { Timber.e(it, "Arti TCP DNS bootstrap resume failed") }
             }
             Timber.i("Tor downtime end: start DNSCrypt on :%d", ports.dnsCryptListenPort)
-            dnsCrypt.start(preferences.dnsCryptServerName, ports, preferences).onFailure {
+            dnsCrypt.start(
+                preferences.dnsCryptServerName,
+                ports,
+                preferences,
+                // Preserve NEWNYM IsolationToken (`dnscrypt-nN`); stop() clears lastSocksUser.
+                socksUserOverride = TunnelEndpoints.dnsCryptSocksUser(),
+            ).onFailure {
                 Timber.e(it, "DNSCrypt resume after Tor downtime failed")
             }
         }
@@ -545,7 +584,8 @@ class TunnelForegroundService : Service() {
                     validationJob = null
                     val result = try {
                         if (OnionVpnService.vpnDataPlane.value == TunDataPlane.ONIONMASQ) {
-                            // Single TorClient: refreshCircuits rotates app + DNSCrypt IsolationTokens.
+                            // Single TorClient: refreshCircuits + SOCKS IsolationToken epoch
+                            // (KeepAliveIsolateSOCKSAuth sticks until username rotates).
                             if (org.torproject.onionmasq.OnionMasq.isInitialized() &&
                                 org.torproject.onionmasq.OnionMasq.isRunning()
                             ) {
@@ -566,20 +606,26 @@ class TunnelForegroundService : Service() {
                                         .OnionmasqSocksSidecar.socksPortOrZero()
                                     val dnsUser = TunnelEndpoints.dnsCryptSocksUser(epoch)
                                     if (ports != null && sidecar > 0) {
-                                        ensureSocksDnsBootstrapRelay(
-                                            listenPort = ports.torDnsPort,
-                                            socksPort = sidecar,
-                                            socksUser = dnsUser,
-                                            bindUdp = true,
-                                            useSocksResolve = true,
-                                        )
-                                        dnsCrypt.start(
-                                            preferences.dnsCryptServerName,
-                                            ports,
-                                            preferences,
-                                            socksPortOverride = sidecar,
-                                            socksUserOverride = dnsUser,
-                                        ).onFailure {
+                                        // Circuits already rotated — never let bind/DNSCrypt
+                                        // failure flip NEWNYM to Result.failure / leave epoch
+                                        // bumped with no IsolationToken rewrite attempt logged.
+                                        runCatching {
+                                            ensureSocksDnsBootstrapRelay(
+                                                listenPort = ports.torDnsPort,
+                                                socksPort = sidecar,
+                                                socksUser = dnsUser,
+                                                socksPass = TunnelEndpoints.socksDnsCryptPass(),
+                                                bindUdp = true,
+                                                useSocksResolve = true,
+                                            )
+                                            dnsCrypt.start(
+                                                preferences.dnsCryptServerName,
+                                                ports,
+                                                preferences,
+                                                socksPortOverride = sidecar,
+                                                socksUserOverride = dnsUser,
+                                            ).getOrThrow()
+                                        }.onFailure {
                                             Timber.w(it, "DNSCrypt NEWNYM token rotate failed")
                                         }
                                     } else {
@@ -603,7 +649,42 @@ class TunnelForegroundService : Service() {
                             if (nym.isSuccess) {
                                 // C Tor KeepAliveIsolateSOCKSAuth sticks on u{uid} until
                                 // username rotates — bump epoch on every successful NEWNYM.
-                                TunnelEndpoints.bumpAppSocksNymEpoch()
+                                // Rewrite DNSCrypt IsolationToken (`dnscrypt-nN`). Recreate
+                                // SocksDnsBootstrapRelay only where it owns :torDnsPort (Arti);
+                                // little-t DNSPort already binds that port.
+                                val epoch = TunnelEndpoints.bumpAppSocksNymEpoch()
+                                val ports = runtimePorts
+                                val dnsUser = TunnelEndpoints.dnsCryptSocksUser(epoch)
+                                if (ports != null) {
+                                    runCatching {
+                                        if (preferences.torEngine == TorEngine.ARTI) {
+                                            val dnsUdpReady =
+                                                ltechnologies.onionphone.onionvpn.core.tor.lifecycle
+                                                    .TorReadiness
+                                                    .isDnsPortReady(ports.torDnsPort, timeoutMs = 1_000)
+                                            ensureSocksDnsBootstrapRelay(
+                                                listenPort = ports.torDnsPort,
+                                                socksPort = ports.torDnsCryptSocksPort,
+                                                socksUser = dnsUser,
+                                                socksPass = TunnelEndpoints.socksDnsCryptPass(),
+                                                bindUdp = !dnsUdpReady,
+                                                useSocksResolve = true,
+                                                hostnameResolver = { host ->
+                                                    org.torproject.arti.ArtiControlNative
+                                                        .resolveHostname(host)
+                                                },
+                                            )
+                                        }
+                                        dnsCrypt.start(
+                                            preferences.dnsCryptServerName,
+                                            ports,
+                                            preferences,
+                                            socksUserOverride = dnsUser,
+                                        ).getOrThrow()
+                                    }.onFailure {
+                                        Timber.w(it, "DNSCrypt NEWNYM token rotate failed")
+                                    }
+                                }
                                 if (preferences.torEngine == TorEngine.LITTLE_T) {
                                     lastLittleTNewNymMs = System.currentTimeMillis()
                                 }
@@ -742,8 +823,7 @@ class TunnelForegroundService : Service() {
                             stopThroughputUpdates()
                             forwarderWatchJob?.cancel()
                             forwarderWatchJob = null
-                            socksDnsBootstrapRelay?.stop()
-                            socksDnsBootstrapRelay = null
+                            stopSocksDnsBootstrapRelay()
                             tor.clearExternalRuntimePorts()
                             runtimePorts = null
                             dnsCrypt.stop()
@@ -964,7 +1044,7 @@ class TunnelForegroundService : Service() {
             domainReputation.onTorReady()
             if (preferences.torEngine == TorEngine.ARTI) {
                 OpTrace.step("tunnel", "arti_socks_role_mux") {
-                    artiSocksRoleMux.start(ports)
+                    artiSocksRoleMux.start(ports, applicationContext)
                 }
                 // DNSCrypt force_tcp needs TCP DNS. Arti dns-proxy is UDP-only — always
                 // bind TCP bootstrap on :torDnsPort (UDP only if Arti UDP is not answering).
@@ -1391,8 +1471,7 @@ class TunnelForegroundService : Service() {
             stopSelf()
             return
         }
-        socksDnsBootstrapRelay?.stop()
-        socksDnsBootstrapRelay = null
+        stopSocksDnsBootstrapRelay()
         // Drop stale onionmasq sidecar publish so probes don't hit ghost ports.
         tor.clearExternalRuntimePorts()
         if (stopTorProcesses) {
@@ -1469,8 +1548,7 @@ class TunnelForegroundService : Service() {
         vpnBridge.destroy()
         vpnBridge.waitUntilDown()
         dnsCrypt.stop()
-        socksDnsBootstrapRelay?.stop()
-        socksDnsBootstrapRelay = null
+        stopSocksDnsBootstrapRelay()
         onionmasqDnsNymEpoch = 0
         TunnelEndpoints.resetAppSocksNymEpoch()
         artiSocksRoleMux.stop()
