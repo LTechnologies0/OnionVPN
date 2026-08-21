@@ -703,6 +703,9 @@ index 0000000..7712330
 +        Some(format!("p{rest}").into_bytes())
 +    } else if username == "onionvpn" {
 +        Some(b"stream".to_vec())
++    } else if username == "openvpn" {
++        // TunnelEndpoints OpenVPN-over-Tor SOCKS (ArtiSocksRoleMux → sidecar).
++        Some(b"overtor".to_vec())
 +    } else if let Some(rest) = username.strip_prefix('u') {
 +        if rest.is_empty() || rest == "unknown" {
 +            return password == b"punknown";

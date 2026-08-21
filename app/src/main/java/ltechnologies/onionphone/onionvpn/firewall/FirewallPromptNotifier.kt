@@ -18,6 +18,7 @@ import androidx.core.graphics.drawable.IconCompat
 import ltechnologies.onionphone.onionvpn.R
 import ltechnologies.onionphone.onionvpn.core.model.DomainThreatCategory
 import ltechnologies.onionphone.onionvpn.core.model.FirewallConnectionInfo
+import ltechnologies.onionphone.onionvpn.core.vpn.firewall.FirewallBridge
 import timber.log.Timber
 
 /**
@@ -68,9 +69,14 @@ internal class FirewallPromptNotifier(
         val content = base + dpiSuffix + threatSuffix
         val openPending = detailPendingIntent(info.requestId)
         val allowPending = actionPendingIntent(
-            FirewallPromptActionReceiver.ACTION_ALLOW,
+            FirewallPromptActionReceiver.ACTION_ALLOW_TOR,
             info.requestId,
             REQUEST_ALLOW,
+        )
+        val allowOvpnPending = actionPendingIntent(
+            FirewallPromptActionReceiver.ACTION_ALLOW_OVPN,
+            info.requestId,
+            REQUEST_ALLOW_OVPN,
         )
         val denyPending = actionPendingIntent(
             FirewallPromptActionReceiver.ACTION_DENY,
@@ -93,14 +99,21 @@ internal class FirewallPromptNotifier(
             .setOnlyAlertOnce(true)
             .addAction(
                 0,
-                appContext.getString(R.string.firewall_action_allow),
+                appContext.getString(R.string.firewall_action_allow_tor),
                 allowPending,
             )
-            .addAction(
+        if (FirewallBridge.openVpnOverTorUp) {
+            builder.addAction(
                 0,
-                appContext.getString(R.string.firewall_action_deny),
-                denyPending,
+                appContext.getString(R.string.firewall_action_allow_ovpn),
+                allowOvpnPending,
             )
+        }
+        builder.addAction(
+            0,
+            appContext.getString(R.string.firewall_action_deny),
+            denyPending,
+        )
         if (appIcon != null) {
             builder.setLargeIcon(appIcon)
             builder.setSmallIcon(IconCompat.createWithBitmap(appIcon))
@@ -184,5 +197,6 @@ internal class FirewallPromptNotifier(
         private const val REQUEST_OPEN = 4301
         private const val REQUEST_ALLOW = 4302
         private const val REQUEST_DENY = 4303
+        private const val REQUEST_ALLOW_OVPN = 4304
     }
 }

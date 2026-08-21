@@ -30,6 +30,7 @@ import ltechnologies.onionphone.onionvpn.core.model.FirewallVerdict
 fun FirewallPromptContent(
     info: FirewallConnectionInfo,
     tempMinutes: Int,
+    ovpnAvailable: Boolean,
     onAnswer: (verdict: FirewallVerdict, scope: FirewallRuleScope) -> Unit,
 ) {
     val context = LocalContext.current
@@ -47,7 +48,11 @@ fun FirewallPromptContent(
     ) {
         Text("Connection request", style = MaterialTheme.typography.headlineSmall)
         Text(
-            "A new outbound connection wants to leave through Tor.",
+            if (ovpnAvailable) {
+                "Choose how this outbound connection leaves the device."
+            } else {
+                "A new outbound connection wants to leave through Tor."
+            },
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -118,27 +123,36 @@ fun FirewallPromptContent(
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
 
-        Button(
-            onClick = { onAnswer(FirewallVerdict.ALLOW, FirewallRuleScope.PERMANENT) },
-            modifier = Modifier.fillMaxWidth(),
-            shape = MaterialTheme.shapes.large,
-        ) {
-            Text("Allow permanently")
+        Text("Via Tor", style = MaterialTheme.typography.titleSmall)
+        ScopeRow(
+            tempMinutes = tempMinutes,
+            onPermanent = { onAnswer(FirewallVerdict.ALLOW_TOR, FirewallRuleScope.PERMANENT) },
+            onSession = { onAnswer(FirewallVerdict.ALLOW_TOR, FirewallRuleScope.SESSION) },
+            onTemporary = { onAnswer(FirewallVerdict.ALLOW_TOR, FirewallRuleScope.TEMPORARY) },
+            permanentLabel = "Allow via Tor permanently",
+            sessionLabel = "Allow via Tor until VPN stops",
+            temporaryLabel = "Allow via Tor for $tempMinutes min",
+        )
+
+        if (ovpnAvailable) {
+            Text("Via OpenVPN (over Tor)", style = MaterialTheme.typography.titleSmall)
+            Text(
+                "Site sees the VPN egress IP, not a Tor exit. DNS stays DNSCrypt-over-Tor.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            ScopeRow(
+                tempMinutes = tempMinutes,
+                onPermanent = { onAnswer(FirewallVerdict.ALLOW_OVPN, FirewallRuleScope.PERMANENT) },
+                onSession = { onAnswer(FirewallVerdict.ALLOW_OVPN, FirewallRuleScope.SESSION) },
+                onTemporary = { onAnswer(FirewallVerdict.ALLOW_OVPN, FirewallRuleScope.TEMPORARY) },
+                permanentLabel = "Allow via OVPN permanently",
+                sessionLabel = "Allow via OVPN until VPN stops",
+                temporaryLabel = "Allow via OVPN for $tempMinutes min",
+            )
         }
-        OutlinedButton(
-            onClick = { onAnswer(FirewallVerdict.ALLOW, FirewallRuleScope.SESSION) },
-            modifier = Modifier.fillMaxWidth(),
-            shape = MaterialTheme.shapes.large,
-        ) {
-            Text("Allow until VPN stops")
-        }
-        OutlinedButton(
-            onClick = { onAnswer(FirewallVerdict.ALLOW, FirewallRuleScope.TEMPORARY) },
-            modifier = Modifier.fillMaxWidth(),
-            shape = MaterialTheme.shapes.large,
-        ) {
-            Text("Allow for $tempMinutes min")
-        }
+
+        Text("Refuse", style = MaterialTheme.typography.titleSmall)
         OutlinedButton(
             onClick = { onAnswer(FirewallVerdict.DENY, FirewallRuleScope.TEMPORARY) },
             modifier = Modifier.fillMaxWidth(),
@@ -169,5 +183,38 @@ fun FirewallPromptContent(
         ) {
             Text("Deny permanently")
         }
+    }
+}
+
+@Composable
+private fun ScopeRow(
+    tempMinutes: Int,
+    onPermanent: () -> Unit,
+    onSession: () -> Unit,
+    onTemporary: () -> Unit,
+    permanentLabel: String,
+    sessionLabel: String,
+    temporaryLabel: String,
+) {
+    Button(
+        onClick = onPermanent,
+        modifier = Modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.large,
+    ) {
+        Text(permanentLabel)
+    }
+    OutlinedButton(
+        onClick = onSession,
+        modifier = Modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.large,
+    ) {
+        Text(sessionLabel)
+    }
+    OutlinedButton(
+        onClick = onTemporary,
+        modifier = Modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.large,
+    ) {
+        Text(temporaryLabel)
     }
 }

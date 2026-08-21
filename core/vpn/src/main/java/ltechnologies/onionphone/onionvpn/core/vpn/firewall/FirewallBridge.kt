@@ -27,4 +27,29 @@ object FirewallBridge {
      */
     @Volatile
     var onAutomapRemap: ((ip: String, oldHost: String, newHost: String) -> Unit)? = null
+
+    /**
+     * When OpenVPN-over-Tor is up, TunDnsMux writes [FirewallVerdict.ALLOW_OVPN]
+     * packets here (IP frames for the userspace OVPN tun). Null = OVPN down /
+     * unavailable → OVPN routes fail-closed.
+     */
+    @Volatile
+    var ovpnPacketSink: OvpnPacketSink? = null
+
+    /** True when OVPN-over-Tor is connected and accepting ALLOW_OVPN traffic. */
+    @Volatile
+    var openVpnOverTorUp: Boolean = false
+
+    /**
+     * Optional callback to inject decrypted OVPN→app IP packets into the VpnService TUN
+     * (set by TunDnsMux while the TUN is live).
+     */
+    @Volatile
+    var injectToVpnTun: ((ByteArray, Int) -> Unit)? = null
+}
+
+/** Hot-path sink for ALLOW_OVPN IP packets (written instead of hev). */
+fun interface OvpnPacketSink {
+    /** @return true if the packet was accepted for OVPN encapsulation. */
+    fun offer(packet: ByteArray, length: Int): Boolean
 }

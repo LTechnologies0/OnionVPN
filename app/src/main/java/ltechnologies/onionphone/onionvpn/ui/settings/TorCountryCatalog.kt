@@ -21,7 +21,7 @@ object TorCountryCatalog {
     )
 
     val countries: List<Country> by lazy {
-        Locale.getISOCountries()
+        val iso = Locale.getISOCountries()
             .map { cc ->
                 val lower = cc.lowercase(Locale.US)
                 Country(
@@ -29,6 +29,13 @@ object TorCountryCatalog {
                     name = Locale("", cc).displayCountry.ifBlank { cc },
                 )
             }
+        // Tor GeoIP / consensus uses {eu} for some relays not pinned to a member state.
+        // ISO 3166-1 does not list EU as a country — inject so ExcludeNodes can select it.
+        val withTorExtras = iso + listOf(
+            Country(code = "eu", name = "European Union (Tor GeoIP)"),
+        )
+        withTorExtras
+            .distinctBy { it.code }
             .sortedBy { it.name.lowercase(Locale.US) }
     }
 
@@ -36,8 +43,9 @@ object TorCountryCatalog {
         Federation(
             id = "eu",
             label = "European Union (EU)",
-            description = "EU member states",
+            description = "EU member states + Tor GeoIP {eu} (relays without a member-state tag)",
             codes = setOf(
+                "eu",
                 "at", "be", "bg", "hr", "cy", "cz", "dk", "ee", "fi", "fr", "de", "gr", "hu",
                 "ie", "it", "lv", "lt", "lu", "mt", "nl", "pl", "pt", "ro", "sk", "si", "es", "se",
             ),
@@ -45,8 +53,9 @@ object TorCountryCatalog {
         Federation(
             id = "eea",
             label = "European Economic Area (EEA)",
-            description = "EU + Iceland, Liechtenstein, Norway",
+            description = "EU + Iceland, Liechtenstein, Norway + Tor GeoIP {eu}",
             codes = setOf(
+                "eu",
                 "at", "be", "bg", "hr", "cy", "cz", "dk", "ee", "fi", "fr", "de", "gr", "hu",
                 "ie", "is", "it", "li", "lv", "lt", "lu", "mt", "nl", "no", "pl", "pt", "ro",
                 "sk", "si", "es", "se",
@@ -55,8 +64,9 @@ object TorCountryCatalog {
         Federation(
             id = "schengen",
             label = "Schengen Area",
-            description = "Schengen free-movement zone",
+            description = "Schengen free-movement zone + Tor GeoIP {eu}",
             codes = setOf(
+                "eu",
                 "at", "be", "bg", "hr", "cz", "dk", "ee", "fi", "fr", "de", "gr", "hu", "is",
                 "it", "lv", "li", "lt", "lu", "mt", "nl", "no", "pl", "pt", "ro", "sk", "si",
                 "es", "se", "ch",
@@ -146,5 +156,21 @@ object TorCountryCatalog {
         if (codes.isEmpty()) return "None"
         if (codes.size <= 6) return encodeNodeCodes(codes)
         return "${codes.size} countries"
+    }
+
+    /**
+     * Legacy EU/EEA/Schengen ExcludeNodes lists omitted Tor GeoIP `{eu}`.
+     * If the saved list already covers (almost) all EU member states but not `{eu}`,
+     * inject `{eu}` so ExcludeNodes matches federation semantics.
+     */
+    fun ensureTorGeoIpEuInEuropeanExcludes(raw: String): String {
+        val codes = parseNodeCodes(raw).toMutableSet()
+        if (codes.isEmpty() || codes.contains("eu")) return encodeNodeCodes(codes)
+        val euMembers = federations.first { it.id == "eu" }.codes - "eu"
+        // Threshold: user clearly meant "all EU" (≥20 of 27 members), not a few countries.
+        if (codes.intersect(euMembers).size >= 20) {
+            codes.add("eu")
+        }
+        return encodeNodeCodes(codes)
     }
 }

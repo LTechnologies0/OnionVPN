@@ -66,7 +66,7 @@ internal class FirewallVerdictCaches {
             val it = flowCache.entries.iterator()
             while (it.hasNext() && n < FLOW_TRIM_BUDGET) {
                 val e = it.next()
-                if (e.value == FirewallVerdict.ALLOW) {
+                if (e.value.forwards) {
                     removeFlowKey(e.key)
                     it.remove()
                     n++
@@ -98,7 +98,7 @@ internal class FirewallVerdictCaches {
         val it = decisionCache.entries.iterator()
         while (it.hasNext() && n < DECISION_TRIM_BUDGET) {
             val e = it.next()
-            if (e.value == FirewallVerdict.ALLOW) {
+            if (e.value.forwards) {
                 removeDecisionKey(e.key)
                 it.remove()
                 n++

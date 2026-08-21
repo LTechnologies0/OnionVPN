@@ -23,4 +23,32 @@ class TorCountryCatalogTest {
         val fourteen = TorCountryCatalog.federations.first { it.id == "fourteen_eyes" }.codes
         assertTrue(fourteen.containsAll(five))
     }
+
+    @Test
+    fun euEeaSchengen_includeTorGeoIpEu() {
+        val eu = TorCountryCatalog.federations.first { it.id == "eu" }.codes
+        val eea = TorCountryCatalog.federations.first { it.id == "eea" }.codes
+        val schengen = TorCountryCatalog.federations.first { it.id == "schengen" }.codes
+        assertTrue("eu federation must include Tor GeoIP {eu}", eu.contains("eu"))
+        assertTrue("eea must include eu", eea.contains("eu"))
+        assertTrue("schengen must include eu", schengen.contains("eu"))
+        assertTrue("eea must contain all eu members+tag", eea.containsAll(eu))
+        assertTrue(
+            "countries list must expose Tor GeoIP eu for manual ExcludeNodes",
+            TorCountryCatalog.countries.any { it.code == "eu" },
+        )
+    }
+
+    @Test
+    fun migrateLegacyEuExclude_addsEuTag() {
+        // Member states only (pre-fix federation) — must inject {eu}.
+        val legacy = TorCountryCatalog.encodeNodeCodes(
+            setOf(
+                "at", "be", "bg", "hr", "cy", "cz", "dk", "ee", "fi", "fr", "de", "gr", "hu",
+                "ie", "it", "lv", "lt", "lu", "mt", "nl", "pl", "pt", "ro", "sk", "si", "es", "se",
+            ),
+        )
+        val migrated = TorCountryCatalog.ensureTorGeoIpEuInEuropeanExcludes(legacy)
+        assertTrue(TorCountryCatalog.parseNodeCodes(migrated).contains("eu"))
+    }
 }

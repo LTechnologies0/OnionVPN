@@ -255,6 +255,9 @@ internal class TorControlOperations(
         conf("EntryNodes", entry)
         conf("ExitNodes", exit)
         conf("ExcludeNodes", exclude)
+        // Match TorConfigWriter: StrictNodes 1 whenever any constraint is set.
+        val strict = entry.isNotBlank() || exit.isNotBlank() || exclude.isNotBlank()
+        transport.command("SETCONF StrictNodes=${if (strict) 1 else 0}")
     }
 
     companion object {

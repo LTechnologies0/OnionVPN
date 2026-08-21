@@ -42,7 +42,10 @@ git apply ../../native/onionmasq/safe-uninit-jni.patch
 SOCKS sidecar auth allowlist (must match `TunnelEndpoints`):
 `probe`/`check`, `dnscrypt`|`dnscrypt-nN`/`resolver`, `pac`/`dnscrypt`,
 `pac{uid}`|`pac{uid}-nN`/`p{uid}`|`p{uid}-nN`, `u{uid}`|`u{uid}-nN`/`p{uid}`|`p{uid}-nN`,
-`onionvpn`/`stream`.
+`onionvpn`/`stream`, `openvpn`/`overtor` (OpenVPN-over-Tor via ArtiSocksRoleMux).
+
+Rebuild `libonionmasq_mobile.so` after changing `socks-sidecar.patch` or OpenVPN-over-Tor
+on Arti+onionmasq will get SOCKS auth failure (`0x01`).
 
 `safe-uninit-jni.patch` converts **all** probe/stop/config/command JNI entry points
 to `try_get()` (no-op / 0 / Java exception) when `init()` has not run. Upstream

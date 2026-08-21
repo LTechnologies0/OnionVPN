@@ -285,6 +285,12 @@ object TunnelEndpoints {
     const val SESSION_GROUP_DNS = 2
     const val SESSION_GROUP_DNSCRYPT = 3
     const val SESSION_GROUP_PROBE = 4
+    /** OpenVPN-over-Tor control/data channel (IsolateSOCKSAuth). */
+    const val SESSION_GROUP_OPENVPN = 5
+
+    /** SOCKS auth for OpenVPN → dedicated SocksPort SessionGroup. */
+    const val SOCKS_OPENVPN_USER = "openvpn"
+    const val SOCKS_OPENVPN_PASS = "overtor"
 
     /**
      * Stable PAC HTTP listen port (URL does not change across sessions).
@@ -338,6 +344,7 @@ enum class TunnelPhase {
     Idle,
     StartingTor,
     StartingDnsCrypt,
+    StartingOpenVpn,
     StartingVpn,
     Validating,
     Connected,

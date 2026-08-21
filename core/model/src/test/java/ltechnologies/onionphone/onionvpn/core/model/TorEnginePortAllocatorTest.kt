@@ -13,6 +13,8 @@ class TorEnginePortAllocatorTest {
         assertNotEquals(ports.torSocksPort, ports.torDnsCryptSocksPort)
         assertNotEquals(ports.torSocksPort, ports.torProbeSocksPort)
         assertNotEquals(ports.torDnsCryptSocksPort, ports.torProbeSocksPort)
+        assertNotEquals(ports.torSocksPort, ports.torOpenVpnSocksPort)
+        assertNotEquals(ports.torProbeSocksPort, ports.torOpenVpnSocksPort)
         assertNotEquals(ports.torSocksPort, ports.torDnsPort)
     }
 
@@ -23,6 +25,8 @@ class TorEnginePortAllocatorTest {
         assertNotEquals(ports.torSocksPort, ports.torDnsCryptSocksPort)
         assertNotEquals(ports.torSocksPort, ports.torProbeSocksPort)
         assertNotEquals(ports.torDnsCryptSocksPort, ports.torProbeSocksPort)
+        assertNotEquals(ports.torSocksPort, ports.torOpenVpnSocksPort)
+        assertNotEquals(ports.torProbeSocksPort, ports.torOpenVpnSocksPort)
         assertNotEquals(ports.torSocksPort, ports.torDnsPort)
         assertTrue(ports.dnsCryptListenPort > 0)
     }

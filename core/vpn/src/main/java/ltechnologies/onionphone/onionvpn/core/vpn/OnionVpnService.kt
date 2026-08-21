@@ -293,6 +293,8 @@ class OnionVpnService : VpnService() {
 
     private fun applyBlockingDefaults() {
         val preferences = TunnelPreferences(killSwitchEnabled = true)
+        // Same generation contract as ACTION_BLOCK so FGS waiters see rebinding.
+        nextGeneration()
         isEstablished.value = false
         forwarderSocksPort.value = -1
         forwarderDnsCryptPort.value = -1
@@ -309,9 +311,9 @@ class OnionVpnService : VpnService() {
                 }
                 profileMode.value = VpnProfileMode.Blocking
                 stopUnderlyingTracking()
-                val gen = generationSeq.incrementAndGet()
-                activeGeneration.value = gen
+                activeGeneration.value = generationSeq.get()
                 isEstablished.value = true
+                isRebinding.value = false
             }
             is VpnEstablishResult.Failure -> {
                 Timber.e("Always-on Blocking establish failed: ${result.reason}")
@@ -320,6 +322,7 @@ class OnionVpnService : VpnService() {
                     tunForwarder = previousForwarder
                     isEstablished.value = true
                 }
+                isRebinding.value = false
             }
         }
     }
@@ -606,18 +609,29 @@ class OnionVpnService : VpnService() {
             packageName,
             "ltechnologies.onionphone.onionvpn.service.TunnelForegroundService",
         ).setAction(coordinatorAction)
-        runCatching {
-            // Coordinator is a foreground service — startService from background can be
-            // dropped on Android 8+ / OEM always-on restart paths.
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                startForegroundService(intent)
-            } else {
-                @Suppress("DEPRECATION")
-                startService(intent)
+        // Always-On / Private Space reopen: FGS start can be dropped once — retry briefly.
+        var lastError: Throwable? = null
+        repeat(4) { attempt ->
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    startForegroundService(intent)
+                } else {
+                    @Suppress("DEPRECATION")
+                    startService(intent)
+                }
+                return
+            } catch (e: Exception) {
+                lastError = e
+                Timber.w(e, "notifyCoordinator attempt %d failed ($coordinatorAction)", attempt + 1)
+                try {
+                    Thread.sleep(250L * (attempt + 1))
+                } catch (_: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    return
+                }
             }
-        }.onFailure { error ->
-            Timber.w(error, "Could not notify tunnel coordinator ($coordinatorAction)")
         }
+        Timber.e(lastError, "Could not notify tunnel coordinator ($coordinatorAction) after retries")
     }
 
     companion object {
@@ -759,6 +773,13 @@ class OnionVpnService : VpnService() {
         fun markForwarderAlive() {
             forwarderAlive.value = true
         }
+
+        /**
+         * [VpnService.protect] for OpenVPN PROTECTFD (ics-openvpn management).
+         * No-op / false when the VPN service instance is not alive.
+         */
+        fun protectSocket(fd: Int): Boolean =
+            instance?.protect(fd) ?: false
 
         private val alwaysOnActive = MutableStateFlow(false)
         val vpnAlwaysOn: StateFlow<Boolean> = alwaysOnActive.asStateFlow()

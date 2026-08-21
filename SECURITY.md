@@ -15,6 +15,12 @@ Report vulnerabilities privately via GitHub **Security → Advisories → New dr
 
 Known public CVEs mapped to pins and mitigations: [docs/CVE_INVENTORY.md](docs/CVE_INVENTORY.md).
 
+## OpenVPN over Tor
+
+Optional feature. When enabled, OnionVPN may load a GPL OpenVPN binary (`libovpnexec.so`).
+Redistribution of that binary is subject to the OpenVPN / ics-openvpn GPL licence.
+Device DNS remains DNSCrypt-over-Tor even for firewall “Via OVPN” flows.
+
 ## CI signing
 
 Release keystores are provided only via GitHub Actions secrets (`RELEASE_KEYSTORE_*`). Never commit `keystore.properties` or `.jks` files.

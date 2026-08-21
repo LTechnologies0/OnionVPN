@@ -519,6 +519,11 @@ fun SettingsScreen(
             checked = local.firewallEnabled,
             onChecked = { commit(local.copy(firewallEnabled = it)) },
         )
+        Text(
+            text = "Prompts offer Via Tor / Via OVPN (when OpenVPN-over-Tor is up) / Deny.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
         Text("Default when no rule", style = MaterialTheme.typography.labelLarge)
         Row(
             modifier = Modifier.horizontalScroll(rememberScrollState()),
@@ -540,7 +545,7 @@ fun SettingsScreen(
                 selected = local.firewallDefaultAction == FirewallDefaultAction.ALLOW,
                 onClick = { commit(local.copy(firewallDefaultAction = FirewallDefaultAction.ALLOW)) },
                 enabled = local.firewallEnabled,
-                label = { Text("Allow") },
+                label = { Text("Allow via Tor") },
             )
         }
         if (!local.firewallEnabled) {
@@ -560,6 +565,103 @@ fun SettingsScreen(
             label = { Text("Temporary rule (minutes)") },
             enabled = local.firewallEnabled,
             modifier = Modifier.fillMaxWidth(),
+        )
+
+        SectionHeader(
+            title = "OpenVPN over Tor",
+            subtitle = "Optional TCP OpenVPN client reaches the VPN server via Tor SOCKS so " +
+                "websites see the VPN egress IP (not a Tor exit). Device DNS stays DNSCrypt-over-Tor. " +
+                "Needs libovpnexec.so (ics-openvpn). Free VPN Gate: leave user/pass empty unless prompted. " +
+                "Changing this restarts the tunnel.",
+        )
+        PrefSwitch(
+            label = "Enable OpenVPN over Tor",
+            checked = local.openVpnOverTorEnabled,
+            onChecked = {
+                commit(local.copy(openVpnOverTorEnabled = it), restart = true)
+            },
+        )
+        Text(
+            text = if (local.openVpnProfileConfigured) {
+                "Profile imported (app-private). “Via OVPN” appears only when control+data plane are up."
+            } else {
+                "Import a TCP-capable .ovpn profile first."
+            },
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        LaunchedEffect(Unit) {
+            val has = withContext(Dispatchers.IO) {
+                ltechnologies.onionphone.onionvpn.core.openvpn.OpenVpnOverTorManager(context).hasProfile()
+            }
+            if (has != local.openVpnProfileConfigured) {
+                commit(local.copy(openVpnProfileConfigured = has))
+            }
+        }
+        val ovpnImport = androidx.activity.compose.rememberLauncherForActivityResult(
+            contract = androidx.activity.result.contract.ActivityResultContracts.GetContent(),
+        ) { uri ->
+            if (uri == null) return@rememberLauncherForActivityResult
+            scope.launch {
+                val ok = withContext(Dispatchers.IO) {
+                    runCatching {
+                        val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                            ?: return@runCatching false
+                        if (bytes.isEmpty()) return@runCatching false
+                        val mgr = ltechnologies.onionphone.onionvpn.core.openvpn.OpenVpnOverTorManager(context)
+                        mgr.importProfile(bytes)
+                    }.getOrDefault(false)
+                }
+                if (ok) {
+                    commit(local.copy(openVpnProfileConfigured = true, openVpnOverTorEnabled = true), restart = true)
+                }
+            }
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(onClick = { ovpnImport.launch("*/*") }) {
+                Text("Import .ovpn")
+            }
+            if (local.openVpnProfileConfigured) {
+                OutlinedButton(
+                    onClick = {
+                        scope.launch {
+                            withContext(Dispatchers.IO) {
+                                ltechnologies.onionphone.onionvpn.core.openvpn.OpenVpnOverTorManager(context)
+                                    .clearProfile()
+                            }
+                            commit(
+                                local.copy(openVpnProfileConfigured = false, openVpnOverTorEnabled = false),
+                                restart = true,
+                            )
+                        }
+                    },
+                ) {
+                    Text("Clear profile")
+                }
+            }
+        }
+        OutlinedTextField(
+            value = local.openVpnAuthUser,
+            onValueChange = { commit(local.copy(openVpnAuthUser = it)) },
+            label = { Text("OpenVPN username (optional)") },
+            placeholder = { Text("vpn for VPN Gate") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth(),
+        )
+        OutlinedTextField(
+            value = local.openVpnAuthPassword,
+            onValueChange = { commit(local.copy(openVpnAuthPassword = it)) },
+            label = { Text("OpenVPN password (optional)") },
+            placeholder = { Text("vpn for VPN Gate") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth(),
+        )
+        Text(
+            text = "VPN Gate free relays: leave credentials empty (most accept cert-only). " +
+                "Only fill username/password if the server prompts (sometimes vpn/vpn). " +
+                "Commercial providers use their own credentials.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
 
         SectionHeader(
@@ -759,6 +861,20 @@ fun SettingsScreen(
                     label = { Text("Stable") },
                 )
                 FilterChip(
+                    selected = local.torNewCircuitPeriodSec >= 3_600 &&
+                        local.torMaxCircuitDirtinessSec >= 3_600,
+                    onClick = {
+                        commit(
+                            local.copy(
+                                torNewCircuitPeriodSec = 3_600,
+                                torMaxCircuitDirtinessSec = 3_600,
+                            ),
+                            restart = true,
+                        )
+                    },
+                    label = { Text("Wallets") },
+                )
+                FilterChip(
                     selected = local.torNewCircuitPeriodSec == 30 &&
                         local.torMaxCircuitDirtinessSec == 180,
                     onClick = {
@@ -785,11 +901,32 @@ fun SettingsScreen(
                     label = { Text("Paranoid") },
                 )
             }
+            Text(
+                text = "Crypto wallets (Cake Wallet, etc.): use “Wallets” timing + C Tor when possible. " +
+                    "Short MaxCircuitDirtiness / aggressive NEWNYM drops long Electrum/RPC TCP. " +
+                    "Firewall ASK can stall sync — allow the wallet permanently. UDP/QUIC stays blackholed.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         } else if (caps.liveCircuitTiming && local.tunDataPlane != TunDataPlane.ONIONMASQ) {
             Row(
                 modifier = Modifier.horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
+                FilterChip(
+                    selected = local.torMaxCircuitDirtinessSec >= 3_600,
+                    onClick = {
+                        commit(
+                            local.copy(
+                                torNewCircuitPeriodSec =
+                                    local.torNewCircuitPeriodSec.coerceAtLeast(3_600),
+                                torMaxCircuitDirtinessSec = 3_600,
+                            ),
+                            restart = true,
+                        )
+                    },
+                    label = { Text("Wallets") },
+                )
                 FilterChip(
                     selected = local.torMaxCircuitDirtinessSec == 600,
                     onClick = {
@@ -1117,7 +1254,11 @@ fun SettingsScreen(
                             codes.isEmpty() -> ""
                             codes.size == 1 -> TorCountryCatalog.encodeNodeCodes(codes)
                             else -> TorCountryCatalog.encodeNodeCodes(setOf(codes.first())).also {
-                                // Keep first only for Arti StreamPrefs::exit_country
+                                timber.log.Timber.w(
+                                    "Arti/onionmasq ExitNodes: using first country only {%s} (dropped %d)",
+                                    codes.first(),
+                                    codes.size - 1,
+                                )
                             }
                         }
                     } else {

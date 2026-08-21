@@ -20,6 +20,7 @@ import ltechnologies.onionphone.onionvpn.core.model.TorEngine
 import ltechnologies.onionphone.onionvpn.core.model.TunDataPlane
 import ltechnologies.onionphone.onionvpn.core.model.TunnelPreferences
 import ltechnologies.onionphone.onionvpn.core.model.VpnAppRoutingMode
+import ltechnologies.onionphone.onionvpn.ui.settings.TorCountryCatalog
 
 private val Context.tunnelDataStore: DataStore<Preferences> by preferencesDataStore(name = "tunnel_prefs")
 
@@ -60,6 +61,10 @@ class TunnelPreferencesStore @Inject constructor(
         val vpnAppPackages = stringPreferencesKey("vpn_app_packages")
         val allowAdbClearnetLeak = booleanPreferencesKey("allow_adb_clearnet_leak")
         val tunDataPlane = stringPreferencesKey("tun_data_plane")
+        val openVpnOverTor = booleanPreferencesKey("openvpn_over_tor")
+        val openVpnProfileConfigured = booleanPreferencesKey("openvpn_profile_configured")
+        val openVpnAuthUser = stringPreferencesKey("openvpn_auth_user")
+        val openVpnAuthPassword = stringPreferencesKey("openvpn_auth_password")
     }
 
     /** Release (non-debuggable) → no-logs ON; debug builds → OFF. */
@@ -105,6 +110,10 @@ class TunnelPreferencesStore @Inject constructor(
             prefs[Keys.vpnAppPackages] = next.vpnAppPackages.sorted().joinToString("\n")
             prefs[Keys.allowAdbClearnetLeak] = next.allowAdbClearnetLeak
             prefs[Keys.tunDataPlane] = next.tunDataPlane.name
+            prefs[Keys.openVpnOverTor] = next.openVpnOverTorEnabled
+            prefs[Keys.openVpnProfileConfigured] = next.openVpnProfileConfigured
+            prefs[Keys.openVpnAuthUser] = next.openVpnAuthUser
+            prefs[Keys.openVpnAuthPassword] = next.openVpnAuthPassword
         }
     }
 
@@ -119,7 +128,9 @@ class TunnelPreferencesStore @Inject constructor(
         torBridges = this[Keys.torBridges].orEmpty(),
         torEntryNodes = this[Keys.torEntry].orEmpty(),
         torExitNodes = this[Keys.torExit].orEmpty(),
-        torExcludeNodes = this[Keys.torExclude].orEmpty(),
+        torExcludeNodes = TorCountryCatalog.ensureTorGeoIpEuInEuropeanExcludes(
+            this[Keys.torExclude].orEmpty(),
+        ),
         torNewCircuitPeriodSec = this[Keys.newCircuit] ?: 30,
         torMaxCircuitDirtinessSec = this[Keys.maxDirtiness] ?: 600,
         dnsCryptRequireNoLog = this[Keys.requireNoLog] ?: true,
@@ -154,5 +165,9 @@ class TunnelPreferencesStore @Inject constructor(
             ?: emptySet(),
         allowAdbClearnetLeak = this[Keys.allowAdbClearnetLeak] ?: false,
         tunDataPlane = TunDataPlane.fromPreference(this[Keys.tunDataPlane]),
+        openVpnOverTorEnabled = this[Keys.openVpnOverTor] ?: false,
+        openVpnProfileConfigured = this[Keys.openVpnProfileConfigured] ?: false,
+        openVpnAuthUser = this[Keys.openVpnAuthUser].orEmpty(),
+        openVpnAuthPassword = this[Keys.openVpnAuthPassword].orEmpty(),
     )
 }

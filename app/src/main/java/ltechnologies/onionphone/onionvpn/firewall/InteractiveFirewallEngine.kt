@@ -158,96 +158,96 @@ class InteractiveFirewallEngine @Inject constructor(
         promptNotifier.cancel()
     }
 
-    override fun allowOutbound(packet: ByteArray, length: Int): Boolean {
+    override fun outboundRoute(packet: ByteArray, length: Int): FirewallVerdict {
         val prefs = preferences.get()
-        if (!prefs.firewallEnabled) return true
+        if (!prefs.firewallEnabled) return FirewallVerdict.ALLOW_TOR
 
         // Unparseable → fail-closed (never treat garbage as ALLOW).
-        val info = IpPacketParser.parse(packet, length) ?: return false
+        val info = IpPacketParser.parse(packet, length) ?: return FirewallVerdict.DENY
 
         // UDP/53 → TunDnsMux → DNSCrypt/Tor DNSPort (any resolver IP pinned into TUN).
         // Honor DENY rules only — never ASK (prompts would blackhole working DNS while Tor is fine).
         if (info.protocol == IpPacketParser.PROTO_UDP && info.dstPort == 53) {
             val uid = ownerResolver.resolveUid(info)
-            if (uid == ownUid) return true
+            if (uid == ownUid) return FirewallVerdict.ALLOW_TOR
             if (ConnectionOwnerResolver.isValidUid(uid)) {
                 val deny = findRule(uid, info.dstIp, info)
-                if (deny?.verdict == FirewallVerdict.DENY) return false
+                if (deny?.verdict == FirewallVerdict.DENY) return FirewallVerdict.DENY
             }
-            return true
+            return FirewallVerdict.ALLOW_TOR
         }
 
         val tupleKey = FirewallCacheKeys.tupleFlowKey(info)
         if (info.isTcp && !info.isTcpSyn) {
-            caches.flowCache[tupleKey]?.let { return it == FirewallVerdict.ALLOW }
+            caches.flowCache[tupleKey]?.let { return it }
         }
 
         // Resolve UID before uid-scoped caches — 5-tuple-only keys poisoned UNKNOWN→real UID races.
         val uid = ownerResolver.resolveUid(info)
-        if (uid == ownUid) return true
+        if (uid == ownUid) return FirewallVerdict.ALLOW_TOR
 
         // SYN without owner: drop and wait for retransmit (never open uunknown / sticky collapse).
         if (info.isTcpSyn && !ConnectionOwnerResolver.isValidUid(uid)) {
-            return false
+            return FirewallVerdict.DENY
         }
-        // Mid-flow often loses owner UID on Android. Fail-open without poisoning caches —
-        // SYN already required a valid owner + ALLOW/ASK; tuple cache was checked above.
+        // Mid-flow often loses owner UID on Android. Prefer sticky tuple cache (checked
+        // above). Without it: never invent ALLOW_TOR when OVPN-over-Tor is enabled —
+        // that would flip an OVPN flow onto a Tor exit after cache trim.
         if (!ConnectionOwnerResolver.isValidUid(uid) && info.isTcp && !info.isTcpSyn) {
-            return true
+            return midFlowFallback(prefs)
         }
         if (!ConnectionOwnerResolver.isValidUid(uid)) {
-            return false
+            return FirewallVerdict.DENY
         }
 
         val flowKey = FirewallCacheKeys.flowKey(uid, info)
-        caches.flowCache[flowKey]?.let { return it == FirewallVerdict.ALLOW }
+        caches.flowCache[flowKey]?.let { return it }
 
         val matchDest = matchDestination(info)
         if (matchDest == null) {
             // Automap IP without hostname yet (DNS still in flight / dropped).
-            // SYN: fail-closed. Mid-flow: allow without poisoning (SYN already gated).
-            return info.isTcp && !info.isTcpSyn
+            // SYN: fail-closed. Mid-flow: sticky path only — no invented Tor route.
+            return if (info.isTcp && !info.isTcpSyn) midFlowFallback(prefs) else FirewallVerdict.DENY
         }
 
         // Mid-flow: never open ASK/DENY prompts. Prefer sticky decision / rules when the
         // flow-cache entry was trimmed. DENY default: fail-closed on miss (TOCTOU).
-        // ASK/ALLOW: fail-open — default is ASK; killing mid-flow after trim stalls apps.
+        // ASK/ALLOW without OVPN feature: fail-open to Tor (historical). With OVPN enabled:
+        // fail-closed so we never silently demote OVPN → Tor exit.
         if (info.isTcp && !info.isTcpSyn) {
             val matching = findRule(uid, matchDest, info)
             if (matching != null) {
                 rememberPacketFlow(flowKey, matching.verdict, matchDest, info)
-                return matching.verdict == FirewallVerdict.ALLOW
+                return matching.verdict
             }
             val rk = FirewallCacheKeys.decisionKey(uid, matchDest, info)
             caches.decisionCache[rk]?.let { v ->
                 rememberPacketFlow(flowKey, v, matchDest, info)
-                return v == FirewallVerdict.ALLOW
+                return v
             }
             return when (prefs.firewallDefaultAction) {
-                // SYN already required ALLOW (or ASK accept). Cache trim must not RST live TCP.
                 FirewallDefaultAction.ALLOW,
                 FirewallDefaultAction.ASK,
-                -> true
-                // DENY default: miss after trim is fail-closed (new DENY must stick mid-flow).
-                FirewallDefaultAction.DENY -> false
+                -> midFlowFallback(prefs)
+                FirewallDefaultAction.DENY -> FirewallVerdict.DENY
             }
         }
 
         val matching = findRule(uid, matchDest, info)
         if (matching != null) {
             rememberPacketFlow(flowKey, matching.verdict, matchDest, info)
-            return matching.verdict == FirewallVerdict.ALLOW
+            return matching.verdict
         }
 
         val rk = FirewallCacheKeys.decisionKey(uid, matchDest, info)
         caches.decisionCache[rk]?.let { v ->
             rememberPacketFlow(flowKey, v, matchDest, info)
-            return v == FirewallVerdict.ALLOW
+            return v
         }
 
         val pendingKey = FirewallCacheKeys.ruleKey(uid, matchDest, info.dstPort, info.protocol)
         if (pendingByKey.containsKey(pendingKey)) {
-            return false
+            return FirewallVerdict.DENY
         }
 
         val app = resolveApp(uid)
@@ -257,11 +257,11 @@ class InteractiveFirewallEngine @Inject constructor(
                 caches.rememberDecision(
                     rk,
                     flowKey,
-                    FirewallVerdict.ALLOW,
+                    FirewallVerdict.ALLOW_TOR,
                     matchDest,
                     FirewallCacheKeys.tupleFlowKey(info),
                 )
-                true
+                FirewallVerdict.ALLOW_TOR
             }
             FirewallDefaultAction.DENY -> {
                 caches.rememberDecision(
@@ -280,7 +280,7 @@ class InteractiveFirewallEngine @Inject constructor(
                     note = dpiJournalNote("default deny", dpi),
                     protocolLabel = dpi.label,
                 )
-                false
+                FirewallVerdict.DENY
             }
             FirewallDefaultAction.ASK ->
                 enqueuePrompt(uid, app, info, flowKey, pendingKey, rk, dpi, matchDest)
@@ -290,19 +290,23 @@ class InteractiveFirewallEngine @Inject constructor(
     /**
      * PAC / loopback SOCKS CONNECT gate — same rules as TUN SYN, keyed by dest host/IP.
      */
-    override fun allowSocksConnect(
+    override fun socksConnectRoute(
         uid: Int,
         destHost: String,
         destIp: String,
         destPort: Int,
-    ): Boolean {
+    ): FirewallVerdict {
         val prefs = preferences.get()
-        if (!prefs.firewallEnabled) return true
-        if (uid == ownUid) return true
+        if (!prefs.firewallEnabled) return FirewallVerdict.ALLOW_TOR
+        if (uid == ownUid) return FirewallVerdict.ALLOW_TOR
         // Unknown PAC client: only fail-open when default is ALLOW (still Tor-routed).
         // ASK/DENY keep fail-closed so prompts/rules cannot be skipped via UID race.
         if (!ConnectionOwnerResolver.isValidUid(uid)) {
-            return prefs.firewallDefaultAction == FirewallDefaultAction.ALLOW
+            return if (prefs.firewallDefaultAction == FirewallDefaultAction.ALLOW) {
+                FirewallVerdict.ALLOW_TOR
+            } else {
+                FirewallVerdict.DENY
+            }
         }
 
         val host = destHost.trim()
@@ -311,28 +315,30 @@ class InteractiveFirewallEngine @Inject constructor(
             TunnelEndpoints.isOnionLikeHostname(host) -> host
             ip.isNotBlank() -> ip
             host.isNotBlank() -> host
-            else -> return false
+            else -> return FirewallVerdict.DENY
         }
         val displayHost = host.ifBlank { null }
         val protocol = IpPacketParser.PROTO_TCP
         val flowKey = FirewallCacheKeys.socksFlowKey(uid, matchDest, destPort)
-        caches.flowCache[flowKey]?.let { return it == FirewallVerdict.ALLOW }
+        caches.flowCache[flowKey]?.let { return it }
 
         val matching = findRule(uid, matchDest, destPort, protocol)
         if (matching != null) {
-            caches.rememberFlow(flowKey, matching.verdict, matchDest)
-            return matching.verdict == FirewallVerdict.ALLOW
+            val v = coerceSocksVerdict(matching.verdict)
+            caches.rememberFlow(flowKey, v, matchDest)
+            return v
         }
 
         val rk = FirewallCacheKeys.socksDecisionKey(uid, matchDest, destPort, protocol)
         caches.decisionCache[rk]?.let { v ->
-            caches.rememberFlow(flowKey, v, matchDest)
-            return v == FirewallVerdict.ALLOW
+            val coerced = coerceSocksVerdict(v)
+            caches.rememberFlow(flowKey, coerced, matchDest)
+            return coerced
         }
 
         val pendingKey = FirewallCacheKeys.ruleKey(uid, matchDest, destPort, protocol)
         if (pendingByKey.containsKey(pendingKey)) {
-            return false
+            return FirewallVerdict.DENY
         }
 
         val app = resolveApp(uid)
@@ -342,8 +348,8 @@ class InteractiveFirewallEngine @Inject constructor(
         )
         return when (prefs.firewallDefaultAction) {
             FirewallDefaultAction.ALLOW -> {
-                caches.rememberDecision(rk, flowKey, FirewallVerdict.ALLOW, matchDest)
-                true
+                caches.rememberDecision(rk, flowKey, FirewallVerdict.ALLOW_TOR, matchDest)
+                FirewallVerdict.ALLOW_TOR
             }
             FirewallDefaultAction.DENY -> {
                 caches.rememberDecision(rk, flowKey, FirewallVerdict.DENY, matchDest)
@@ -359,7 +365,7 @@ class InteractiveFirewallEngine @Inject constructor(
                     ruleScope = FirewallRuleScope.SESSION,
                     note = dpiJournalNote("default deny", dpi),
                 )
-                false
+                FirewallVerdict.DENY
             }
             FirewallDefaultAction.ASK ->
                 enqueueSocksPrompt(
@@ -388,7 +394,7 @@ class InteractiveFirewallEngine @Inject constructor(
         ruleKey: String,
         decisionKey: Long,
         dpi: ApplicationLayerDetector.Result,
-    ): Boolean {
+    ): FirewallVerdict {
         val threat = domainReputation.classify(destHost)
         val request = FirewallConnectionInfo(
             requestId = UUID.randomUUID().toString(),
@@ -406,7 +412,7 @@ class InteractiveFirewallEngine @Inject constructor(
         val queued = QueuedPrompt(request, flowKey, app, ruleKey, decisionKey, matchDest)
         synchronized(queueLock) {
             if (pendingByKey.putIfAbsent(ruleKey, queued) != null) {
-                return false
+                return FirewallVerdict.DENY
             }
             if (waitQueue.size >= MAX_QUEUE) {
                 pendingByKey.remove(ruleKey, queued)
@@ -423,13 +429,13 @@ class InteractiveFirewallEngine @Inject constructor(
                     ruleScope = FirewallRuleScope.SESSION,
                     note = dpiJournalNote("queue full — drop (no sticky rule)", dpi),
                 )
-                return false
+                return FirewallVerdict.DENY
             }
             waitQueue.addLast(ruleKey)
             publishQueueDepthLocked()
             promoteLocked()
         }
-        return false
+        return FirewallVerdict.DENY
     }
 
     /**
@@ -445,7 +451,7 @@ class InteractiveFirewallEngine @Inject constructor(
         decisionKey: Long,
         dpi: ApplicationLayerDetector.Result,
         matchDest: String,
-    ): Boolean {
+    ): FirewallVerdict {
         val destHost = DnsHostnameCache.lookup(info.dstIp)
         val threat = domainReputation.classify(destHost)
         val request = FirewallConnectionInfo(
@@ -464,7 +470,7 @@ class InteractiveFirewallEngine @Inject constructor(
         val queued = QueuedPrompt(request, flowKey, app, ruleKey, decisionKey, matchDest)
         synchronized(queueLock) {
             if (pendingByKey.putIfAbsent(ruleKey, queued) != null) {
-                return false
+                return FirewallVerdict.DENY
             }
             if (waitQueue.size >= MAX_QUEUE) {
                 pendingByKey.remove(ruleKey, queued)
@@ -478,13 +484,13 @@ class InteractiveFirewallEngine @Inject constructor(
                     note = dpiJournalNote("queue full — drop (no sticky rule)", dpi),
                     protocolLabel = dpi.label,
                 )
-                return false
+                return FirewallVerdict.DENY
             }
             waitQueue.addLast(ruleKey)
             publishQueueDepthLocked()
             promoteLocked()
         }
-        return false
+        return FirewallVerdict.DENY
     }
 
     /** Must hold [queueLock]. */
@@ -509,6 +515,13 @@ class InteractiveFirewallEngine @Inject constructor(
         ruleScope: FirewallRuleScope,
     ) {
         val prefs = preferences.get()
+        val effective = when {
+            verdict == FirewallVerdict.ALLOW_OVPN && !ovpnRouteAvailable(prefs) -> {
+                Timber.w("ALLOW_OVPN rejected — OpenVPN-over-Tor not available; storing DENY")
+                FirewallVerdict.DENY
+            }
+            else -> verdict
+        }
         val answered: QueuedPrompt
         synchronized(queueLock) {
             val current = active
@@ -542,7 +555,7 @@ class InteractiveFirewallEngine @Inject constructor(
             destHost = answered.matchDest,
             destPort = answered.request.destPort,
             protocol = answered.request.protocol,
-            verdict = verdict,
+            verdict = effective,
             scope = ruleScope,
             expiresAtEpochMs = expires,
             displayHost = answered.request.destHost.orEmpty(),
@@ -556,7 +569,7 @@ class InteractiveFirewallEngine @Inject constructor(
                     it.protocol == rule.protocol
             } + rule
         }
-        caches.rememberDecision(answered.decisionKey, answered.flowKey, verdict, answered.matchDest)
+        caches.rememberDecision(answered.decisionKey, answered.flowKey, effective, answered.matchDest)
         val note = when (ruleScope) {
             FirewallRuleScope.TEMPORARY -> "temporary ${prefs.firewallTempMinutes}m"
             FirewallRuleScope.SESSION -> "until VPN stops"
@@ -571,7 +584,7 @@ class InteractiveFirewallEngine @Inject constructor(
             threatCategory = answered.request.threatCategory,
             destPort = answered.request.destPort,
             protocolLabel = answered.request.protocolLabel,
-            verdict = verdict,
+            verdict = effective,
             ruleScope = ruleScope,
             note = if (dpiNote != null) "$note · $dpiNote" else note,
         )
@@ -704,6 +717,24 @@ class InteractiveFirewallEngine @Inject constructor(
         val decisionKey: Long,
         val matchDest: String,
     )
+
+
+    /** PAC/loopback SOCKS cannot encapsulate OVPN-over-Tor — fail closed. */
+    private fun coerceSocksVerdict(v: FirewallVerdict): FirewallVerdict =
+        if (v == FirewallVerdict.ALLOW_OVPN) FirewallVerdict.DENY else v
+
+    /**
+     * Mid-flow cache miss: historical Tor-only builds fail-open to Tor.
+     * With OpenVPN-over-Tor enabled, inventing Tor would demote an OVPN flow → Tor exit.
+     */
+    private fun midFlowFallback(prefs: TunnelPreferences): FirewallVerdict =
+        if (prefs.openVpnOverTorEnabled) FirewallVerdict.DENY else FirewallVerdict.ALLOW_TOR
+
+    /** OVPN prompt option when feature enabled, profile present, and runtime up. */
+    fun ovpnRouteAvailable(prefs: TunnelPreferences = preferences.get()): Boolean =
+        prefs.openVpnOverTorEnabled &&
+            prefs.openVpnProfileConfigured &&
+            FirewallBridge.openVpnOverTorUp
 
     companion object {
         private const val MAX_JOURNAL = 200

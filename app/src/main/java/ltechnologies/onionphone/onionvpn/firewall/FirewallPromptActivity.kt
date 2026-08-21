@@ -46,6 +46,7 @@ class FirewallPromptActivity : ComponentActivity() {
                         FirewallPromptContent(
                             info = current,
                             tempMinutes = prefs.firewallTempMinutes,
+                            ovpnAvailable = engine.ovpnRouteAvailable(prefs),
                             onAnswer = { verdict, scope ->
                                 engine.answerPrompt(current.requestId, verdict, scope)
                             },

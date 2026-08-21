@@ -10,7 +10,7 @@
     <string name="notification_stopping">Stopping tunnel…</string>
     <string name="action_stop">Stop</string>
     <string name="firewall_prompt_channel_name">Firewall prompts</string>
-    <string name="firewall_prompt_channel_desc">Connection allow/deny requests with Accept and Deny actions</string>
+    <string name="firewall_prompt_channel_desc">Connection allow/deny requests with Tor / OVPN / Deny actions</string>
     <string name="firewall_prompt_notif_title">%1$s wants to connect</string>
     <!-- %1$s = DPI label (DNS/HTTP/HTTPS/SSH/STUN/…), %2$s = emoji+dest, %3$d = port -->
     <string name="firewall_prompt_notif_text">%1$s → %2$s:%3$d</string>
@@ -25,6 +25,8 @@
     <string name="domain_lists_via_direct"> · direct</string>
     <string name="domain_lists_never">never</string>
     <string name="domain_lists_last_error">Last error: %1$s</string>
-    <string name="firewall_action_allow">Accept</string>
+    <string name="firewall_action_allow">Accept via Tor</string>
+    <string name="firewall_action_allow_tor">Via Tor</string>
+    <string name="firewall_action_allow_ovpn">Via OVPN</string>
     <string name="firewall_action_deny">Deny</string>
 </resources>

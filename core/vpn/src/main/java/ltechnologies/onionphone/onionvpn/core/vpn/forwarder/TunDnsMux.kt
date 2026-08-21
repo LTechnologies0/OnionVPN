@@ -16,6 +16,7 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.locks.LockSupport
+import ltechnologies.onionphone.onionvpn.core.model.FirewallVerdict
 import ltechnologies.onionphone.onionvpn.core.model.TorNetPolicy
 import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
 import ltechnologies.onionphone.onionvpn.core.model.observability.MemoryHygiene
@@ -107,6 +108,13 @@ class TunDnsMux(
         val localHevOut = FileOutputStream(dupOwned(hevFd.fileDescriptor))
         tunOut = localTunOut
         hevOut = localHevOut
+        FirewallBridge.injectToVpnTun = { packet, length ->
+            synchronized(tunWriteLock) {
+                if (running.get() && generation.get() == gen) {
+                    runCatching { localTunOut.write(packet, 0, length) }
+                }
+            }
+        }
 
         tunToHev = Thread({
             val localTunIn = FileInputStream(dupOwned(tunFd.fileDescriptor))
@@ -171,11 +179,24 @@ class TunDnsMux(
                                         }
                                     }
                                 }
-                            } else if (!FirewallBridge.engine.allowOutbound(buf, n)) {
-                                // Drop
                             } else {
-                                stampTcpUid(buf, n)
-                                writeHev(localHevOut, buf, n)
+                                when (val route = FirewallBridge.engine.outboundRoute(buf, n)) {
+                                    FirewallVerdict.DENY -> {
+                                        // Drop
+                                    }
+                                    FirewallVerdict.ALLOW_OVPN -> {
+                                        val sink = FirewallBridge.ovpnPacketSink
+                                        if (sink == null || !FirewallBridge.openVpnOverTorUp) {
+                                            // Fail-closed: OVPN route without live tunnel.
+                                        } else if (!sink.offer(buf, n)) {
+                                            Timber.d("OVPN sink rejected packet")
+                                        }
+                                    }
+                                    FirewallVerdict.ALLOW_TOR -> {
+                                        stampTcpUid(buf, n)
+                                        writeHev(localHevOut, buf, n)
+                                    }
+                                }
                             }
                         }
                     }
@@ -239,6 +260,7 @@ class TunDnsMux(
 
     fun stop() {
         val wasRunning = running.compareAndSet(true, false)
+        FirewallBridge.injectToVpnTun = null
         // Always bump generation and close owned PFDs — even if start() never ran.
         generation.incrementAndGet()
         if (wasRunning) {

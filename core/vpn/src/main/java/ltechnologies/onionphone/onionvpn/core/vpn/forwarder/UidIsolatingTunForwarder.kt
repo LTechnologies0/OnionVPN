@@ -15,6 +15,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancelChildren
 import ltechnologies.onionphone.onionvpn.core.model.DnsResolverMode
+import ltechnologies.onionphone.onionvpn.core.model.FirewallVerdict
 import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
 import ltechnologies.onionphone.onionvpn.core.model.TunnelFailure
 import ltechnologies.onionphone.onionvpn.core.vpn.dns.DnsHostnameCache
@@ -179,9 +180,19 @@ class UidIsolatingTunForwarder(
                 return
             }
             // Landmine path (not wired by TunDataPlaneFactory): still honor firewall.
-            if (!FirewallBridge.engine.allowOutbound(buf, length)) {
-                VpnForwarderDebug.uidLog { "Drop SYN — firewall DENY uid=$uid $remoteHost:${meta.dstPort}" }
-                return
+            when (val route = FirewallBridge.engine.outboundRoute(buf, length)) {
+                FirewallVerdict.DENY -> {
+                    VpnForwarderDebug.uidLog { "Drop SYN — firewall DENY uid=$uid $remoteHost:${meta.dstPort}" }
+                    return
+                }
+                FirewallVerdict.ALLOW_OVPN -> {
+                    val sink = FirewallBridge.ovpnPacketSink
+                    if (sink == null || !FirewallBridge.openVpnOverTorUp || !sink.offer(buf, length)) {
+                        VpnForwarderDebug.uidLog { "Drop SYN — OVPN unavailable uid=$uid $remoteHost:${meta.dstPort}" }
+                    }
+                    return
+                }
+                FirewallVerdict.ALLOW_TOR -> Unit
             }
             val user = TunnelEndpoints.socksUserForUid(uid)
             val pass = TunnelEndpoints.socksPassForUid(uid)

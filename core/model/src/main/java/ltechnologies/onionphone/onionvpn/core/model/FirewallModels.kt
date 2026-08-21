@@ -6,9 +6,31 @@ package ltechnologies.onionphone.onionvpn.core.model
  * Imported by every `core:*` module and the app. No I/O.
  */
 
+/**
+ * Interactive firewall decision for an outbound flow.
+ *
+ * - [ALLOW_TOR]: forward via Tor SOCKS (site may see a Tor exit).
+ * - [ALLOW_OVPN]: forward via OpenVPN-over-Tor (site sees the VPN egress IP).
+ * - [DENY]: drop / RST.
+ *
+ * Legacy persisted value `ALLOW` is migrated to [ALLOW_TOR].
+ */
 enum class FirewallVerdict {
-    ALLOW,
+    ALLOW_TOR,
+    ALLOW_OVPN,
     DENY,
+    ;
+
+    /** True when the packet/flow should leave the device (Tor or OVPN). */
+    val forwards: Boolean
+        get() = this != DENY
+
+    companion object {
+        fun parse(raw: String): FirewallVerdict = when (raw.trim()) {
+            "ALLOW" -> ALLOW_TOR // pre-0.3.69 persisted rules
+            else -> valueOf(raw.trim())
+        }
+    }
 }
 
 enum class FirewallRuleScope {
@@ -23,6 +45,7 @@ enum class FirewallRuleScope {
 /**
  * Least-privilege default when interactive firewall is on and no rule matches.
  * ASK queues a prompt until the user answers (no timeout).
+ * [ALLOW] means [FirewallVerdict.ALLOW_TOR] (historical behaviour).
  */
 enum class FirewallDefaultAction {
     ASK,

@@ -9,6 +9,7 @@ import ltechnologies.onionphone.onionvpn.core.model.VpnProfileMode
 import ltechnologies.onionphone.onionvpn.core.vpn.OnionVpnService
 import ltechnologies.onionphone.onionvpn.core.vpn.dns.DnsHostnameCache
 import ltechnologies.onionphone.onionvpn.core.vpn.dns.OnionAutomapAllocator
+import ltechnologies.onionphone.onionvpn.ui.settings.TorCountryCatalog
 import timber.log.Timber
 
 /**
@@ -47,13 +48,20 @@ internal class TunnelVpnBridge(
                 putExtra(OnionVpnService.EXTRA_TUN_DATA_PLANE, preferences.tunDataPlane.name)
                 putExtra(OnionVpnService.EXTRA_TOR_ENGINE, preferences.torEngine.name)
                 putExtra(OnionVpnService.EXTRA_BRIDGE_LINES, preferences.torBridges)
-                val exitCc = preferences.torExitNodes
-                    .trim()
-                    .removePrefix("{")
-                    .removeSuffix("}")
-                    .takeIf { it.length == 2 }
-                if (exitCc != null) {
-                    putExtra(OnionVpnService.EXTRA_EXIT_COUNTRY, exitCc.uppercase())
+                // onionmasq setCountryCode: one ISO country (Arti ExitNodes semantics).
+                val exitCodes = TorCountryCatalog.parseNodeCodes(preferences.torExitNodes)
+                when {
+                    exitCodes.size == 1 ->
+                        putExtra(OnionVpnService.EXTRA_EXIT_COUNTRY, exitCodes.first().uppercase())
+                    exitCodes.size > 1 -> {
+                        val first = exitCodes.first()
+                        Timber.w(
+                            "Multiple ExitNodes (%d); onionmasq applies first only {%s}",
+                            exitCodes.size,
+                            first,
+                        )
+                        putExtra(OnionVpnService.EXTRA_EXIT_COUNTRY, first.uppercase())
+                    }
                 }
             },
         )
@@ -154,7 +162,8 @@ internal class TunnelVpnBridge(
 
     companion object {
         private const val VPN_READY_POLL_MS = 250L
-        private const val VPN_READY_POLLS = 40
+        /** 40×250ms was tight after Private Space unlock (double Blocking establish). */
+        private const val VPN_READY_POLLS = 80
         private const val VPN_DOWN_POLLS = 40
     }
 }

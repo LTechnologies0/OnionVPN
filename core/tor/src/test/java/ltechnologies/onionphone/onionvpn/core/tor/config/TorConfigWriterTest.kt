@@ -14,6 +14,7 @@ class TorConfigWriterTest {
             socksPort = 1111,
             dnsCryptSocksPort = 2222,
             probeSocksPort = 3333,
+            openVpnSocksPort = 6666,
             httpTunnelPort = 5555,
             dnsPort = 4444,
             preferences = TunnelPreferences(torMaxCircuitDirtinessSec = 600),
@@ -22,9 +23,11 @@ class TorConfigWriterTest {
         assertTrue(torrc.contains("SOCKSPort ${TunnelEndpoints.LOOPBACK}:1111"))
         assertTrue(torrc.contains("SOCKSPort ${TunnelEndpoints.LOOPBACK}:2222"))
         assertTrue(torrc.contains("SOCKSPort ${TunnelEndpoints.LOOPBACK}:3333"))
+        assertTrue(torrc.contains("SOCKSPort ${TunnelEndpoints.LOOPBACK}:6666"))
         assertTrue(torrc.contains("SessionGroup=${TunnelEndpoints.SESSION_GROUP_APPS}"))
         assertTrue(torrc.contains("SessionGroup=${TunnelEndpoints.SESSION_GROUP_DNSCRYPT}"))
         assertTrue(torrc.contains("SessionGroup=${TunnelEndpoints.SESSION_GROUP_PROBE}"))
+        assertTrue(torrc.contains("SessionGroup=${TunnelEndpoints.SESSION_GROUP_OPENVPN}"))
         assertTrue(torrc.contains("IsolateClientAddr")) // DNSCrypt / probe SessionGroups
         assertTrue(torrc.contains("IsolateClientProtocol"))
         assertTrue(torrc.contains("IsolateDestAddr"))

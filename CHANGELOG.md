@@ -2,6 +2,44 @@
 
 All notable changes to OnionVPN are documented here.
 
+## [Unreleased]
+
+## [0.3.69] — 2026-08-21
+
+### C Tor / Arti engine correctness
+- C Tor live `EntryNodes`/`ExitNodes`/`ExcludeNodes` also SETCONF `StrictNodes` (match torrc).
+- Hard recover fail-closed on `DisableNetwork` bounce; wait SOCKS **and** DNSPort before DNSCrypt resume.
+- GeoIP download uses probe SocksPort (not apps SessionGroup).
+- Live bridge/PT enable from clearnet requires tunnel restart (CTP + cache wipe).
+- Arti: Entry/Exclude fail closed; exit country via onionmasq callback; circuit timing Result no longer silent success.
+- onionmasq start parses ExitNodes via `TorCountryCatalog` (multi → first + warn).
+- Patch: sidecar SOCKS allowlist `openvpn`/`overtor` (rebuild `libonionmasq_mobile.so` for Arti+onionmasq OVPN).
+
+### Always-On / Private Space
+- Narrow Always-On reconcile (do not tear Tor on cold Idle Blocking).
+- Retry Connected from kill-switch Blocking when uplink VALIDATED (Always-On / space unlock / net flap).
+- `notifyCoordinator` retries; Blocking establish uses `nextGeneration`; longer VPN ready wait.
+- `USER_UNLOCKED` restores tunnel when Always-On is ours or phase is Blocking.
+
+### Tor country exclusions
+- EU / EEA / Schengen federations include Tor GeoIP `{eu}` (relays without a member-state tag).
+- Auto-migrate legacy ExcludeNodes lists that covered ≥20 EU members but omitted `{eu}`.
+
+### Wallets / Tor engines
+- Settings preset **Wallets** (long MaxCircuitDirtiness) + tip for Cake Wallet-style Electrum/RPC.
+
+### OpenVPN over Tor (optional)
+- TCP OpenVPN client via Tor SOCKS SessionGroup OPENVPN (`socks-proxy` + IsolateSOCKSAuth).
+- Ships **ics-openvpn** `libovpnexec.so` + `libopenvpn.so` (F-Droid `de.blinkt.openvpn` 0.7.64) — refresh with `native/openvpn/fetch-ics-openvpn-libs.sh` (GPL NOTICE).
+- Unix management + OPENTUN socketpair + PROTECTFD; Via OVPN only when CONNECTED **and** OPENTUN attached.
+- Pin `remote` via Tor SOCKS RESOLVE; optional auth-user-pass in Settings.
+- Onionmasq: dedicated OVPN SocksPort relayed to sidecar.
+- Test: VPN Gate TCP samples (`fetch-vpngate-testdata.sh`) + host control-plane smoke (`smoke-host-socks.sh`) — **PASS** PUSH_REPLY via Tor SOCKS; device binary `--version` OK (icsopenvpn).
+
+### Firewall
+- Three-way verdicts: **Via Tor** / **Via OVPN** / **Deny** (legacy `ALLOW` → `ALLOW_TOR`).
+- Heads-up + prompt UI expose OVPN only when the OVPN-over-Tor tunnel is up.
+
 ## [0.3.68] — 2026-08-16
 
 ### Arti / onion services

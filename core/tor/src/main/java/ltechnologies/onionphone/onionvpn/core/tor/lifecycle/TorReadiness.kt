@@ -98,10 +98,10 @@ object TorReadiness {
         isDnsPortTcpReady(port, timeoutMs) || isDnsPortReady(port, timeoutMs)
 
     /**
-     * All three SocksPorts accept TCP.
+     * Apps + DNSCrypt + probe + OpenVPN SocksPorts accept TCP.
      *
-     * **C Tor only** — torrc opens apps + DNSCrypt + probe SocksPorts before bootstrap
-     * completes. Do **not** use for Arti start: DNSCrypt/probe ports are opened later by
+     * **C Tor only** — torrc opens these SocksPorts before bootstrap completes.
+     * Do **not** use for Arti start: DNSCrypt/probe/OVPN ports are opened later by
      * [ltechnologies.onionphone.onionvpn.core.vpn.forwarder.ArtiSocksRoleMux] (chicken-egg
      * deadlock / 180s timeout). Use [isPrimarySocksReady] for Arti.
      */
@@ -109,13 +109,15 @@ object TorReadiness {
         assertSocksReady(ports.torSocksPort)
         assertSocksReady(ports.torDnsCryptSocksPort)
         assertSocksReady(ports.torProbeSocksPort)
+        assertSocksReady(ports.torOpenVpnSocksPort)
     }
 
     /** @see assertSocksPortsReady */
     fun areSocksPortsReady(ports: TunnelRuntimePorts): Boolean =
         isSocksReady(ports.torSocksPort) &&
             isSocksReady(ports.torDnsCryptSocksPort) &&
-            isSocksReady(ports.torProbeSocksPort)
+            isSocksReady(ports.torProbeSocksPort) &&
+            isSocksReady(ports.torOpenVpnSocksPort)
 
     /**
      * Native Tor/Arti SOCKS only (not DNSCrypt/probe role-mux listen ports).

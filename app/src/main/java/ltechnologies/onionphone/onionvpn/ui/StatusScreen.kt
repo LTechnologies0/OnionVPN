@@ -109,6 +109,7 @@ fun StatusScreen(
     val active = connected || snapshot.phase == TunnelPhase.Blocking
     val bootstrapping = snapshot.phase == TunnelPhase.StartingTor ||
         snapshot.phase == TunnelPhase.StartingDnsCrypt ||
+        snapshot.phase == TunnelPhase.StartingOpenVpn ||
         snapshot.phase == TunnelPhase.StartingVpn ||
         snapshot.phase == TunnelPhase.Validating
 
@@ -469,6 +470,7 @@ private fun phaseLabel(phase: TunnelPhase): String = when (phase) {
     TunnelPhase.Idle -> "Ready"
     TunnelPhase.StartingTor -> "Starting Tor"
     TunnelPhase.StartingDnsCrypt -> "Starting DNSCrypt"
+    TunnelPhase.StartingOpenVpn -> "Starting OpenVPN over Tor"
     TunnelPhase.StartingVpn -> "Starting VPN"
     TunnelPhase.Validating -> "Validating"
     TunnelPhase.Connected -> "Protected"

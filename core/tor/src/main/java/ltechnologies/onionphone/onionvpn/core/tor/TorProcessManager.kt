@@ -192,6 +192,12 @@ class TorProcessManager(
     var onClientDnsCacheClear: (() -> Unit)? = null
 
     /**
+     * onionmasq plane: apply exit country via OnionMasq.setCountryCode (cc uppercase or null).
+     * Returns true when applied. Null callback → live exit apply fails closed.
+     */
+    var onOnionmasqExitCountry: ((countryCode: String?) -> Boolean)? = null
+
+    /**
      * Pause DNSCrypt (and any Tor-SOCKS DNS dependent) while Tor listeners are down.
      * Invoked only when [withTorDowntime] pauses upstream SOCKS bridges.
      */
@@ -337,7 +343,7 @@ class TorProcessManager(
                 waitForBootstrap(ports)
             }
             OpTrace.stepSuspending("tor", "geoip") {
-                ensureGeoIpFiles(socksPort = ports.torSocksPort)
+                ensureGeoIpFiles(socksPort = ports.torProbeSocksPort)
                 applyGeoIpIfPresent()
             }
             OpTrace.stepSuspending("tor", "set_active") { control.setActive() }
@@ -586,7 +592,15 @@ class TorProcessManager(
                 newCircuitPeriodSec,
                 applied,
             )
-            return Result.success(Unit)
+            return if (applied) {
+                Result.success(Unit)
+            } else {
+                Result.failure(
+                    IOException(
+                        "Arti live circuit timing not applied (Ext JNI unavailable or onionmasq plane)",
+                    ),
+                )
+            }
         }
         if (!control.isConnected) return Result.failure(IOException("control not connected"))
         return control.setCircuitTiming(maxCircuitDirtinessSec, newCircuitPeriodSec).also {
@@ -708,19 +722,43 @@ class TorProcessManager(
                 // Bridges are paused via onTorDowntimeChanged(true) before DisableNetwork=1.
                 withTorDowntime {
                     control.dropTimeouts().onFailure { Timber.w(it, "DROPTIMEOUTS failed") }
-                    control.setDisableNetwork(true).onFailure { Timber.w(it, "DisableNetwork=1 failed") }
-                    control.setDisableNetwork(false).onFailure { Timber.w(it, "DisableNetwork=0 failed") }
-                    // Let SocksPort listeners return before DNSCrypt resume + bridge unpause.
+                    control.setDisableNetwork(true).getOrElse { e ->
+                        return@withTorDowntime Result.failure(
+                            IOException("DisableNetwork=1 failed — abort hard recover", e),
+                        )
+                    }
+                    control.setDisableNetwork(false).getOrElse { e ->
+                        // Leave fail-closed: try once more to re-enable, then surface error.
+                        control.setDisableNetwork(false)
+                        return@withTorDowntime Result.failure(
+                            IOException(
+                                "DisableNetwork=0 failed — Tor may still be offline",
+                                e,
+                            ),
+                        )
+                    }
+                    // Let SocksPort + DNSPort return before DNSCrypt resume + bridge unpause.
                     delay(SOCKS_AFTER_DISABLE_NETWORK_MS)
                     runtimePorts?.let { ports ->
-                        repeat(30) {
-                            if (TorReadiness.isPrimarySocksReady(ports)) return@let
+                        repeat(50) {
+                            val socks = TorReadiness.isPrimarySocksReady(ports)
+                            val dns = TorReadiness.isDnsPortAnyReady(ports.torDnsPort, timeoutMs = 500)
+                            if (socks && dns) return@let
                             delay(100)
+                        }
+                        if (!TorReadiness.isPrimarySocksReady(ports)) {
+                            return@withTorDowntime Result.failure(
+                                IOException("SocksPort not ready after DisableNetwork bounce"),
+                            )
+                        }
+                        if (!TorReadiness.isDnsPortAnyReady(ports.torDnsPort, timeoutMs = 1_500)) {
+                            return@withTorDowntime Result.failure(
+                                IOException("DNSPort not ready after DisableNetwork bounce"),
+                            )
                         }
                     }
                     val active = control.setActive()
                     control.clearDnsCache().onFailure { Timber.w(it, "CLEARDNSCACHE failed") }
-                    // Automap / DNSCrypt sticky IPs (DNSCrypt itself resumed in finally).
                     clearAppDnsCaches()
                     control.refreshHealthLite()
                     active
@@ -770,8 +808,11 @@ class TorProcessManager(
 
     /**
      * Live SETCONF bridges. Arti: restart with new bridgeLines (semantic 1:1 apply).
+     * Little-t: vanilla Bridge SETCONF only when already on bridges without PT change;
+     * clearnet→bridges / PT lines need full restart (ClientTransportPlugin + cache wipe).
      */
     suspend fun setBridgesLive(bridgeText: String): Result<Unit> = withContext(Dispatchers.IO) {
+        val previousBridges = preferences.torBridges
         preferences = preferences.copy(torBridges = bridgeText)
         if (activeEngine == TorEngine.ARTI) {
             if (!arti.isRunning()) {
@@ -799,6 +840,20 @@ class TorProcessManager(
             return@withContext Result.failure(IOException("control not connected"))
         }
         val lines = TorBridgeConfig.parseLines(bridgeText)
+        val prevConfigured = TorBridgeConfig.isConfigured(previousBridges)
+        val nextConfigured = lines.isNotEmpty()
+        val nextHasPt = lines.any { TorBridgeConfig.transportOf(it) != null }
+        val prevHasPt = TorBridgeConfig.parseLines(previousBridges)
+            .any { TorBridgeConfig.transportOf(it) != null }
+        // Enabling bridges from clearnet, or any PT line change, needs torrc + CTP + cache wipe.
+        if ((!prevConfigured && nextConfigured) || nextHasPt || prevHasPt) {
+            return@withContext Result.failure(
+                IOException(
+                    "C Tor bridge/PT changes require a tunnel restart " +
+                        "(ClientTransportPlugin + DataDirectory cache wipe)",
+                ),
+            )
+        }
         control.setBridges(lines).also {
             it.onSuccess { Timber.i("SETCONF bridges live count=%d", lines.size) }
         }
@@ -806,8 +861,8 @@ class TorProcessManager(
 
     /**
      * Live SETCONF Entry/Exit/ExcludeNodes.
-     * Arti: ExitNodes single-country via StreamPrefs::exit_country (control-api≥2);
-     * Entry/Exclude remain ENGINE_LIMITATION.
+     * Arti: ExitNodes single-country via StreamPrefs::exit_country (control-api≥2) or
+     * onionmasq [onOnionmasqExitCountry]; Entry/Exclude fail closed.
      */
     fun setNodePrefsLive(entry: String, exit: String, exclude: String): Result<Unit> {
         preferences = preferences.copy(
@@ -817,7 +872,12 @@ class TorProcessManager(
         )
         if (activeEngine == TorEngine.ARTI) {
             if (entry.isNotBlank() || exclude.isNotBlank()) {
-                Timber.w("Arti ignores EntryNodes/ExcludeNodes (ExitNodes country only)")
+                return Result.failure(
+                    IOException(
+                        "Arti/onionmasq ignores EntryNodes and ExcludeNodes — " +
+                            "clear them or switch to C Tor",
+                    ),
+                )
             }
             val codes = ArtiRuntime.parseCountryCodes(exit)
             if (codes.size > 1) {
@@ -826,6 +886,15 @@ class TorProcessManager(
                         "Arti ExitNodes supports a single country code (got ${codes.size})",
                     ),
                 )
+            }
+            val cc = codes.firstOrNull()
+            if (externalDataPlanePorts) {
+                val applied = onOnionmasqExitCountry?.invoke(cc) == true
+                return if (applied || cc == null) {
+                    Result.success(Unit)
+                } else {
+                    Result.failure(IOException("onionmasq setCountryCode failed"))
+                }
             }
             val ok = arti.applyExitCountryLive(exit)
             return if (ok || codes.isEmpty()) {
@@ -898,13 +967,16 @@ class TorProcessManager(
 
     /**
      * True when DNSCrypt may dial Tor SOCKS / DNSPort without racing bootstrap.
-     * Little-t: process alive + primary SOCKS. Arti: [publishArtiReadyStatus] ready gate.
+     * Little-t: process alive + primary SOCKS **and** DNSPort (force_tcp bootstrap).
+     * Arti: [publishArtiReadyStatus] ready gate.
      */
     fun isReadyForDnsCryptUpstream(): Boolean {
         val ports = runtimePorts ?: return false
         return when (activeEngine) {
             TorEngine.LITTLE_T ->
-                process?.isAlive == true && TorReadiness.isPrimarySocksReady(ports)
+                process?.isAlive == true &&
+                    TorReadiness.isPrimarySocksReady(ports) &&
+                    TorReadiness.isDnsPortAnyReady(ports.torDnsPort, timeoutMs = 1_000)
             TorEngine.ARTI -> isArtiTrafficReady(ports)
         }
     }
@@ -1013,6 +1085,7 @@ class TorProcessManager(
                 socksPort = ports.torSocksPort,
                 dnsCryptSocksPort = ports.torDnsCryptSocksPort,
                 probeSocksPort = ports.torProbeSocksPort,
+                openVpnSocksPort = ports.torOpenVpnSocksPort,
                 httpTunnelPort = ports.torHttpTunnelPort,
                 dnsPort = ports.torDnsPort,
                 preferences = preferences,

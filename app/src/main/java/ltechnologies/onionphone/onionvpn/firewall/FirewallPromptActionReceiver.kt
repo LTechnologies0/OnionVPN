@@ -14,7 +14,7 @@ import ltechnologies.onionphone.onionvpn.core.model.FirewallVerdict
 import timber.log.Timber
 
 /**
- * Handles Accept / Deny actions on the firewall request notification.
+ * Handles Tor / OVPN / Deny actions on the firewall request notification.
  * Defaults to permanent rules — finer scopes remain available in the Firewall screen.
  */
 @AndroidEntryPoint
@@ -28,7 +28,9 @@ class FirewallPromptActionReceiver : BroadcastReceiver() {
             return
         }
         val verdict = when (intent.action) {
-            ACTION_ALLOW -> FirewallVerdict.ALLOW
+            ACTION_ALLOW_TOR -> FirewallVerdict.ALLOW_TOR
+            ACTION_ALLOW_OVPN -> FirewallVerdict.ALLOW_OVPN
+            ACTION_ALLOW -> FirewallVerdict.ALLOW_TOR // legacy action string
             ACTION_DENY -> FirewallVerdict.DENY
             else -> {
                 Timber.w("Unknown firewall action ${intent.action}")
@@ -49,6 +51,8 @@ class FirewallPromptActionReceiver : BroadcastReceiver() {
 
     companion object {
         const val ACTION_ALLOW = "ltechnologies.onionphone.onionvpn.firewall.ALLOW"
+        const val ACTION_ALLOW_TOR = "ltechnologies.onionphone.onionvpn.firewall.ALLOW_TOR"
+        const val ACTION_ALLOW_OVPN = "ltechnologies.onionphone.onionvpn.firewall.ALLOW_OVPN"
         const val ACTION_DENY = "ltechnologies.onionphone.onionvpn.firewall.DENY"
         const val EXTRA_REQUEST_ID = "request_id"
     }

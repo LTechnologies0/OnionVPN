@@ -65,6 +65,7 @@ object TorConfigWriter {
      * @param socksPort apps/hev SocksPort
      * @param dnsCryptSocksPort DNSCrypt upstream SocksPort
      * @param probeSocksPort validation/leak-probe SocksPort
+     * @param openVpnSocksPort OpenVPN-over-Tor control channel SocksPort
      * @param httpTunnelPort unused (HTTPTunnelPort forced 0 — PAC bridge only)
      * @param dnsPort Tor DNSPort (Automap)
      * @param preferences bridges, nodes, circuit dirtiness
@@ -76,6 +77,7 @@ object TorConfigWriter {
         socksPort: Int = TunnelEndpoints.TOR_SOCKS_PORT,
         dnsCryptSocksPort: Int = TunnelEndpoints.TOR_SOCKS_PORT + 1,
         probeSocksPort: Int = TunnelEndpoints.TOR_SOCKS_PORT + 2,
+        openVpnSocksPort: Int = TunnelEndpoints.TOR_SOCKS_PORT + 4,
         httpTunnelPort: Int = TunnelEndpoints.TOR_SOCKS_PORT + 3,
         dnsPort: Int = TunnelEndpoints.TOR_DNS_PORT,
         preferences: TunnelPreferences = TunnelPreferences(),
@@ -110,6 +112,11 @@ object TorConfigWriter {
             "SOCKSPort ${TunnelEndpoints.LOOPBACK}:$probeSocksPort " +
                 "SessionGroup=${TunnelEndpoints.SESSION_GROUP_PROBE} $SOCKS_ISOLATION_MAX " +
                 "IPv6Traffic",
+        )
+        appendLine(
+            "SOCKSPort ${TunnelEndpoints.LOOPBACK}:$openVpnSocksPort " +
+                "SessionGroup=${TunnelEndpoints.SESSION_GROUP_OPENVPN} $SOCKS_ISOLATION_MAX " +
+                "IPv6Traffic KeepAliveIsolateSOCKSAuth",
         )
         appendLine(
             "DNSPort ${TunnelEndpoints.LOOPBACK}:$dnsPort " +

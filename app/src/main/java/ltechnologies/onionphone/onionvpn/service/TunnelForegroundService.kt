@@ -93,6 +93,10 @@ class TunnelForegroundService : Service() {
     @Inject lateinit var domainReputation: DomainReputationRepository
     @Inject lateinit var circuitLifecycle: ltechnologies.onionphone.onionvpn.core.tor.control.lifecycle.CircuitLifecycleManager
 
+    private val openVpnOverTor by lazy {
+        ltechnologies.onionphone.onionvpn.core.openvpn.OpenVpnOverTorManager(applicationContext)
+    }
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val lifecycleMutex = Mutex()
     /** Idempotent teardown for STOP/REVOKED/onDestroy. */
@@ -130,6 +134,9 @@ class TunnelForegroundService : Service() {
     private val pacServer by lazy { PacProxyServer() }
     private var torNativePackageReceiver: BroadcastReceiver? = null
     private var torNativePackageRebindJob: Job? = null
+    /** Backoff retries when Always-On / Private Space unlock leaves us in Blocking. */
+    @Volatile private var alwaysOnRecoveryAttempt: Int = 0
+    private var blockingRecoveryJob: Job? = null
 
     private fun isOnionmasqPlane(): Boolean =
         OnionVpnService.vpnDataPlane.value == TunDataPlane.ONIONMASQ
@@ -249,6 +256,20 @@ class TunnelForegroundService : Service() {
                 dnsCrypt.clearQueryCache().onFailure {
                     Timber.w(it, "DNSCrypt query cache clear failed")
                 }
+            }
+        }
+        tor.onOnionmasqExitCountry = { cc ->
+            runCatching {
+                if (!org.torproject.onionmasq.OnionMasq.isRunning()) return@runCatching false
+                if (cc.isNullOrBlank()) {
+                    org.torproject.onionmasq.OnionMasq.setCountryCode(null)
+                } else {
+                    org.torproject.onionmasq.OnionMasq.setCountryCode(cc.uppercase())
+                }
+                true
+            }.getOrElse {
+                Timber.w(it, "onionmasq setCountryCode failed")
+                false
             }
         }
         tor.onDnsDependentPause = {
@@ -443,6 +464,11 @@ class TunnelForegroundService : Service() {
 
     private suspend fun recoverUnderlyingNetwork(fromPending: Boolean) {
         val phase = _snapshot.value.phase
+        if (phase == TunnelPhase.Blocking) {
+            Timber.i("Underlying network change while Blocking — schedule Tor restore")
+            maybeScheduleBlockingRecovery(fromAlwaysOn = OnionVpnService.vpnAlwaysOn.value)
+            return
+        }
         if (phase != TunnelPhase.Connected) {
             Timber.i("Underlying network change ignored — phase=%s", phase)
             return
@@ -788,17 +814,33 @@ class TunnelForegroundService : Service() {
                     lifecycleMutex.withLock {
                         val vpnMode = OnionVpnService.vpnProfileMode.value
                         val forwarderDead = !OnionVpnService.tunForwarderAlive.value
-                        val unhealthyWhileStarting =
-                            vpnMode == VpnProfileMode.Blocking || forwarderDead
+                        val phase = _snapshot.value.phase
+                        // Only tear down a *live* Tor path that lost the Connected TUN
+                        // (sticky rebound). Cold Always-On after Private Space reopen is
+                        // Idle/Error/Blocking with no Tor yet — do not "reconcile" that.
+                        val needsReconcile =
+                            (phase == TunnelPhase.Connected || phase == TunnelPhase.Validating) &&
+                                (vpnMode == VpnProfileMode.Blocking || forwarderDead)
+                        val wedgedStarting =
+                            tunnelJob?.isActive == true &&
+                                (vpnMode == VpnProfileMode.Blocking || forwarderDead) &&
+                                (
+                                    phase == TunnelPhase.StartingTor ||
+                                        phase == TunnelPhase.StartingDnsCrypt ||
+                                        phase == TunnelPhase.StartingOpenVpn ||
+                                        phase == TunnelPhase.StartingVpn ||
+                                        phase == TunnelPhase.Blocking
+                                    )
                         if (tunnelJob?.isActive == true) {
-                            if (!unhealthyWhileStarting) {
-                                Timber.w("Ignoring ALWAYS_ON — tunnel already starting")
+                            if (!needsReconcile && !wedgedStarting) {
+                                Timber.w("Ignoring ALWAYS_ON — tunnel already starting phase=%s", phase)
                                 return@withLock
                             }
                             Timber.w(
-                                "ALWAYS_ON — canceling active job (vpnMode=%s forwarderAlive=%s)",
+                                "ALWAYS_ON — canceling active job (vpnMode=%s forwarderAlive=%s phase=%s)",
                                 vpnMode,
                                 !forwarderDead,
+                                phase,
                             )
                             tunnelJob?.cancel()
                             tunnelJob = null
@@ -806,12 +848,7 @@ class TunnelForegroundService : Service() {
                             newNymJob = null
                             identityRefreshing = false
                         }
-                        val phase = _snapshot.value.phase
-                        // Sticky VPN restart leaves Blocking TUN while FGS may still say Connected.
-                        val needsReconcile =
-                            (phase == TunnelPhase.Connected || phase == TunnelPhase.Validating) &&
-                                (vpnMode == VpnProfileMode.Blocking || forwarderDead)
-                        if (needsReconcile || unhealthyWhileStarting) {
+                        if (needsReconcile || wedgedStarting) {
                             Timber.w(
                                 "ALWAYS_ON reconcile — phase=%s vpnMode=%s forwarderAlive=%s",
                                 phase,
@@ -835,15 +872,19 @@ class TunnelForegroundService : Service() {
                             )
                         } else if (phase == TunnelPhase.Connected || phase == TunnelPhase.Validating ||
                             phase == TunnelPhase.StartingTor || phase == TunnelPhase.StartingDnsCrypt ||
+                            phase == TunnelPhase.StartingOpenVpn ||
                             phase == TunnelPhase.StartingVpn
                         ) {
                             Timber.w("Ignoring ALWAYS_ON — already up phase=%s", phase)
                             return@withLock
                         }
+                        alwaysOnRecoveryAttempt = 0
                         tunnelJob = scope.launch {
                             teardownOnce.set(false)
                             preferences = preferencesStore.preferences.first()
                             runStartSequence()
+                            // Private Space unlock often has delayed uplink — retry Blocking.
+                            maybeScheduleBlockingRecovery(fromAlwaysOn = true)
                         }
                     }
                 }
@@ -854,6 +895,9 @@ class TunnelForegroundService : Service() {
     }
 
     override fun onDestroy() {
+        // Cancel Always-On Blocking recovery before scope cancel.
+        blockingRecoveryJob?.cancel()
+        blockingRecoveryJob = null
         OnionVpnService.onUnderlyingNetworkChanged = null
         // Teardown before cancelling scope — otherwise TUN/Tor/DNSCrypt leak on process
         // death paths that skip STOP/REVOKED.
@@ -886,6 +930,7 @@ class TunnelForegroundService : Service() {
                 val phase = _snapshot.value.phase
                 if (phase == TunnelPhase.StartingTor ||
                     phase == TunnelPhase.StartingDnsCrypt ||
+                    phase == TunnelPhase.StartingOpenVpn ||
                     phase == TunnelPhase.StartingVpn ||
                     phase == TunnelPhase.Validating
                 ) {
@@ -1178,13 +1223,19 @@ class TunnelForegroundService : Service() {
                 return
             }
             // Point DNSCrypt + probes at sidecar (same TorClient as TUN).
+            // Keep torOpenVpnSocksPort distinct and relay → sidecar so OpenVPN IsolateSOCKSAuth
+            // (openvpn/overtor) does not share the apps SOCKS listen path.
             activePorts = ports.copy(
                 torDnsCryptSocksPort = sidecar,
                 torProbeSocksPort = sidecar,
                 torSocksPort = sidecar,
+                // torOpenVpnSocksPort left as allocated dedicated port
             )
             runtimePorts = activePorts
             tor.attachExternalRuntimePorts(activePorts)
+            OpTrace.step("tunnel", "onionmasq_openvpn_socks_relay") {
+                artiSocksRoleMux.start(activePorts, applicationContext)
+            }
             updateSnapshot(TunnelPhase.StartingDnsCrypt, torRunning = true)
             val dnsResult = OpTrace.stepSuspending("tunnel", "dnscrypt_start_sidecar", ProcessLogLevel.INFO) {
                 dnsCrypt.start(
@@ -1265,6 +1316,26 @@ class TunnelForegroundService : Service() {
 
         // Hold CPU while Connected (OnionShare holds wake lock while Tor network on).
         acquireTunnelWakeLock(timeoutMs = null)
+
+        if (preferences.openVpnOverTorEnabled && preferences.openVpnProfileConfigured) {
+            updateSnapshot(TunnelPhase.StartingOpenVpn, vpnEstablished = true, torRunning = true)
+            openVpnOverTor.protectSocket = { fd -> OnionVpnService.protectSocket(fd) }
+            val ovpnResult = OpTrace.step("tunnel", "openvpn_over_tor_start") {
+                openVpnOverTor.start(
+                    ports = activePorts,
+                    authUser = preferences.openVpnAuthUser,
+                    authPassword = preferences.openVpnAuthPassword,
+                )
+            }
+            if (ovpnResult.isFailure) {
+                Timber.w(
+                    ovpnResult.exceptionOrNull(),
+                    "OpenVPN-over-Tor failed to start — ALLOW_OVPN unavailable (Tor path OK)",
+                )
+            }
+        } else {
+            openVpnOverTor.stop()
+        }
 
         updateSnapshot(
             phase = TunnelPhase.Connected,
@@ -1419,6 +1490,7 @@ class TunnelForegroundService : Service() {
         }
         val bootstrapping = phase == TunnelPhase.StartingTor ||
             phase == TunnelPhase.StartingDnsCrypt ||
+            phase == TunnelPhase.StartingOpenVpn ||
             phase == TunnelPhase.StartingVpn ||
             phase == TunnelPhase.Validating
         // Never leave Starting* stuck: defer only once Connected (NEWNYM / soft recover).
@@ -1496,6 +1568,67 @@ class TunnelForegroundService : Service() {
             validations = validations,
         )
         notifications.update(TunnelPhase.Blocking, throughputText)
+        // Space unlock / flaky uplink: do not stay blackholed forever.
+        maybeScheduleBlockingRecovery(fromAlwaysOn = OnionVpnService.vpnAlwaysOn.value)
+    }
+
+    /**
+     * After Always-On / kill-switch Blocking, retry Connected when uplink is VALIDATED.
+     * Caps attempts so we do not spin when Tor is permanently broken.
+     */
+    private fun maybeScheduleBlockingRecovery(fromAlwaysOn: Boolean) {
+        // Always-On, prior recovery lane, or network flap while Blocking — all eligible.
+        if (!fromAlwaysOn &&
+            alwaysOnRecoveryAttempt <= 0 &&
+            !OnionVpnService.vpnAlwaysOn.value &&
+            _snapshot.value.phase != TunnelPhase.Blocking
+        ) {
+            return
+        }
+        if (_snapshot.value.phase != TunnelPhase.Blocking && !fromAlwaysOn) return
+        blockingRecoveryJob?.cancel()
+        blockingRecoveryJob = scope.launch {
+            while (isActive && alwaysOnRecoveryAttempt < MAX_ALWAYS_ON_RECOVERY) {
+                delay(ALWAYS_ON_RECOVERY_BASE_MS * (1L shl alwaysOnRecoveryAttempt.coerceAtMost(3)))
+                if (_snapshot.value.phase != TunnelPhase.Blocking) return@launch
+                if (!hasValidatedNonVpnUplink()) {
+                    Timber.d("Blocking recovery: waiting for VALIDATED uplink")
+                    continue
+                }
+                if (tunnelJob?.isActive == true) return@launch
+                alwaysOnRecoveryAttempt++
+                Timber.i(
+                    "Blocking recovery attempt %d/%d",
+                    alwaysOnRecoveryAttempt,
+                    MAX_ALWAYS_ON_RECOVERY,
+                )
+                lifecycleMutex.withLock {
+                    if (_snapshot.value.phase != TunnelPhase.Blocking) return@withLock
+                    if (tunnelJob?.isActive == true) return@withLock
+                    tunnelJob = scope.launch {
+                        teardownOnce.set(false)
+                        preferences = preferencesStore.preferences.first()
+                        runStartSequence()
+                    }
+                }
+                delay(15_000)
+                if (_snapshot.value.phase == TunnelPhase.Connected) {
+                    alwaysOnRecoveryAttempt = 0
+                    return@launch
+                }
+            }
+            if (_snapshot.value.phase == TunnelPhase.Blocking) {
+                Timber.w("Blocking recovery exhausted — user must reconnect from UI")
+            }
+        }
+    }
+
+    private fun hasValidatedNonVpnUplink(): Boolean {
+        val cm = getSystemService(android.net.ConnectivityManager::class.java) ?: return false
+        val net = cm.activeNetwork ?: return false
+        val caps = cm.getNetworkCapabilities(net) ?: return false
+        return caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_VALIDATED) &&
+            !caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN)
     }
 
     private suspend fun runStopSequence(userInitiated: Boolean) {
@@ -1510,6 +1643,9 @@ class TunnelForegroundService : Service() {
             stopThroughputUpdates()
             forwarderWatchJob?.cancel()
             forwarderWatchJob = null
+            blockingRecoveryJob?.cancel()
+            blockingRecoveryJob = null
+            alwaysOnRecoveryAttempt = 0
             firewallEngine.clearSessionRules()
             teardownModules(
                 resetSnapshot = userInitiated,
@@ -1544,6 +1680,7 @@ class TunnelForegroundService : Service() {
         unregisterTorNativePackageReceiver()
         circuitLifecycle.stop()
         firewallEngine.stop()
+        runCatching { openVpnOverTor.stop() }
         runCatching { pacServer.stop() }
         vpnBridge.destroy()
         vpnBridge.waitUntilDown()
@@ -1836,6 +1973,10 @@ class TunnelForegroundService : Service() {
                 if (phase == TunnelPhase.Connected && st.connected) {
                     stabilityRecovery.maybeApply(st)
                 }
+                if (phase == TunnelPhase.Blocking && pendingNetworkRecover) {
+                    pendingNetworkRecover = false
+                    maybeScheduleBlockingRecovery(fromAlwaysOn = OnionVpnService.vpnAlwaysOn.value)
+                }
                 if (phase == TunnelPhase.Connected && !tor.isInMaintenance) {
                     if (pendingNetworkRecover) {
                         recoverUnderlyingNetwork(fromPending = true)
@@ -2041,6 +2182,9 @@ class TunnelForegroundService : Service() {
          * Old gate was ~20s → fail/stuck while circuits were still building.
          */
         private const val ONIONMASQ_BOOTSTRAP_TIMEOUT_MS = 240_000L
+        /** Always-On / Private Space: retry Connected after kill-switch Blocking. */
+        private const val MAX_ALWAYS_ON_RECOVERY = 5
+        private const val ALWAYS_ON_RECOVERY_BASE_MS = 4_000L
         /** Soft fail streak / cooldown before Arti hard restart on link flap. */
         private const val HARD_NETWORK_RECOVER_COOLDOWN_MS = 60_000L
         /** Leak checks — catch Private DNS activation sooner without thrashing Tor. */

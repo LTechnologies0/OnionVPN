@@ -1,0 +1,13 @@
+OpenVPN native binaries (libovpnexec.so, libopenvpn.so)
+=======================================================
+Extracted from F-Droid package de.blinkt.openvpn ("OpenVPN for Android" /
+ics-openvpn by Arne Schwabe), which embeds OpenVPN under the GNU GPL v2
+(with additional terms from the OpenVPN project).
+
+Source: https://github.com/schwabe/ics-openvpn
+F-Droid: https://f-droid.org/packages/de.blinkt.openvpn/
+Refresh: native/openvpn/fetch-ics-openvpn-libs.sh
+
+Shipping these binaries with OnionVPN requires GPL compliance for the
+combined work as it applies to the OpenVPN portion (offer corresponding
+source, preserve licence notices).

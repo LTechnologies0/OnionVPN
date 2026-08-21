@@ -15,8 +15,8 @@ android {
         applicationId = "ltechnologies.onionphone.onionvpn"
         minSdk = libs.versions.minSdk.get().toInt()
         targetSdk = libs.versions.targetSdk.get().toInt()
-        versionCode = 75
-        versionName = "0.3.68"
+        versionCode = 76
+        versionName = "0.3.69"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
@@ -79,6 +79,7 @@ dependencies {
     implementation(project(":core:model"))
     implementation(project(":core:tor"))
     implementation(project(":core:dnscrypt"))
+    implementation(project(":core:openvpn"))
     implementation(project(":core:vpn"))
     implementation(project(":core:validation"))
     implementation(project(":third_party:onionmasq-android"))

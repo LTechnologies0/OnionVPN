@@ -75,6 +75,7 @@ fun FirewallScreen(
                     FirewallPromptContent(
                         info = pending!!,
                         tempMinutes = preferences.firewallTempMinutes,
+                        ovpnAvailable = engine.ovpnRouteAvailable(preferences),
                         onAnswer = { verdict, scope ->
                             engine.answerPrompt(pending!!.requestId, verdict, scope)
                         },
@@ -147,7 +148,7 @@ private fun RuleRow(rule: FirewallRule, onDelete: () -> Unit) {
                 Text(
                     "${verdictLabel(rule.verdict)} · ${scopeLabel(rule)}",
                     style = MaterialTheme.typography.labelMedium,
-                    color = if (rule.verdict == FirewallVerdict.ALLOW) {
+                    color = if (rule.verdict.forwards) {
                         MaterialTheme.colorScheme.primary
                     } else {
                         MaterialTheme.colorScheme.error
@@ -176,7 +177,7 @@ private fun JournalRow(entry: FirewallJournalEntry) {
             Text(
                 "$time  ${verdictLabel(entry.verdict)}  ${entry.appLabel}",
                 style = MaterialTheme.typography.titleSmall,
-                color = if (entry.verdict == FirewallVerdict.ALLOW) {
+                color = if (entry.verdict.forwards) {
                     MaterialTheme.colorScheme.primary
                 } else {
                     MaterialTheme.colorScheme.error
@@ -220,7 +221,8 @@ private fun ruleDisplayDest(rule: FirewallRule): String {
 }
 
 private fun verdictLabel(verdict: FirewallVerdict): String = when (verdict) {
-    FirewallVerdict.ALLOW -> "Allow"
+    FirewallVerdict.ALLOW_TOR -> "Via Tor"
+    FirewallVerdict.ALLOW_OVPN -> "Via OVPN"
     FirewallVerdict.DENY -> "Deny"
 }
 

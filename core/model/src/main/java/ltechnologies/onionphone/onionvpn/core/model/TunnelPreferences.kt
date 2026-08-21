@@ -111,4 +111,21 @@ data class TunnelPreferences(
      * [TorEngine.ARTI] and native onionmasq are present; otherwise HEV.
      */
     val tunDataPlane: TunDataPlane = TunDataPlane.HEV_SOCKS,
+    /**
+     * Optional OpenVPN-over-Tor: TCP OpenVPN client reaches the VPN server via
+     * Tor SOCKS so destinations see the VPN egress IP (not a Tor exit).
+     * Requires an imported `.ovpn` profile and a tunnel restart.
+     */
+    val openVpnOverTorEnabled: Boolean = false,
+    /**
+     * True when a profile was imported into app-private storage
+     * (`files/openvpn/profile.ovpn`). Content is not held in prefs.
+     */
+    val openVpnProfileConfigured: Boolean = false,
+    /**
+     * Optional OpenVPN `auth-user-pass` credentials (e.g. VPN Gate uses `vpn`/`vpn`).
+     * Empty = no auth file; PASSWORD prompts fail closed.
+     */
+    val openVpnAuthUser: String = "",
+    val openVpnAuthPassword: String = "",
 )

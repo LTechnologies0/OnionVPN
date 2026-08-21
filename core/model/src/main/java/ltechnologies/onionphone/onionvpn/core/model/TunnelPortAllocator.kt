@@ -34,10 +34,12 @@ object TunnelPortAllocator {
         // so IsolationToken usernames stay role-separated even without multi SocksPort.
         val dnsCryptSocks = allocateTcpPort(used)
         val probeSocks = allocateTcpPort(used)
+        val openVpnSocks = allocateTcpPort(used)
         return TunnelRuntimePorts(
             torSocksPort = socks,
             torDnsCryptSocksPort = dnsCryptSocks,
             torProbeSocksPort = probeSocks,
+            torOpenVpnSocksPort = openVpnSocks,
             torHttpTunnelPort = allocateTcpPort(used),
             torDnsPort = allocateUdpPort(used),
             dnsCryptListenPort = allocateTcpUdpPort(used),
@@ -98,6 +100,8 @@ data class TunnelRuntimePorts(
     val torDnsCryptSocksPort: Int,
     /** Tor SocksPort for OnionVPN validation probes only (no app circuit sharing). */
     val torProbeSocksPort: Int,
+    /** Tor SocksPort for OpenVPN-over-Tor control channel only. */
+    val torOpenVpnSocksPort: Int,
     /** Tor HTTPTunnelPort slot (allocated but unused — HTTPTunnelPort 0; PAC bridge only). */
     val torHttpTunnelPort: Int,
     val torDnsPort: Int,
