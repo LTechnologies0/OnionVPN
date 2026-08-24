@@ -222,6 +222,24 @@ class TunnelForegroundService : Service() {
         return false
     }
 
+    /**
+     * Arti HEV: TorClient::resolve often answers before the TCP bootstrap relay wins
+     * its first DoH race (probeOnceTcp timeout). Either path is enough for DNSCrypt.
+     */
+    private suspend fun awaitArtiNativeResolveReady(attempts: Int = 8, delayMs: Long = 2_000): Boolean {
+        if (!org.torproject.arti.ArtiControlNative.isAvailable()) return false
+        repeat(attempts) { attempt ->
+            val ip = org.torproject.arti.ArtiControlNative.resolveHostname("example.com")
+            if (!ip.isNullOrBlank()) {
+                Timber.i("Arti native resolve ready example.com=%s attempt=%d", ip, attempt + 1)
+                return true
+            }
+            Timber.d("Arti native resolve miss attempt=%d/%d", attempt + 1, attempts)
+            delay(delayMs)
+        }
+        return false
+    }
+
     @Volatile private var pendingNetworkRecover = false
     @Volatile private var pendingForwarderCheck = false
     @Volatile private var lastHardNetworkRecoverMs = 0L
@@ -980,15 +998,14 @@ class TunnelForegroundService : Service() {
     private suspend fun startTunnel() {
         OpTrace.info("tunnel", "startTunnel begin engine=${preferences.torEngine}")
         acquireTunnelWakeLock(BOOTSTRAP_WAKELOCK_TIMEOUT_MS)
+        // DataStore is source of truth for prefs not carried on ACTION_START (OpenVPN,
+        // firewall, app lock, …). Intent extras are a stale subset from TunnelOrchestrator.
+        preferences = runCatching {
+            preferencesStore.preferences.first()
+        }.getOrDefault(preferences)
         preferences = applyDebugBridgeOverride(preferences)
         preferences = applyDebugEngineOverride(preferences)
-        // Prefer DataStore over ACTION_START intent snapshot — Settings may have toggled
-        // no-logs while the service still held a stale intent extra.
-        val storedNoLogs = runCatching {
-            preferencesStore.preferences.first().noLogsEnabled
-        }.getOrDefault(preferences.noLogsEnabled)
-        preferences = preferences.copy(noLogsEnabled = storedNoLogs)
-        DiagnosticsGate.setNoLogsEnabled(storedNoLogs)
+        DiagnosticsGate.setNoLogsEnabled(preferences.noLogsEnabled)
         // Cancel Tor-bound downloads before we tear down / recycle SOCKS ports.
         domainReputation.onTorUnavailable()
 
@@ -1111,7 +1128,9 @@ class TunnelForegroundService : Service() {
                         },
                     )
                 }
-                if (!awaitBootstrapRelayTcpReady()) {
+                if (!awaitBootstrapRelayTcpReady(attempts = 12, timeoutMs = 10_000) &&
+                    !awaitArtiNativeResolveReady(attempts = 8, delayMs = 2_000)
+                ) {
                     failDuringStart(
                         message = "Arti TCP DNS bootstrap not ready for DNSCrypt (force_tcp) — fail-closed",
                         fromValidation = false,
@@ -1320,20 +1339,32 @@ class TunnelForegroundService : Service() {
         if (preferences.openVpnOverTorEnabled && preferences.openVpnProfileConfigured) {
             updateSnapshot(TunnelPhase.StartingOpenVpn, vpnEstablished = true, torRunning = true)
             openVpnOverTor.protectSocket = { fd -> OnionVpnService.protectSocket(fd) }
-            val ovpnResult = OpTrace.step("tunnel", "openvpn_over_tor_start") {
-                openVpnOverTor.start(
+            openVpnOverTor.onUpChanged = { up ->
+                if (up) firewallEngine.refreshActivePromptForOvpn()
+            }
+            val ovpnResult = OpTrace.stepSuspending("tunnel", "openvpn_over_tor_start") {
+                val started = openVpnOverTor.start(
                     ports = activePorts,
                     authUser = preferences.openVpnAuthUser,
                     authPassword = preferences.openVpnAuthPassword,
                 )
+                if (started.isFailure) return@stepSuspending started
+                // Block Connected until Via OVPN is actually usable (or fail soft).
+                openVpnOverTor.awaitReady(timeoutMs = 90_000L)
             }
             if (ovpnResult.isFailure) {
                 Timber.w(
                     ovpnResult.exceptionOrNull(),
-                    "OpenVPN-over-Tor failed to start — ALLOW_OVPN unavailable (Tor path OK)",
+                    "OpenVPN-over-Tor failed — ALLOW_OVPN unavailable (Tor path OK)",
                 )
+            } else {
+                Timber.i("OpenVPN-over-Tor ready — Via OVPN enabled")
             }
         } else {
+            if (preferences.openVpnOverTorEnabled && !preferences.openVpnProfileConfigured) {
+                Timber.w("OpenVPN-over-Tor enabled but no profile — import .ovpn in Settings")
+            }
+            openVpnOverTor.onUpChanged = null
             openVpnOverTor.stop()
         }
 
@@ -1680,6 +1711,7 @@ class TunnelForegroundService : Service() {
         unregisterTorNativePackageReceiver()
         circuitLifecycle.stop()
         firewallEngine.stop()
+        openVpnOverTor.onUpChanged = null
         runCatching { openVpnOverTor.stop() }
         runCatching { pacServer.stop() }
         vpnBridge.destroy()
@@ -2176,6 +2208,10 @@ class TunnelForegroundService : Service() {
         const val EXTRA_VPN_APP_PACKAGES = "vpn_app_packages"
         const val EXTRA_ALLOW_ADB_CLEARNET_LEAK = "allow_adb_clearnet_leak"
         const val EXTRA_TUN_DATA_PLANE = "tun_data_plane"
+        const val EXTRA_OPENVPN_OVER_TOR = "openvpn_over_tor"
+        const val EXTRA_OPENVPN_PROFILE = "openvpn_profile_configured"
+        const val EXTRA_OPENVPN_AUTH_USER = "openvpn_auth_user"
+        const val EXTRA_OPENVPN_AUTH_PASSWORD = "openvpn_auth_password"
 
         /**
          * onionmasq (separate TorClient) cold microdesc fetch often exceeds 60–90s.
@@ -2246,6 +2282,10 @@ class TunnelForegroundService : Service() {
                 ?: emptySet(),
             allowAdbClearnetLeak = intent.getBooleanExtra(EXTRA_ALLOW_ADB_CLEARNET_LEAK, false),
             tunDataPlane = TunDataPlane.fromPreference(intent.getStringExtra(EXTRA_TUN_DATA_PLANE)),
+            openVpnOverTorEnabled = intent.getBooleanExtra(EXTRA_OPENVPN_OVER_TOR, false),
+            openVpnProfileConfigured = intent.getBooleanExtra(EXTRA_OPENVPN_PROFILE, false),
+            openVpnAuthUser = intent.getStringExtra(EXTRA_OPENVPN_AUTH_USER).orEmpty(),
+            openVpnAuthPassword = intent.getStringExtra(EXTRA_OPENVPN_AUTH_PASSWORD).orEmpty(),
         )
     }
 

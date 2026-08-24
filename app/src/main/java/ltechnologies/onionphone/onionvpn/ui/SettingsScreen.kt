@@ -571,7 +571,8 @@ fun SettingsScreen(
             title = "OpenVPN over Tor",
             subtitle = "Optional TCP OpenVPN client reaches the VPN server via Tor SOCKS so " +
                 "websites see the VPN egress IP (not a Tor exit). Device DNS stays DNSCrypt-over-Tor. " +
-                "Needs libovpnexec.so (ics-openvpn). Free VPN Gate: leave user/pass empty unless prompted. " +
+                "Needs a TCP .ovpn + libovpnexec.so (ics-openvpn). UDP-only profiles are rejected. " +
+                "Works with C Tor and Arti. Via OVPN appears only after CONNECTED+OPENTUN. " +
                 "Changing this restarts the tunnel.",
         )
         PrefSwitch(

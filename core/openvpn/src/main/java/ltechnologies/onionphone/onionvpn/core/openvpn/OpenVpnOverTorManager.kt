@@ -2,14 +2,19 @@ package ltechnologies.onionphone.onionvpn.core.openvpn
 
 import android.content.Context
 import android.os.ParcelFileDescriptor
+import android.system.Os
 import java.io.File
 import java.net.InetAddress
+import java.net.InetSocketAddress
+import java.net.Socket
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.concurrent.thread
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withTimeoutOrNull
 import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
 import ltechnologies.onionphone.onionvpn.core.model.TunnelRuntimePorts
 import ltechnologies.onionphone.onionvpn.core.vpn.firewall.FirewallBridge
@@ -26,6 +31,7 @@ import timber.log.Timber
  * OpenVPN; we keep the other end and pump IP frames ↔ VpnService TUN via
  * [FirewallBridge.ovpnPacketSink] / [FirewallBridge.injectToVpnTun].
  *
+ * Works for both C Tor (native SocksPort) and Arti (role-mux / onionmasq sidecar).
  * Requires TARGET_ANDROID `libovpnexec.so` (ics-openvpn) in the app native library dir.
  */
 class OpenVpnOverTorManager(
@@ -48,6 +54,13 @@ class OpenVpnOverTorManager(
      */
     @Volatile
     var protectSocket: ((Int) -> Boolean)? = null
+
+    /**
+     * Fired when [FirewallBridge.openVpnOverTorUp] flips (true = Via OVPN available).
+     * Wire to refresh firewall prompt notifications.
+     */
+    @Volatile
+    var onUpChanged: ((Boolean) -> Unit)? = null
 
     private val profileDir: File
         get() = File(appContext.filesDir, "openvpn").also { it.mkdirs() }
@@ -115,7 +128,10 @@ class OpenVpnOverTorManager(
             return fail("OpenVPN profile missing")
         }
         val binary = resolveBinary()
-            ?: return fail("libovpnexec.so missing — place ics-openvpn openvpn binary in jniLibs")
+            ?: return fail(
+                "libovpnexec.so missing or not executable — " +
+                    "reinstall APK / run native/openvpn/fetch-ics-openvpn-libs.sh",
+            )
 
         val protect = protectSocket ?: { _ ->
             Timber.w("OpenVPN protectSocket not wired — PROTECTFD may fail for non-loopback")
@@ -123,6 +139,20 @@ class OpenVpnOverTorManager(
         }
 
         val rawProfile = profileFile.readText()
+        if (OpenVpnConfigWriter.looksUdpOnly(rawProfile)) {
+            return fail(
+                "Profile looks UDP-only — OpenVPN-over-Tor needs a TCP .ovpn " +
+                    "(Tor SOCKS cannot carry UDP)",
+            )
+        }
+
+        if (!waitForOpenVpnSocks(ports.torOpenVpnSocksPort)) {
+            return fail(
+                "Tor OpenVPN SocksPort :${ports.torOpenVpnSocksPort} not accepting " +
+                    "(C Tor SocksPort / Arti role-mux not ready)",
+            )
+        }
+
         val pinnedProfile = pinRemoteViaTor(rawProfile, ports.torOpenVpnSocksPort)
             .getOrElse { return fail(it.message ?: "remote resolve via Tor failed", it) }
 
@@ -159,7 +189,7 @@ class OpenVpnOverTorManager(
                 if (running.get()) {
                     running.set(false)
                     processRef.getAndSet(null)?.destroy()
-                    FirewallBridge.openVpnOverTorUp = false
+                    setUpFlag(false)
                     FirewallBridge.ovpnPacketSink = null
                     _status.value = OpenVpnStatus(OpenVpnPhase.Error, msg)
                 }
@@ -171,7 +201,7 @@ class OpenVpnOverTorManager(
         return try {
             mgmt.start()
             // Brief window so the unix server is bound before OpenVPN connects.
-            Thread.sleep(50)
+            Thread.sleep(80)
             val libDir = File(appContext.applicationInfo.nativeLibraryDir)
             val pb = ProcessBuilder(
                 binary.absolutePath,
@@ -191,6 +221,11 @@ class OpenVpnOverTorManager(
             processRef.set(proc)
             startLogPump(proc)
             startWatchdog(proc)
+            Timber.i(
+                "OpenVPN process started binary=%s socks=:%d",
+                binary.name,
+                ports.torOpenVpnSocksPort,
+            )
             Result.success(Unit)
         } catch (e: Exception) {
             stop()
@@ -198,11 +233,33 @@ class OpenVpnOverTorManager(
         }
     }
 
+    /**
+     * Wait until control CONNECTED + OPENTUN data plane, or [timeoutMs] / Error.
+     * Call after a successful [start] so Via OVPN is live before firewall prompts.
+     */
+    suspend fun awaitReady(timeoutMs: Long = 90_000L): Result<Unit> {
+        val done = withTimeoutOrNull(timeoutMs) {
+            status.first {
+                it.phase == OpenVpnPhase.Up ||
+                    it.phase == OpenVpnPhase.Error ||
+                    it.phase == OpenVpnPhase.Idle
+            }
+        } ?: return Result.failure(
+            IllegalStateException("OpenVPN-over-Tor timed out waiting for CONNECTED+OPENTUN"),
+        )
+        return when (done.phase) {
+            OpenVpnPhase.Up -> Result.success(Unit)
+            OpenVpnPhase.Error -> Result.failure(IllegalStateException(done.detail.ifBlank { "OpenVPN error" }))
+            else -> Result.failure(IllegalStateException("OpenVPN stopped before UP (${done.phase})"))
+        }
+    }
+
     fun stop() {
+        val wasUp = FirewallBridge.openVpnOverTorUp
         running.set(false)
         controlConnected.set(false)
         dataPlaneReady.set(false)
-        FirewallBridge.openVpnOverTorUp = false
+        setUpFlag(false)
         FirewallBridge.ovpnPacketSink = null
         runCatching { tunPump?.stop() }
         tunPump = null
@@ -211,6 +268,9 @@ class OpenVpnOverTorManager(
         processRef.getAndSet(null)?.destroy()
         if (_status.value.phase != OpenVpnPhase.Idle) {
             _status.value = OpenVpnStatus(OpenVpnPhase.Idle, "stopped")
+        }
+        if (wasUp) {
+            // already cleared via setUpFlag
         }
     }
 
@@ -222,7 +282,7 @@ class OpenVpnOverTorManager(
         val host = OpenVpnConfigWriter.firstRemoteHost(profileText)
             ?: return Result.failure(IllegalStateException("profile has no remote"))
         if (TunnelEndpoints.parseIpv4Literal(host) != null) {
-            return Result.success(profileText)
+            return Result.success(OpenVpnConfigWriter.pinRemoteToIpv4(profileText, host))
         }
         return try {
             val client = Socks5Client(
@@ -236,12 +296,9 @@ class OpenVpnOverTorManager(
             val addr: InetAddress = client.resolve(host)
             val ipv4 = addr.hostAddress
                 ?: return Result.failure(IllegalStateException("resolve returned no address"))
-            // Prefer IPv4 for OpenVPN remote pinning.
             val v4 = if (addr is java.net.Inet4Address) {
                 ipv4
             } else {
-                // Tor may return IPv6; OpenVPN TCP over SOCKS still works with hostname
-                // via socks5, but we refuse AAAA-only to keep remote line simple.
                 return Result.failure(
                     IllegalStateException("Tor resolved $host to non-IPv4 ($ipv4)"),
                 )
@@ -253,15 +310,35 @@ class OpenVpnOverTorManager(
         }
     }
 
+    private fun waitForOpenVpnSocks(port: Int, attempts: Int = 40, delayMs: Long = 250L): Boolean {
+        repeat(attempts) { i ->
+            val ok = runCatching {
+                Socket().use { s ->
+                    s.connect(InetSocketAddress(TunnelEndpoints.LOOPBACK, port), 500)
+                }
+            }.isSuccess
+            if (ok) {
+                if (i > 0) Timber.i("OpenVPN SocksPort :%d ready after %d tries", port, i + 1)
+                return true
+            }
+            try {
+                Thread.sleep(delayMs)
+            } catch (_: InterruptedException) {
+                return false
+            }
+        }
+        return false
+    }
+
     private fun startWatchdog(proc: Process) {
         thread(name = "onionvpn-ovpn-watch", isDaemon = true) {
             var waited = 0
             while (running.get() && waited < 90_000) {
                 if (!proc.isAlive) {
                     if (running.get()) {
-                        val msg = "OpenVPN process exited early"
+                        val msg = "OpenVPN process exited early (see openvpn: logs)"
                         Timber.w(msg)
-                        FirewallBridge.openVpnOverTorUp = false
+                        setUpFlag(false)
                         FirewallBridge.ovpnPacketSink = null
                         _status.value = OpenVpnStatus(OpenVpnPhase.Error, msg)
                         running.set(false)
@@ -275,7 +352,7 @@ class OpenVpnOverTorManager(
             if (running.get() && !(controlConnected.get() && dataPlaneReady.get())) {
                 val msg = when {
                     !controlConnected.get() ->
-                        "OpenVPN never CONNECTED via Tor SOCKS (check .ovpn / binary)"
+                        "OpenVPN never CONNECTED via Tor SOCKS (TCP .ovpn? auth? binary?)"
                     else ->
                         "OpenVPN CONNECTED but OPENTUN never delivered (need TARGET_ANDROID libovpnexec.so)"
                 }
@@ -283,7 +360,7 @@ class OpenVpnOverTorManager(
                 running.set(false)
                 processRef.getAndSet(null)?.destroy()
                 runCatching { androidMgmt?.stop() }
-                FirewallBridge.openVpnOverTorUp = false
+                setUpFlag(false)
                 FirewallBridge.ovpnPacketSink = null
                 _status.value = OpenVpnStatus(OpenVpnPhase.Error, msg)
             }
@@ -293,17 +370,27 @@ class OpenVpnOverTorManager(
     private fun publishUpState(detail: String) {
         val control = controlConnected.get()
         val data = dataPlaneReady.get()
-        FirewallBridge.openVpnOverTorUp = control && data
+        val up = control && data
+        setUpFlag(up)
         _status.value = when {
-            control && data -> OpenVpnStatus(OpenVpnPhase.Up, detail)
+            up -> OpenVpnStatus(OpenVpnPhase.Up, detail)
             control && !data -> OpenVpnStatus(
                 OpenVpnPhase.Starting,
                 "$detail — waiting for OPENTUN FD",
             )
             else -> OpenVpnStatus(OpenVpnPhase.Starting, detail)
         }
-        if (control && data) {
+        if (up) {
             Timber.i("OpenVPN-over-Tor UP (control+data)")
+        }
+    }
+
+    private fun setUpFlag(up: Boolean) {
+        val prev = FirewallBridge.openVpnOverTorUp
+        FirewallBridge.openVpnOverTorUp = up
+        if (prev != up) {
+            runCatching { onUpChanged?.invoke(up) }
+                .onFailure { Timber.w(it, "onUpChanged failed") }
         }
     }
 
@@ -322,16 +409,47 @@ class OpenVpnOverTorManager(
         val dir = File(appContext.applicationInfo.nativeLibraryDir)
         val candidates = listOf(
             File(dir, "libovpnexec.so"),
-            File(dir, "libopenvpn.so"),
             File(dir, "ovpnexec"),
         )
-        return candidates.firstOrNull { it.isFile && it.canExecute() }
+        for (f in candidates) {
+            if (!f.isFile) continue
+            ensureExecutable(f)
+            if (f.canExecute() || f.isFile) return f
+        }
+        // Fallback: copy pie_openvpn from assets (same F-Droid package).
+        val abi = android.os.Build.SUPPORTED_ABIS.firstOrNull() ?: return null
+        val assetName = when {
+            abi.startsWith("arm64") -> "openvpn/pie_openvpn.arm64-v8a"
+            abi.startsWith("x86_64") -> "openvpn/pie_openvpn.x86_64"
+            else -> return null
+        }
+        val out = File(profileDir, "pie_openvpn")
+        return try {
+            if (!out.isFile || out.length() == 0L) {
+                appContext.assets.open(assetName).use { inp ->
+                    out.outputStream().use { inp.copyTo(it) }
+                }
+            }
+            ensureExecutable(out)
+            out.takeIf { it.isFile }
+        } catch (e: Exception) {
+            Timber.w(e, "Failed to extract %s", assetName)
+            null
+        }
+    }
+
+    private fun ensureExecutable(file: File) {
+        if (file.canExecute()) return
+        runCatching {
+            file.setExecutable(true, false)
+            Os.chmod(file.absolutePath, 448) // 0700
+        }.onFailure { Timber.d(it, "chmod %s", file.name) }
     }
 
     private fun fail(msg: String, cause: Throwable? = null): Result<Unit> {
         Timber.w(cause, "OpenVPN-over-Tor: %s", msg)
         _status.value = OpenVpnStatus(OpenVpnPhase.Error, msg)
-        FirewallBridge.openVpnOverTorUp = false
+        setUpFlag(false)
         FirewallBridge.ovpnPacketSink = null
         return Result.failure(cause ?: IllegalStateException(msg))
     }

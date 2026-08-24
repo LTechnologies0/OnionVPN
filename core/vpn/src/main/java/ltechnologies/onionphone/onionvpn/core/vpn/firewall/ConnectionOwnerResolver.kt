@@ -30,7 +30,12 @@ class ConnectionOwnerResolver(context: Context) {
 
     fun resolveUid(info: IpPacketInfo): Int {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            return resolveApi29Once(info)
+            val apiUid = resolveApi29Once(info)
+            if (isValidUid(apiUid)) return apiUid
+            // Waydroid / some OEM stacks: getConnectionOwnerUid misses while socket exists in proc.
+            val procUid = resolveProcNet(info)
+            if (isValidUid(procUid)) return procUid
+            return apiUid
         }
         return resolveProcNet(info)
     }
@@ -85,7 +90,62 @@ class ConnectionOwnerResolver(context: Context) {
                 }
             }
         }
+        // Waydroid / OEM: same miss as TUN SYN — /proc/net/tcp{,6} from client 5-tuple.
+        val procUid = resolveAcceptedProcNet(peer, local)
+        if (isValidUid(procUid)) return procUid
         return Process.INVALID_UID
+    }
+
+    /**
+     * Proc fallback for accepted loopback TCP (ArtiSocksRoleMux / PAC SOCKS).
+     * Tuple matches [getConnectionOwnerUid]: local=client ephemeral, remote=listen port.
+     */
+    private fun resolveAcceptedProcNet(peer: InetSocketAddress, local: InetSocketAddress): Int {
+        val peerAddr = peer.address ?: return Process.INVALID_UID
+        val localAddr = local.address ?: return Process.INVALID_UID
+        if (!peerAddr.isLoopbackAddress || !localAddr.isLoopbackAddress) {
+            return Process.INVALID_UID
+        }
+        return when (peerAddr.address.size) {
+            4 -> {
+                val info = IpPacketInfo(
+                    protocol = IpPacketParser.PROTO_TCP,
+                    srcIpInt = ipv4BytesToInt(peerAddr.address),
+                    dstIpInt = ipv4BytesToInt(localAddr.address),
+                    srcPort = peer.port,
+                    dstPort = local.port,
+                    isTcpSyn = false,
+                    isTcp = true,
+                    isUdp = false,
+                )
+                resolveProcNet(info)
+            }
+            16 -> {
+                val info = IpPacketInfo(
+                    protocol = IpPacketParser.PROTO_TCP,
+                    srcIpInt = 0,
+                    dstIpInt = 0,
+                    srcPort = peer.port,
+                    dstPort = local.port,
+                    isTcpSyn = false,
+                    isTcp = true,
+                    isUdp = false,
+                    ipVersion = 6,
+                    srcHostOverride = peerAddr.hostAddress,
+                    dstHostOverride = localAddr.hostAddress,
+                )
+                resolveProcNet6(info)
+            }
+            else -> Process.INVALID_UID
+        }
+    }
+
+    private fun ipv4BytesToInt(bytes: ByteArray): Int {
+        require(bytes.size == 4)
+        return (bytes[0].toInt() and 0xff) or
+            ((bytes[1].toInt() and 0xff) shl 8) or
+            ((bytes[2].toInt() and 0xff) shl 16) or
+            ((bytes[3].toInt() and 0xff) shl 24)
     }
 
     private fun resolveApi29Once(info: IpPacketInfo): Int {
@@ -122,6 +182,9 @@ class ConnectionOwnerResolver(context: Context) {
     }
 
     private fun resolveProcNet(info: IpPacketInfo): Int {
+        if (info.isIpv6) {
+            return resolveProcNet6(info)
+        }
         val file = when (info.protocol) {
             IpPacketParser.PROTO_TCP -> File("/proc/net/tcp")
             IpPacketParser.PROTO_UDP -> File("/proc/net/udp")
@@ -149,6 +212,50 @@ class ConnectionOwnerResolver(context: Context) {
             Timber.w(error, "proc net uid lookup failed")
             Process.INVALID_UID
         }
+    }
+
+    /** IPv6 proc fallback when API 29+ owner lookup misses (Waydroid). */
+    private fun resolveProcNet6(info: IpPacketInfo): Int {
+        val file = when (info.protocol) {
+            IpPacketParser.PROTO_TCP -> File("/proc/net/tcp6")
+            IpPacketParser.PROTO_UDP -> File("/proc/net/udp6")
+            else -> return Process.INVALID_UID
+        }
+        if (!file.canRead()) return Process.INVALID_UID
+        val remoteHex = ipv6PortHex(info.dstIp, info.dstPort)
+        val localHex = ipv6PortHex(info.srcIp, info.srcPort)
+        return try {
+            file.bufferedReader().useLines { lines ->
+                lines.drop(1).forEach { line ->
+                    val parts = line.trim().split(Regex("\\s+"))
+                    if (parts.size < 8) return@forEach
+                    val local = parts[1]
+                    val remote = parts[2]
+                    if (remote.equals(remoteHex, ignoreCase = true) &&
+                        (local.equals(localHex, ignoreCase = true) || info.isUdp)
+                    ) {
+                        return@useLines parts[7].toIntOrNull() ?: Process.INVALID_UID
+                    }
+                }
+                Process.INVALID_UID
+            }
+        } catch (error: Exception) {
+            Timber.w(error, "proc net6 uid lookup failed")
+            Process.INVALID_UID
+        }
+    }
+
+    private fun ipv6PortHex(ip: String, port: Int): String {
+        val addr = InetAddress.getByName(ip)
+        val bytes = addr.address
+        if (bytes.size != 16) return ""
+        val ipHex = buildString(32) {
+            for (b in bytes) {
+                append(String.format("%02X", b.toInt() and 0xff))
+            }
+        }
+        val portHex = String.format("%04X", port)
+        return "$ipHex:$portHex"
     }
 
     private fun ipv4PortHex(ip: Int, port: Int): String {

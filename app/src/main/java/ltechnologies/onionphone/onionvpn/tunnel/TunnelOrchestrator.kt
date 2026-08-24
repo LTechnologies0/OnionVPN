@@ -49,6 +49,16 @@ class TunnelOrchestrator @Inject constructor(
                     preferences.allowAdbClearnetLeak,
                 )
                 putExtra(TunnelForegroundService.EXTRA_TUN_DATA_PLANE, preferences.tunDataPlane.name)
+                putExtra(TunnelForegroundService.EXTRA_OPENVPN_OVER_TOR, preferences.openVpnOverTorEnabled)
+                putExtra(
+                    TunnelForegroundService.EXTRA_OPENVPN_PROFILE,
+                    preferences.openVpnProfileConfigured,
+                )
+                putExtra(TunnelForegroundService.EXTRA_OPENVPN_AUTH_USER, preferences.openVpnAuthUser)
+                putExtra(
+                    TunnelForegroundService.EXTRA_OPENVPN_AUTH_PASSWORD,
+                    preferences.openVpnAuthPassword,
+                )
             },
         )
     }

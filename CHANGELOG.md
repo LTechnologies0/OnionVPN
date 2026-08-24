@@ -3,6 +3,13 @@
 All notable changes to OnionVPN are documented here.
 
 ## [Unreleased]
+## [0.3.70] — 2026-08-24
+
+### Waydroid / Arti + OpenVPN-over-Tor stability
+- Arti: fail-closed UID trust for loopback SOCKS mux under Waydroid when `getConnectionOwnerUid` misses.
+- Arti: readiness gate for DNSCrypt `force_tcp` now uses both TCP DNS bootstrap probes and native `resolveHostname` fallback.
+- OpenVPN-over-Tor: refresh “Via OVPN” firewall prompt when OPENTUN becomes usable; stronger runtime sequencing (SocksPort + CONNECTED/OPENTUN).
+- OpenVPN-over-Tor config: force TCP remote + reject UDP-only profiles; management/OPENTUN + `PROTECTFD` wiring remains fail-closed.
 
 ## [0.3.69] — 2026-08-21
 
@@ -35,6 +42,7 @@ All notable changes to OnionVPN are documented here.
 - Pin `remote` via Tor SOCKS RESOLVE; optional auth-user-pass in Settings.
 - Onionmasq: dedicated OVPN SocksPort relayed to sidecar.
 - Test: VPN Gate TCP samples (`fetch-vpngate-testdata.sh`) + host control-plane smoke (`smoke-host-socks.sh`) — **PASS** PUSH_REPLY via Tor SOCKS; device binary `--version` OK (icsopenvpn).
+- **Stability:** load OVPN prefs from DataStore at tunnel start; wait SocksPort + await CONNECTED/OPENTUN; force `remote … tcp`; reject UDP-only; refresh firewall prompt when Via OVPN becomes available; assets `pie_openvpn` fallback.
 
 ### Firewall
 - Three-way verdicts: **Via Tor** / **Via OVPN** / **Deny** (legacy `ALLOW` → `ALLOW_TOR`).

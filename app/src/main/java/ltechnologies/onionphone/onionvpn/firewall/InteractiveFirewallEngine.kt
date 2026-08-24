@@ -183,7 +183,11 @@ class InteractiveFirewallEngine @Inject constructor(
         }
 
         // Resolve UID before uid-scoped caches — 5-tuple-only keys poisoned UNKNOWN→real UID races.
-        val uid = ownerResolver.resolveUid(info)
+        val uid = if (info.isTcpSyn) {
+            ownerResolver.resolveUidWithRetry(info)
+        } else {
+            ownerResolver.resolveUid(info)
+        }
         if (uid == ownUid) return FirewallVerdict.ALLOW_TOR
 
         // SYN without owner: drop and wait for retransmit (never open uunknown / sticky collapse).
@@ -728,13 +732,28 @@ class InteractiveFirewallEngine @Inject constructor(
      * With OpenVPN-over-Tor enabled, inventing Tor would demote an OVPN flow → Tor exit.
      */
     private fun midFlowFallback(prefs: TunnelPreferences): FirewallVerdict =
-        if (prefs.openVpnOverTorEnabled) FirewallVerdict.DENY else FirewallVerdict.ALLOW_TOR
+        if (prefs.openVpnOverTorEnabled && FirewallBridge.openVpnOverTorUp) {
+            FirewallVerdict.DENY
+        } else {
+            FirewallVerdict.ALLOW_TOR
+        }
 
     /** OVPN prompt option when feature enabled, profile present, and runtime up. */
     fun ovpnRouteAvailable(prefs: TunnelPreferences = preferences.get()): Boolean =
         prefs.openVpnOverTorEnabled &&
             prefs.openVpnProfileConfigured &&
             FirewallBridge.openVpnOverTorUp
+
+    /**
+     * Rebuild the heads-up notification once OpenVPN-over-Tor becomes UP so
+     * "Via OVPN" appears on an already-visible prompt (race with async CONNECTED).
+     */
+    fun refreshActivePromptForOvpn() {
+        if (!ovpnRouteAvailable()) return
+        val shown = synchronized(queueLock) { active?.request } ?: return
+        mainHandler.post { promptNotifier.show(shown) }
+        Timber.i("Firewall prompt refreshed — Via OVPN now available")
+    }
 
     companion object {
         private const val MAX_JOURNAL = 200

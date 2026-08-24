@@ -42,3 +42,10 @@ Socketpair with Android TUN FD semantics; `ALLOW_OVPN` ↔ OpenVPN ↔ `injectTo
 ## Onionmasq
 
 Dedicated OVPN SocksPort relayed to the sidecar (`ArtiSocksRoleMux`).
+Sidecar SOCKS auth must allow `openvpn`/`overtor` (`socks-sidecar.patch`) — rebuild
+`libonionmasq_mobile.so` after changing the patch.
+
+## C Tor
+
+Native torrc `SOCKSPort` with `SessionGroup=OPENVPN` + `IsolateSOCKSAuth`. No role-mux.
+Start path waits for that SocksPort before RESOLVE / OpenVPN spawn.

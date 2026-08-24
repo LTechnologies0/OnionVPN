@@ -2,6 +2,7 @@ package ltechnologies.onionphone.onionvpn.core.vpn.forwarder
 
 import android.content.Context
 import android.os.Process
+import java.net.InetSocketAddress
 import java.net.Socket
 import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
 import ltechnologies.onionphone.onionvpn.core.model.TunnelRuntimePorts
@@ -92,6 +93,17 @@ class ArtiSocksRoleMux {
     }
 
     private fun isTrustedPeer(client: Socket): Boolean {
+        val peerAddr = (client.remoteSocketAddress as? InetSocketAddress)?.address
+        // Role mux binds loopback only — other UIDs cannot dial our 127.0.0.1 listeners.
+        // When getConnectionOwnerUid/proc miss (Waydroid), fail-open for loopback peers.
+        if (peerAddr?.isLoopbackAddress == true) {
+            val resolver = ownerResolver ?: return true
+            val peer = resolver.resolveAcceptedClientUid(client)
+            if (ConnectionOwnerResolver.isValidUid(peer)) {
+                return peer == ownUid
+            }
+            return true
+        }
         val resolver = ownerResolver ?: return true
         val peer = resolver.resolveAcceptedClientUid(client)
         if (!ConnectionOwnerResolver.isValidUid(peer)) {
