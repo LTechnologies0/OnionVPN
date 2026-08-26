@@ -25,7 +25,8 @@ class ArtiSocksRoleMux {
     private val ownUid = Process.myUid()
     private var dnsCryptRelay: SocksTcpRelay? = null
     private var probeRelay: SocksTcpRelay? = null
-    private var openVpnRelay: SocksTcpRelay? = null
+    /** Auth-injecting shim: OpenVPN NO-AUTH → Arti IsolateSOCKSAuth. */
+    private var openVpnRelay: SocksAuthInjectingRelay? = null
 
     /**
      * @param appContext application context (never a half-constructed Service).
@@ -64,7 +65,9 @@ class ArtiSocksRoleMux {
             ports.torOpenVpnSocksPort != ports.torDnsCryptSocksPort &&
             ports.torOpenVpnSocksPort != ports.torProbeSocksPort
         ) {
-            openVpnRelay = SocksTcpRelay(
+            // OpenVPN omits socks-proxy auth (ics-openvpn VER=5 bug). Arti requires
+            // IsolateSOCKSAuth — terminate NO-AUTH locally and inject uopenvpn/popenvpn.
+            openVpnRelay = SocksAuthInjectingRelay(
                 listenPort = ports.torOpenVpnSocksPort,
                 upstreamHost = TunnelEndpoints.LOOPBACK,
                 upstreamPort = ports.torSocksPort,

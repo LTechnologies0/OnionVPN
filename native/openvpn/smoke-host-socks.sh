@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Host smoke: OpenVPN control channel to a VPN Gate TCP server via SOCKS5 (Tor).
+# Host smoke: OpenVPN control channel via SOCKS5 (Tor) using optional testdata samples.
 # Does NOT test Android OPENTUN — only proves socks-proxy + auth + CONNECTED.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")" && pwd)"
@@ -16,7 +16,7 @@ if [[ -z "$PROFILE" ]]; then
       exit 0
     fi
   done
-  echo "No VPN Gate profile accepted AUTH/PUSH — refresh testdata"
+  echo "No testdata profile accepted AUTH/PUSH — refresh samples or pass a .ovpn"
   exit 1
 fi
 [[ -f "$PROFILE" ]] || { echo "Missing $PROFILE"; exit 1; }
@@ -91,7 +91,7 @@ if rg -q "PUSH_REPLY" "$LOG" && rg -q "Cannot ioctl TUNSETIFF" "$LOG"; then
   exit 0
 fi
 if rg -q "AUTH_FAILED" "$LOG"; then
-  echo "FAIL: AUTH_FAILED — leave AUTH empty for VPN Gate, or set provider creds"
+  echo "FAIL: AUTH_FAILED — leave AUTH empty if the profile is cert-only, or set AUTH_USER/AUTH_PASS"
   exit 2
 fi
 if rg -q "TLS Error|Connection refused" "$LOG"; then

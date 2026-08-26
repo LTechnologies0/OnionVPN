@@ -4,6 +4,17 @@ All notable changes to OnionVPN are documented here.
 
 ## [Unreleased]
 
+## [0.3.72] — 2026-08-26
+
+### OpenVPN-over-Tor / Arti SOCKS
+- Arti role mux: OpenVPN port is a SOCKS5 terminating shim (`SocksAuthInjectingRelay`) — NO-AUTH toward ics-openvpn, USER/PASS for the Java auth probe, IsolateSOCKSAuth (`uopenvpn`/`popenvpn`) toward Arti. Fixes `unexpected auth` / socks-error storms that blocked nested OpenVPN TLS over Arti.
+- Fail-closed after repeated `unexpected auth` / soft `socks-error` (avoids 120s reconnect loops if the shim regresses).
+- Inject `remote-cert-tls server` when the profile has a CA but no server-cert verification method (closes OpenVPN MitM warning). Proven on Waydroid x86_64 + Arti: `VERIFY OK` + `CONNECTED` + Via OVPN UP.
+- Standardize auth on OpenVPN man for every profile (no provider product branches): import fills Settings from inline `<auth-user-pass>` only; bare/`#auth-user-pass` never invents defaults; same auth-user-pass file + management Auth path; AUTH_FAILED with Settings creds retries empty once.
+
+### DNSCrypt
+- Default Tor-friendly extras are `cs-de`/`cs-nl` after the user’s pick (no longer prepend `adguard-dns` — avoids non-standard provider / XChaCha20 notices at boot).
+
 ## [0.3.71] — 2026-08-26
 
 ### OpenVPN-over-Tor data path

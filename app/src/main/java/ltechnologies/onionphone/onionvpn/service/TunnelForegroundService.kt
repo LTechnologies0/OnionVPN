@@ -1373,7 +1373,7 @@ class TunnelForegroundService : Service() {
                     }
                 }
                 val ovpnResult = OpTrace.stepSuspending("tunnel", "openvpn_over_tor_start") {
-                    startOpenVpnOverTorWithSoftEtherAuthFallback(activePorts, preferences)
+                    startOpenVpnOverTorWithAuthFallback(activePorts, preferences)
                 }
                 if (ovpnResult.isFailure) {
                     Timber.w(
@@ -2209,10 +2209,10 @@ class TunnelForegroundService : Service() {
     }
 
     /**
-     * SoftEther/VPN Gate: AUTH_FAILED with Settings credentials often means the relay
-     * wants cert-only. Retry once with empty user/pass (no auth-user-pass file).
+     * If AUTH_FAILED with Settings credentials, retry once with empty user/pass
+     * (cert-only / management Auth). Standard OpenVPN — not provider-specific.
      */
-    private suspend fun startOpenVpnOverTorWithSoftEtherAuthFallback(
+    private suspend fun startOpenVpnOverTorWithAuthFallback(
         ports: TunnelRuntimePorts,
         prefs: TunnelPreferences,
     ): Result<Unit> {
@@ -2241,7 +2241,7 @@ class TunnelForegroundService : Service() {
 
         Timber.w(
             first.exceptionOrNull(),
-            "OpenVPN AUTH failed with Settings credentials — retrying cert-only (empty auth)",
+            "OpenVPN AUTH failed with Settings credentials — retrying empty auth",
         )
         return attempt("", "")
     }

@@ -131,8 +131,9 @@ data class TunnelPreferences(
      */
     val openVpnProfileConfigured: Boolean = false,
     /**
-     * Optional OpenVPN `auth-user-pass` credentials (e.g. VPN Gate uses `vpn`/`vpn`).
-     * Empty = no auth file; PASSWORD prompts fail closed.
+     * Optional OpenVPN `auth-user-pass` credentials (Settings and/or extracted from
+     * an inline `<auth-user-pass>` block at import). Empty = no auth file;
+     * management Auth prompts get empty replies (cert-only / soft reconnect).
      */
     val openVpnAuthUser: String = "",
     val openVpnAuthPassword: String = "",

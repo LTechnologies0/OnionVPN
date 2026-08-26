@@ -29,8 +29,8 @@ import timber.log.Timber
  * packet; read=outbound, write=inbound) without replacing the VpnService TUN.
  *
  * [ParcelFileDescriptor.createSocketPair] is SOCK_STREAM and coalesces frames —
- * SoftEther SecureNAT then sees garbled TCP (HTTPS RST) while keepalive BYTECOUNT
- * still looks healthy.
+ * the peer then sees garbled TCP (HTTPS RST) while keepalive BYTECOUNT still
+ * looks healthy.
  */
 internal class OpenVpnAndroidManagement(
     private val sockFile: File,
@@ -140,7 +140,7 @@ internal class OpenVpnAndroidManagement(
                 // Soft reconnect AUTH_FAILED: demote Via OVPN but do not tear the process
                 // if OPENTUN is still held — OpenVPN may retry. Fatal only when never up.
                 onControlNotReady("AUTH_FAILED")
-                onFatal("OpenVPN AUTH_FAILED — check VPN username/password (VPN Gate: leave empty or vpn/vpn)")
+                onFatal("OpenVPN AUTH_FAILED — check VPN username/password")
             }
             line.contains(",EXITING,") -> {
                 onControlNotReady("EXITING")
@@ -165,10 +165,9 @@ internal class OpenVpnAndroidManagement(
             return
         }
         if (authUser.isEmpty() && authPassword.isEmpty()) {
-            // SoftEther/VPN Gate often Need Auth on soft-reconnect after a cert-only
-            // CONNECTED; answering with invented vpn/vpn causes AUTH_FAILED and kills
-            // a previously healthy Via OVPN session. Send empty credentials instead.
-            Timber.i("OVPN Auth requested with empty Settings — sending empty user/pass")
+            // management-query-passwords with no Settings creds: send empty
+            // (do not invent provider defaults — breaks cert-only / soft reconnect).
+            Timber.i("OVPN Auth requested with empty credentials — sending empty user/pass")
             writeCmd(sock, "username \"Auth\" \"\"\n")
             writeCmd(sock, "password \"Auth\" \"\"\n")
             return
@@ -209,8 +208,8 @@ internal class OpenVpnAndroidManagement(
             "PERSIST_TUN_ACTION" -> writeCmd(sock, "needok 'PERSIST_TUN_ACTION' OPEN_BEFORE_CLOSE\n")
             // We deliberately do not apply ROUTE/DNS to the Android VpnService —
             // OnionVPN already owns the device TUN + DNSCrypt. Ack so OpenVPN proceeds.
-            // IFCONFIG still sets OvpnIpNat so ALLOW_OVPN packets SNAT to SoftEther's
-            // assigned client IP (VpnService stays 10.8.0.2).
+            // IFCONFIG still sets OvpnIpNat so ALLOW_OVPN packets SNAT to the
+            // OpenVPN-assigned client IP (VpnService stays 10.8.0.2).
             "IFCONFIG" -> {
                 OvpnIpNat.setFromIfconfigMsg(extra)
                 writeCmd(sock, "needok 'IFCONFIG' ok\n")
@@ -275,7 +274,7 @@ internal class OpenVpnAndroidManagement(
 
         /**
          * AF_UNIX SOCK_DGRAM pair — one datagram = one IP packet (VpnService TUN / openvpn).
-         * Large buffers so SoftEther TLS bursts are not silently dropped when the pump lags.
+         * Large buffers so TLS bursts are not silently dropped when the pump lags.
          */
         fun createPacketSocketPair(): Array<ParcelFileDescriptor> {
             val fd0 = FileDescriptor()

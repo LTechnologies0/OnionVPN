@@ -46,8 +46,8 @@ class OpenVpnOverTorManager(
     private val controlConnected = AtomicBoolean(false)
     private val dataPlaneReady = AtomicBoolean(false)
     /**
-     * False when SoftEther accepts SNAT outbound but never returns DNAT replies
-     * (SecureNAT blackhole). Via OVPN demotes to Tor until replies resume.
+     * False when the peer accepts SNAT outbound but never returns DNAT replies
+     * (data blackhole). Via OVPN demotes to Tor until replies resume.
      */
     private val dataPlaneHealthy = AtomicBoolean(true)
     /** True after at least one CONNECTED this session — soft-reconnect AUTH_FAILED demotes. */
@@ -85,10 +85,32 @@ class OpenVpnOverTorManager(
     private val managementSockFile: File
         get() = File(profileDir, "mgmt.sock")
 
-    fun importProfile(bytes: ByteArray): Boolean {
-        if (bytes.isEmpty()) return false
-        profileFile.writeBytes(bytes)
-        return hasProfile()
+    /**
+     * Import a raw `.ovpn`. Embedded `<auth-user-pass>` credentials are extracted and
+     * stripped from the stored profile (Settings / auth file own them at connect time).
+     */
+    data class ImportResult(
+        val ok: Boolean,
+        val authUser: String = "",
+        val authPassword: String = "",
+        val hadEmbeddedAuth: Boolean = false,
+    )
+
+    fun importProfile(bytes: ByteArray): Boolean = importProfileDetailed(bytes).ok
+
+    fun importProfileDetailed(bytes: ByteArray): ImportResult {
+        if (bytes.isEmpty()) return ImportResult(ok = false)
+        val text = bytes.toString(Charsets.UTF_8)
+        val embedded = OpenVpnConfigWriter.extractAuthUserPass(text)
+        val cleaned = OpenVpnConfigWriter.stripEmbeddedAuthUserPass(text)
+        profileFile.writeText(cleaned)
+        if (!hasProfile()) return ImportResult(ok = false)
+        return ImportResult(
+            ok = true,
+            authUser = embedded?.username.orEmpty(),
+            authPassword = embedded?.password.orEmpty(),
+            hadEmbeddedAuth = embedded != null,
+        )
     }
 
     fun clearProfile() {
@@ -127,7 +149,8 @@ class OpenVpnOverTorManager(
 
     /**
      * @param ports must include [TunnelRuntimePorts.torOpenVpnSocksPort]
-     * @param authUser / [authPassword] optional OpenVPN auth-user-pass (VPN Gate: vpn/vpn)
+     * @param authUser / [authPassword] optional OpenVPN auth-user-pass (Settings or
+     *   credentials extracted from an inline `<auth-user-pass>` block at import).
      */
     fun start(
         ports: TunnelRuntimePorts,
@@ -159,8 +182,6 @@ class OpenVpnOverTorManager(
             )
         }
 
-        val softEther = OpenVpnConfigWriter.looksSoftEtherVpnGate(rawProfile)
-
         if (!waitForOpenVpnSocks(ports.torOpenVpnSocksPort)) {
             return fail(
                 "Tor OpenVPN SocksPort :${ports.torOpenVpnSocksPort} not accepting " +
@@ -175,12 +196,10 @@ class OpenVpnOverTorManager(
             .getOrElse { return fail(it.message ?: "remote resolve via Tor failed", it) }
 
         val authFile = File(profileDir, "socks-auth.txt")
-        // Always materialize auth-user-pass when either field is set (VPN Gate often wants vpn/vpn).
-        // Empty password still gets a blank second line so OpenVPN won't fall back to console.
-        // SoftEther/VPN Gate: many free relays are cert-only and AUTH_FAIL when an
-        // auth-user-pass file forces credentials. Use management Auth only when prompted.
-        // Commercial OpenVPN: keep auth-user-pass file from Settings.
-        val userPassFile = if (!softEther && (authUser.isNotEmpty() || authPassword.isNotEmpty())) {
+        // Standard OpenVPN: materialize auth-user-pass file when Settings/import
+        // provided credentials. Otherwise rely on management-query-passwords Auth
+        // (empty reply if still unset — never invent provider-specific defaults).
+        val userPassFile = if (authUser.isNotEmpty() || authPassword.isNotEmpty()) {
             File(profileDir, "auth-user-pass.txt").also {
                 it.writeText("${authUser}\n${authPassword}\n")
             }
@@ -449,8 +468,8 @@ class OpenVpnOverTorManager(
     }
 
     /**
-     * SoftEther free relays often keep control CONNECTED while SecureNAT blackholes
-     * TCP. Demote Via OVPN so browsers fall back to Tor; restore when DNAT resumes.
+     * Nested OpenVPN data plane can stay control-CONNECTED while the peer blackholes
+     * TCP. Demote Via OVPN so apps fall back to Tor; restore when DNAT resumes.
      */
     private fun startDataPlaneHealthMonitor(sid: Long) {
         thread(name = "onionvpn-ovpn-health", isDaemon = true) {
@@ -468,19 +487,19 @@ class OpenVpnOverTorManager(
                     silent && healthy -> {
                         dataPlaneHealthy.set(false)
                         Timber.w(
-                            "SoftEther data plane silent (snat=%d dnat=%d) — demoting Via OVPN to Tor",
+                            "OpenVPN data plane silent (snat=%d dnat=%d) — demoting Via OVPN to Tor",
                             OvpnIpNat.snatRewriteCount,
                             OvpnIpNat.dnatRewriteCount,
                         )
                         publishUpState(
-                            "SoftEther data silent (snat=${OvpnIpNat.snatRewriteCount} " +
+                            "OpenVPN data silent (snat=${OvpnIpNat.snatRewriteCount} " +
                                 "dnat=${OvpnIpNat.dnatRewriteCount}) — using Tor",
                         )
                     }
                     !silent && !healthy -> {
                         dataPlaneHealthy.set(true)
-                        Timber.i("SoftEther data plane recovered — Via OVPN restored")
-                        publishUpState("SoftEther data plane recovered")
+                        Timber.i("OpenVPN data plane recovered — Via OVPN restored")
+                        publishUpState("OpenVPN data plane recovered")
                     }
                 }
             }
@@ -526,6 +545,7 @@ class OpenVpnOverTorManager(
     private fun startLogPump(proc: Process, sid: Long) {
         thread(name = "onionvpn-ovpn-log", isDaemon = true) {
             var socksAuthRefusals = 0
+            var socksUnexpectedAuth = 0
             try {
                 proc.inputStream.bufferedReader().useLines { lines ->
                     lines.forEach { line ->
@@ -536,6 +556,13 @@ class OpenVpnOverTorManager(
                                 socksAuthRefusals++
                                 if (socksAuthRefusals >= SOCKS_AUTH_REFUSAL_ABORT) {
                                     abortSocksAuthFailure(proc, sid)
+                                }
+                            }
+                            line.contains("socks_handshake: Socks proxy returned unexpected auth") ||
+                                line.contains("SIGUSR1[soft,socks-error]") -> {
+                                socksUnexpectedAuth++
+                                if (socksUnexpectedAuth >= SOCKS_UNEXPECTED_AUTH_ABORT) {
+                                    abortSocksUnexpectedAuth(proc, sid)
                                 }
                             }
                             line.contains("AUTH_FAILED") ->
@@ -549,9 +576,9 @@ class OpenVpnOverTorManager(
     }
 
     /**
-     * SoftEther soft-reconnect after connection-reset often AUTH_FAILs when empty/vpn
-     * credentials are wrong for that attempt. If we already had CONNECTED+OPENTUN, demote
-     * Via OVPN and keep the process alive for another soft retry — do not kill Tor path.
+     * Soft reconnect after connection-reset often AUTH_FAILs when credentials do not
+     * match that attempt. If we already had CONNECTED+OPENTUN, demote Via OVPN and keep
+     * the process alive for another soft retry — do not kill the Tor path.
      */
     private fun handleAuthOrFatal(sid: Long, msg: String) {
         if (!isCurrentSession(sid) || !running.get()) return
@@ -579,6 +606,19 @@ class OpenVpnOverTorManager(
             sid,
             "OpenVPN SOCKS auth refused — ics-openvpn 2.7 expects RFC1929 VER=5 " +
                 "(Tor sends VER=1); OnionVPN omits socks-proxy authfile for this reason",
+        )
+    }
+
+    /**
+     * Arti IsolateSOCKSAuth rejects OpenVPN's NO-AUTH greeting when the role mux
+     * falls back to a transparent relay. Fail-closed instead of a 120s socks-error storm.
+     */
+    private fun abortSocksUnexpectedAuth(proc: Process, sid: Long) {
+        abortFatal(
+            proc,
+            sid,
+            "OpenVPN SOCKS unexpected auth — Arti requires IsolateSOCKSAuth; " +
+                "SocksAuthInjectingRelay must terminate NO-AUTH and inject uopenvpn/popenvpn",
         )
     }
 
@@ -664,6 +704,8 @@ class OpenVpnOverTorManager(
     companion object {
         /** Abort reconnect storm after this many SOCKS username/password refusals. */
         private const val SOCKS_AUTH_REFUSAL_ABORT = 3
+        /** Abort after repeated Arti "unexpected auth" / soft socks-error (shim regression). */
+        private const val SOCKS_UNEXPECTED_AUTH_ABORT = 5
         /** Match awaitReady / Tor SOCKS + TLS hand-window budget. */
         const val READY_WATCHDOG_MS = 120_000L
         private const val MGMT_LISTEN_TIMEOUT_MS = 5_000L

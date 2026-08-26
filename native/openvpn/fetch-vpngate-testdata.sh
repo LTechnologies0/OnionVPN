@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Refresh VPN Gate TCP .ovpn samples (academic free relays — not for private traffic).
-# API: https://www.vpngate.net/api/iphone/
+# Refresh public TCP OpenVPN .ovpn samples for smoke/CI (not for private traffic).
+# Source API: https://www.vpngate.net/api/iphone/ (filenames keep vpngate-tcp-* prefix).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 OUT="$ROOT/testdata"

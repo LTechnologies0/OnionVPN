@@ -7,21 +7,22 @@ import timber.log.Timber
 
 /**
  * 1:1 SNAT/DNAT between OnionVPN's VpnService address ([TunnelEndpoints.VPN_CLIENT_ADDRESS])
- * and the OpenVPN-assigned client IP from SoftEther/VPN Gate `IFCONFIG`.
+ * and the OpenVPN-assigned client IP from management `IFCONFIG`.
  *
- * Without this, ALLOW_OVPN dumps `10.8.0.2`-sourced packets into SoftEther's net30
- * peer (`10.211.x.y`), which SecureNAT rejects → browsers see `net::ERR_CONNECTION_RESET`
- * while OVPN mgmt still reports CONNECTED + BYTECOUNT (control keepalive only).
+ * Without this, ALLOW_OVPN dumps `10.8.0.2`-sourced packets into the peer net30
+ * (often a different subnet), which the remote NAT rejects → apps see
+ * `net::ERR_CONNECTION_RESET` while OVPN mgmt still reports CONNECTED + BYTECOUNT
+ * (control keepalive only).
  *
- * Inbound SoftEther frames are only injected when they match an outbound SNAT flow
- * (conntrack). SoftEther keepalives / stale SecureNAT RSTs must not land on the shared
- * VpnService TUN and reset Tor-path TCP (HTTP worked; HTTPS RST'd while OVPN was up).
+ * Inbound frames are only injected when they match an outbound SNAT flow (conntrack).
+ * Peer keepalives / stale RSTs must not land on the shared VpnService TUN and reset
+ * Tor-path TCP.
  */
 internal object OvpnIpNat {
     private val vpnClientIp = TunnelEndpoints.parseIpv4Literal(TunnelEndpoints.VPN_CLIENT_ADDRESS)
         ?: error("bad VPN_CLIENT_ADDRESS")
 
-    /** SoftEther / OpenVPN client IPv4 (host order), 0 = unset. */
+    /** OpenVPN client IPv4 from IFCONFIG (host order), 0 = unset. */
     private val ovpnClientIp = AtomicInteger(0)
 
     /** remoteIp:remotePort:localPort:proto → lastSeenMs */
@@ -35,12 +36,12 @@ internal object OvpnIpNat {
     var dnatRewriteCount: Long = 0
         private set
 
-    /** Wall-clock of last successful SNAT (app→SoftEther). */
+    /** Wall-clock of last successful SNAT (app→OpenVPN peer). */
     @Volatile
     var lastSnatWallMs: Long = 0
         private set
 
-    /** Wall-clock of last successful DNAT (SoftEther→app). */
+    /** Wall-clock of last successful DNAT (OpenVPN peer→app). */
     @Volatile
     var lastDnatWallMs: Long = 0
         private set
@@ -55,7 +56,7 @@ internal object OvpnIpNat {
     }
 
     /**
-     * SoftEther SecureNAT sometimes accepts outbound SYN then blackholes replies
+     * Some OpenVPN peers sometimes accepts outbound SYN then blackholes replies
      * while management still reports CONNECTED + BYTECOUNT (control keepalive).
      * True when recent SNAT demand has no matching DNAT within [silenceMs].
      */
@@ -93,7 +94,7 @@ internal object OvpnIpNat {
     fun isReady(): Boolean = ovpnClientIp.get() != 0
 
     /**
-     * Outbound VpnService → OpenVPN: rewrite IPv4 src to SoftEther client IP.
+     * Outbound VpnService → OpenVPN: rewrite IPv4 src to OpenVPN client IP.
      * @return false if packet must not be written (caller should demote / drop)
      */
     fun snatOutbound(packet: ByteArray, length: Int): Boolean {
@@ -117,8 +118,8 @@ internal object OvpnIpNat {
     }
 
     /**
-     * Inbound OpenVPN → VpnService: rewrite IPv4 dst SoftEther client → 10.8.0.2.
-     * @return false to drop (no SNAT flow — avoid SoftEther RST colliding with Tor TCP)
+     * Inbound OpenVPN → VpnService: rewrite IPv4 dst OpenVPN client → 10.8.0.2.
+     * @return false to drop (no SNAT flow — avoid peer RST colliding with Tor TCP)
      */
     fun dnatInbound(packet: ByteArray, length: Int): Boolean {
         val ovpn = ovpnClientIp.get()
@@ -130,7 +131,7 @@ internal object OvpnIpNat {
         if (length < ihl || ihl < 20) return false
         val dst = readIpv4(packet, 16)
         if (dst != ovpn) {
-            // Not addressed to our SoftEther client IP — never inject into VpnService.
+            // Not addressed to our OpenVPN client IP — never inject into VpnService.
             return false
         }
         if (!hasInboundFlow(packet, length, ihl)) {
@@ -158,7 +159,7 @@ internal object OvpnIpNat {
     private fun hasInboundFlow(packet: ByteArray, length: Int, ihl: Int): Boolean {
         val proto = packet[9].toInt() and 0xff
         if (proto != 6 && proto != 17) {
-            // ICMP / other SoftEther chatter — drop (do not inject).
+            // ICMP / other peer chatter — drop (do not inject).
             return false
         }
         if (length < ihl + 4) return false

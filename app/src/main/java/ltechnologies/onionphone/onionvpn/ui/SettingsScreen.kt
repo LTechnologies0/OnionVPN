@@ -639,17 +639,26 @@ fun SettingsScreen(
         ) { uri ->
             if (uri == null) return@rememberLauncherForActivityResult
             scope.launch {
-                val ok = withContext(Dispatchers.IO) {
+                val result = withContext(Dispatchers.IO) {
                     runCatching {
                         val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
-                            ?: return@runCatching false
-                        if (bytes.isEmpty()) return@runCatching false
+                            ?: return@runCatching null
+                        if (bytes.isEmpty()) return@runCatching null
                         val mgr = ltechnologies.onionphone.onionvpn.core.openvpn.OpenVpnOverTorManager(context)
-                        mgr.importProfile(bytes)
-                    }.getOrDefault(false)
+                        mgr.importProfileDetailed(bytes)
+                    }.getOrNull()
                 }
-                if (ok) {
-                    commit(local.copy(openVpnProfileConfigured = true, openVpnOverTorEnabled = true), restart = true)
+                if (result?.ok == true) {
+                    commit(
+                        local.copy(
+                            openVpnProfileConfigured = true,
+                            openVpnOverTorEnabled = true,
+                            // From embedded <auth-user-pass> only; else blank.
+                            openVpnAuthUser = result.authUser,
+                            openVpnAuthPassword = result.authPassword,
+                        ),
+                        restart = true,
+                    )
                 }
             }
         }
@@ -666,7 +675,12 @@ fun SettingsScreen(
                                     .clearProfile()
                             }
                             commit(
-                                local.copy(openVpnProfileConfigured = false, openVpnOverTorEnabled = false),
+                                local.copy(
+                                    openVpnProfileConfigured = false,
+                                    openVpnOverTorEnabled = false,
+                                    openVpnAuthUser = "",
+                                    openVpnAuthPassword = "",
+                                ),
                                 restart = true,
                             )
                         }
@@ -680,7 +694,7 @@ fun SettingsScreen(
             value = local.openVpnAuthUser,
             onValueChange = { commit(local.copy(openVpnAuthUser = it)) },
             label = { Text("OpenVPN username (optional)") },
-            placeholder = { Text("vpn for VPN Gate") },
+            placeholder = { Text("from profile or provider") },
             singleLine = true,
             modifier = Modifier.fillMaxWidth(),
         )
@@ -688,14 +702,15 @@ fun SettingsScreen(
             value = local.openVpnAuthPassword,
             onValueChange = { commit(local.copy(openVpnAuthPassword = it)) },
             label = { Text("OpenVPN password (optional)") },
-            placeholder = { Text("vpn for VPN Gate") },
+            placeholder = { Text("from profile or provider") },
             singleLine = true,
             modifier = Modifier.fillMaxWidth(),
         )
         Text(
-            text = "VPN Gate free relays: leave credentials empty (most accept cert-only). " +
-                "Only fill username/password if the server prompts (sometimes vpn/vpn). " +
-                "Commercial providers use their own credentials.",
+            text = "Standard OpenVPN auth: inline `<auth-user-pass>` is applied on import; " +
+                "otherwise fill username/password here (or leave empty for cert-only / " +
+                "management Auth prompt). Same path for every provider — Tor carries the " +
+                "control channel via SOCKS regardless of brand.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )

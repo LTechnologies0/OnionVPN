@@ -14,19 +14,16 @@ TARGET_ANDROID binaries from F-Droid **OpenVPN for Android** (`de.blinkt.openvpn
 Upstream OpenVPN without `TARGET_ANDROID` cannot speak OPENTUN / PROTECTFD — Via OVPN
 stays fail-closed. See `NOTICE` (GPL).
 
-## Free test servers (VPN Gate)
+## Test profiles (optional)
 
-Academic public relays ([VPN Gate](https://www.vpngate.net/en/), Univ. of Tsukuba) — **not**
-for private traffic; operators may log. TCP configs often need username/password **`vpn`/`vpn`**.
+Public TCP OpenVPN samples for CI/smoke (e.g. academic relays) — **not** for private
+traffic. Import any standard `.ovpn`; auth follows OpenVPN man (inline block or Settings).
 
 ```bash
-./native/openvpn/fetch-vpngate-testdata.sh   # → testdata/vpngate-tcp-*.ovpn
+./native/openvpn/fetch-vpngate-testdata.sh   # → testdata/*.ovpn samples
 # Optional host control-plane check (Tor SOCKS on :9050):
 ./native/openvpn/smoke-host-socks.sh
 ```
-
-In the app: Settings → Import `.ovpn` → leave username/password **empty** for most VPN Gate
-profiles (only set `vpn`/`vpn` if the server prompts). Enable → restart tunnel.
 
 ## Control plane
 

@@ -196,4 +196,189 @@ class OpenVpnConfigWriterTest {
         assertEquals(1, out.lineSequence().count { it.trimStart().startsWith("verb ") })
         dir.deleteRecursively()
     }
+
+    @Test
+    fun rewrite_injectsRemoteCertTlsWhenCaPresentWithoutVerify() {
+        val dir = File.createTempFile("ovpn-ca", null).apply {
+            delete()
+            mkdirs()
+        }
+        val out = OpenVpnConfigWriter.rewrite(
+            profileText = """
+                client
+                remote 203.0.113.1 443 tcp
+                <ca>
+                -----BEGIN CERTIFICATE-----
+                MIIB
+                -----END CERTIFICATE-----
+                </ca>
+            """.trimIndent(),
+            socksPort = 19050,
+            managementSockPath = File(dir, "mgmt.sock").absolutePath,
+        )
+        assertTrue(out.contains("<ca>"))
+        assertTrue(out.contains("remote-cert-tls server"))
+        assertEquals(
+            1,
+            out.lineSequence().count { it.trimStart().startsWith("remote-cert-tls") },
+        )
+        dir.deleteRecursively()
+    }
+
+    @Test
+    fun rewrite_keepsExistingRemoteCertTls() {
+        val dir = File.createTempFile("ovpn-verify", null).apply {
+            delete()
+            mkdirs()
+        }
+        val out = OpenVpnConfigWriter.rewrite(
+            profileText = """
+                client
+                remote 203.0.113.1 443 tcp
+                ca /tmp/ca.crt
+                remote-cert-tls server
+            """.trimIndent(),
+            socksPort = 19050,
+            managementSockPath = File(dir, "mgmt.sock").absolutePath,
+        )
+        assertEquals(
+            1,
+            out.lineSequence().count { it.trimStart().startsWith("remote-cert-tls") },
+        )
+        dir.deleteRecursively()
+    }
+
+    @Test
+    fun rewrite_skipsRemoteCertTlsWithoutCa() {
+        val dir = File.createTempFile("ovpn-noca", null).apply {
+            delete()
+            mkdirs()
+        }
+        val out = OpenVpnConfigWriter.rewrite(
+            profileText = """
+                client
+                remote 203.0.113.1 443 tcp
+            """.trimIndent(),
+            socksPort = 19050,
+            managementSockPath = File(dir, "mgmt.sock").absolutePath,
+        )
+        assertFalse(out.contains("remote-cert-tls"))
+        dir.deleteRecursively()
+    }
+
+    @Test
+    fun extractAuthUserPass_readsInlineBlock() {
+        val auth = OpenVpnConfigWriter.extractAuthUserPass(
+            """
+                client
+                remote 203.0.113.1 443 tcp
+                <auth-user-pass>
+                alice
+                s3cret!
+                </auth-user-pass>
+                <ca>
+                CERT
+                </ca>
+            """.trimIndent(),
+        )
+        assertEquals("alice", auth!!.username)
+        assertEquals("s3cret!", auth.password)
+    }
+
+    @Test
+    fun extractAuthUserPass_inlineUsernameOnly_passwordOptional() {
+        val auth = OpenVpnConfigWriter.extractAuthUserPass(
+            """
+                client
+                <auth-user-pass>
+                sso-user
+                </auth-user-pass>
+            """.trimIndent(),
+        )
+        assertEquals("sso-user", auth!!.username)
+        assertEquals("", auth.password)
+    }
+
+    @Test
+    fun extractAuthUserPass_ignoresCommentedAndBareAuthUserPass() {
+        assertEquals(
+            null,
+            OpenVpnConfigWriter.extractAuthUserPass(
+                """
+                    client
+                    remote 1.2.3.4 443
+                    #auth-user-pass
+                """.trimIndent(),
+            ),
+        )
+        assertEquals(
+            null,
+            OpenVpnConfigWriter.extractAuthUserPass(
+                """
+                    client
+                    remote 1.2.3.4 443
+                    auth-user-pass
+                    <ca>
+                    CERT
+                    </ca>
+                """.trimIndent(),
+            ),
+        )
+    }
+
+    @Test
+    fun hasActiveAuthUserPassDirective_detectsBareAndFileForms() {
+        assertTrue(
+            OpenVpnConfigWriter.hasActiveAuthUserPassDirective("client\nauth-user-pass\n"),
+        )
+        assertTrue(
+            OpenVpnConfigWriter.hasActiveAuthUserPassDirective("auth-user-pass /tmp/up.txt\n"),
+        )
+        assertFalse(
+            OpenVpnConfigWriter.hasActiveAuthUserPassDirective("#auth-user-pass\n"),
+        )
+    }
+
+    @Test
+    fun rewrite_stripsEmbeddedAuthUserPassBlock() {
+        val dir = File.createTempFile("ovpn-auth", null).apply {
+            delete()
+            mkdirs()
+        }
+        val out = OpenVpnConfigWriter.rewrite(
+            profileText = """
+                client
+                remote 203.0.113.1 443 tcp
+                <auth-user-pass>
+                bob
+                hunter2
+                </auth-user-pass>
+            """.trimIndent(),
+            socksPort = 19050,
+            managementSockPath = File(dir, "mgmt.sock").absolutePath,
+        )
+        assertFalse(out.contains("<auth-user-pass>"))
+        assertFalse(out.contains("bob"))
+        assertFalse(out.contains("hunter2"))
+        dir.deleteRecursively()
+    }
+
+    @Test
+    fun stripEmbeddedAuthUserPass_preservesOtherBlocks() {
+        val cleaned = OpenVpnConfigWriter.stripEmbeddedAuthUserPass(
+            """
+                client
+                <auth-user-pass>
+                u
+                p
+                </auth-user-pass>
+                <ca>
+                CERT
+                </ca>
+            """.trimIndent(),
+        )
+        assertFalse(cleaned.contains("auth-user-pass"))
+        assertTrue(cleaned.contains("<ca>"))
+        assertTrue(cleaned.contains("CERT"))
+    }
 }

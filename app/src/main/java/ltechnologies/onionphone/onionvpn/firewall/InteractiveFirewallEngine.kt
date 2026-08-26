@@ -150,7 +150,7 @@ class InteractiveFirewallEngine @Inject constructor(
                 val prevDefault = lastDefault
                 preferences.set(next)
                 // Sticky ALLOW_OVPN flow cache survives Settings default flips and keeps
-                // SoftEther RST pollution on Tor-path browsers until tunnel restart.
+                // peer RST pollution on Tor-path browsers until tunnel restart.
                 if (next.firewallDefaultAction != prevDefault) {
                     lastDefault = next.firewallDefaultAction
                     caches.clearAll()
@@ -724,14 +724,14 @@ class InteractiveFirewallEngine @Inject constructor(
 
     /**
      * Drop permanent Via OVPN rules (and sticky caches) when leaving default Allow-via-OVPN
-     * or when SoftEther is known-bad. Persistent SoftEther destinations otherwise keep
-     * forcing OPENTUN even after default → Tor.
+     * or when the OpenVPN data plane is known-bad. Persistent Via OVPN destinations
+     * otherwise keep forcing OPENTUN even after default → Tor.
      */
     fun clearPermanentOvpnRules() {
         clearOvpnRules(scopes = setOf(FirewallRuleScope.PERMANENT))
     }
 
-    /** UI / SoftEther blackhole: drop every stored Via OVPN rule and sticky caches. */
+    /** UI / Via OVPN blackhole: drop every stored Via OVPN rule and sticky caches. */
     fun clearAllOvpnRules() {
         clearOvpnRules(
             scopes = setOf(
@@ -884,7 +884,7 @@ class InteractiveFirewallEngine @Inject constructor(
 
     /**
      * PAC / hev SOCKS cannot encapsulate OVPN-over-Tor.
-     * Demote ALLOW_OVPN → Tor on this plane (never DENY): otherwise SoftEther-down /
+     * Demote ALLOW_OVPN → Tor on this plane (never DENY): otherwise OVPN-down /
      * TunDnsMux demote / default-Allow-via-OVPN SYN→hev still hits SOCKS re-check and
      * clients see net::ERR_CONNECTION_RESET.
      */

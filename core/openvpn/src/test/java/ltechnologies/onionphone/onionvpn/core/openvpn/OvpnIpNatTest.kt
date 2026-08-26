@@ -30,7 +30,7 @@ class OvpnIpNatTest {
         assertEquals("10.211.1.173", ipv4At(packet, 12))
         assertEquals("93.184.216.34", ipv4At(packet, 16))
 
-        // SoftEther reply: swap addresses and ports
+        // Peer reply: swap addresses and ports
         val reply = packet.copyOf()
         System.arraycopy(packet, 12, reply, 16, 4)
         System.arraycopy(packet, 16, reply, 12, 4)

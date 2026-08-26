@@ -34,7 +34,8 @@ object OpenVpnConfigWriter {
         /** @deprecated TCP management port — ignored; unix socket is required for OPENTUN. */
         managementPort: Int = 0,
     ): String {
-        val lines = profileText
+        val strippedAuth = stripEmbeddedAuthUserPass(profileText)
+        val lines = strippedAuth
             .lineSequence()
             .map { it.trimEnd() }
             .filterNot { shouldStrip(it) }
@@ -81,9 +82,8 @@ object OpenVpnConfigWriter {
             "tun-mtu ${TunnelEndpoints.VPN_MTU}",
             // Inner TCP MSS clamp (VpnService MTU); outer path is TCP-over-Tor.
             "mssfix $MSSFIX",
-            // SoftEther/VPN Gate often pushes ping 3 + ping-restart 10. Ignoring all
-            // "ping*" left us at ping 20 — server RSTs ~10s (STATE connection-reset).
-            // Accept pulled ping interval; only ignore aggressive ping-restart.
+            // Aggressive server ping-restart (often ~10s) fails under Tor RTT.
+            // Keep a client ping; ignore pulled ping-restart via pull-filter below.
             "ping $PING_SEC",
             "ping-restart $PING_RESTART_SEC",
             "pull-filter ignore \"redirect-gateway\"",
@@ -108,6 +108,13 @@ object OpenVpnConfigWriter {
         )
         if (authUserPassFile != null) {
             lines += "auth-user-pass ${authUserPassFile.absolutePath}"
+        }
+        // Many free .ovpn exports ship <ca> without remote-cert-tls → OpenVPN warns
+        // and skips server-cert verification. Enable when a CA is present and no
+        // other verify method is configured.
+        if (profileHasCa(lines) && !profileHasServerCertVerify(lines)) {
+            lines += "remote-cert-tls server"
+            Timber.i("OpenVPN inject remote-cert-tls server (CA present, no verify method)")
         }
         val out = lines.joinToString("\n") + "\n"
         Timber.i(
@@ -160,23 +167,85 @@ object OpenVpnConfigWriter {
         return globalUdp && !globalTcp
     }
 
+    /** Credentials from OpenVPN INLINE FILE SUPPORT (`<auth-user-pass>`). */
+    data class AuthUserPass(val username: String, val password: String)
+
     /**
-     * SoftEther / VPN Gate exports mention PacketiX / SoftEther / opengw.net.
-     * Anonymous VPN Gate accounts use username/password `vpn` / `vpn`.
+     * Extract username/password only when the profile embeds them (OpenVPN man).
+     *
+     * ```
+     * <auth-user-pass>
+     * username
+     * [password]   # optional
+     * </auth-user-pass>
+     * ```
+     *
+     * Standard forms that do **not** embed secrets (caller supplies via Settings /
+     * management Auth): bare `auth-user-pass`, `auth-user-pass <path>`,
+     * `auth-user-pass username-only`. Commented `#auth-user-pass` is ignored.
+     * External credential files are not readable from a lone `.ovpn` import.
      */
-    fun looksSoftEtherVpnGate(profileText: String): Boolean {
-        val lower = profileText.lowercase()
-        return lower.contains("softether") ||
-            lower.contains("packetix") ||
-            lower.contains("opengw") ||
-            lower.contains("vpngate") ||
-            lower.contains("virtual hub") ||
-            lower.contains("secure nat")
+    fun extractAuthUserPass(profileText: String): AuthUserPass? =
+        extractInlineAuthUserPass(profileText)
+
+    /**
+     * True when an uncommented `auth-user-pass` directive is present (server may
+     * require Auth via file, inline block, or management prompt).
+     */
+    fun hasActiveAuthUserPassDirective(profileText: String): Boolean {
+        for (raw in profileText.lineSequence()) {
+            val t = raw.trim()
+            if (t.isEmpty() || t.startsWith("#") || t.startsWith(";")) continue
+            if (t.equals("auth-user-pass", ignoreCase = true)) return true
+            if (t.startsWith("auth-user-pass ", ignoreCase = true)) return true
+        }
+        return false
     }
 
-    /** VPN Gate anonymous account (SoftEther SecureNAT). */
-    const val SOFTETHER_DEFAULT_USER = "vpn"
-    const val SOFTETHER_DEFAULT_PASSWORD = "vpn"
+    private fun extractInlineAuthUserPass(profileText: String): AuthUserPass? {
+        val lines = profileText.lineSequence().map { it.trimEnd() }.toList()
+        var i = 0
+        while (i < lines.size) {
+            if (!lines[i].trim().equals("<auth-user-pass>", ignoreCase = true)) {
+                i++
+                continue
+            }
+            i++
+            val creds = ArrayList<String>(2)
+            while (i < lines.size) {
+                val body = lines[i].trim()
+                if (body.equals("</auth-user-pass>", ignoreCase = true)) break
+                if (body.isNotEmpty() && !body.startsWith("#") && !body.startsWith(";")) {
+                    if (creds.size < 2) creds.add(body)
+                }
+                i++
+            }
+            return when {
+                creds.isEmpty() -> null
+                creds.size == 1 -> AuthUserPass(creds[0], "")
+                else -> AuthUserPass(creds[0], creds[1])
+            }
+        }
+        return null
+    }
+
+    /**
+     * Remove inline `<auth-user-pass>…</auth-user-pass>` so rewrite() can inject our
+     * managed auth-user-pass file / management Auth without duplicate credentials.
+     */
+    fun stripEmbeddedAuthUserPass(profileText: String): String {
+        val out = ArrayList<String>()
+        var skipping = false
+        for (raw in profileText.lineSequence()) {
+            val t = raw.trim()
+            when {
+                t.equals("<auth-user-pass>", ignoreCase = true) -> skipping = true
+                t.equals("</auth-user-pass>", ignoreCase = true) -> skipping = false
+                !skipping -> out.add(raw)
+            }
+        }
+        return out.joinToString("\n").let { if (it.endsWith("\n") || it.isEmpty()) it else "$it\n" }
+    }
 
     /**
      * Rewrite every `remote` whose host equals [fromHost] (case-insensitive) to [ipv4],
@@ -254,6 +323,44 @@ object OpenVpnConfigWriter {
         return line
     }
 
+    /** True when rewritten lines still include a CA (`<ca>` block, `ca `, or `capath`). */
+    internal fun profileHasCa(lines: List<String>): Boolean {
+        var inCa = false
+        for (raw in lines) {
+            val t = raw.trim()
+            if (t.equals("<ca>", ignoreCase = true)) {
+                inCa = true
+                continue
+            }
+            if (inCa) {
+                if (t.equals("</ca>", ignoreCase = true)) return true
+                if (t.isNotEmpty() && !t.startsWith("#") && !t.startsWith(";")) return true
+                continue
+            }
+            val lower = t.lowercase()
+            if (lower.startsWith("ca ") || lower.startsWith("capath ")) return true
+        }
+        return false
+    }
+
+    /**
+     * True when a server-certificate verification method is already configured
+     * (after script `tls-verify` strip — those are not kept).
+     */
+    internal fun profileHasServerCertVerify(lines: List<String>): Boolean {
+        for (raw in lines) {
+            val lower = raw.trim().lowercase()
+            if (lower.startsWith("remote-cert-tls") ||
+                lower.startsWith("verify-x509-name") ||
+                lower.startsWith("peer-fingerprint") ||
+                lower.startsWith("verify-hash")
+            ) {
+                return true
+            }
+        }
+        return false
+    }
+
     private fun shouldStrip(line: String): Boolean {
         val t = line.trim()
         if (t.isEmpty() || t.startsWith("#") || t.startsWith(";")) return false
@@ -318,21 +425,20 @@ object OpenVpnConfigWriter {
     /** Base seconds between TCP reconnects; second arg caps exponential backoff. */
     private const val CONNECT_RETRY_SEC = 10
     private const val CONNECT_RETRY_MAX_WAIT_SEC = 120
-    /** Cap soft-restart storms (socks-error / TCP reset over Tor). SoftEther/VPN Gate needs headroom. */
+    /** Cap soft-restart storms (socks-error / TCP reset over Tor). */
     private const val CONNECT_RETRY_MAX = 12
     /** TLS control-channel handshake window for high Tor RTT. */
     private const val HAND_WINDOW_SEC = 120
     /**
      * Inner TCP MSS under VpnService MTU + OpenVPN + Tor overhead.
-     * SoftEther path is TCP-over-Tor already; keep headroom so TLS ClientHello
-     * fits without SoftEther SecureNAT fragmentation/RST.
+     * Nested TCP-over-Tor needs headroom so TLS ClientHello fits without fragmentation.
      */
     private const val MSSFIX = 800
     /**
-     * SoftEther peer timeout is often ~10s. Send client ping ≤3s so Tor RTT (~1–3s)
-     * still lands inside the server’s window (server-side ping-restart is not pull-filterable).
+     * Keepalive interval: Tor RTT (~1–3s) needs a short client ping so peers with
+     * ~10s timeouts do not RST the control channel.
      */
     private const val PING_SEC = 3
-    /** Ignore pulled ping-restart; Tor RTT spikes need headroom beyond SoftEther’s 10s. */
+    /** Ignore pulled ping-restart; Tor RTT spikes need more headroom than ~10s. */
     private const val PING_RESTART_SEC = 180
 }

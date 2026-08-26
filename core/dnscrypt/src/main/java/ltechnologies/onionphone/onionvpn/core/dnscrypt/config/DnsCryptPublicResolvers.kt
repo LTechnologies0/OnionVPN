@@ -889,9 +889,11 @@ object DnsCryptPublicResolvers {
             byName[name]?.stamps?.any { isDnsCryptProtocolStamp(it) } == true
         }
         if (hasDnsCryptProto) return names
-        val extras = listOf("adguard-dns", "cs-de", "cs-nl")
+        // Prefer user's DoH pick first; classic DNSCrypt peers as Tor-SOCKS fallback.
+        // Skip adguard-dns in the default preset (non-standard provider name / XChaCha20 notice).
+        val extras = listOf("cs-de", "cs-nl")
             .filter { byName.containsKey(it) && it !in names }
-        return (extras + names).distinct()
+        return (names + extras).distinct()
     }
 
     /** DNSCrypt protocol stamps start with `sdns://AQ` (DoH is `sdns://Ag`). */
