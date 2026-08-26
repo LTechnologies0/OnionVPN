@@ -1,6 +1,7 @@
 package ltechnologies.onionphone.onionvpn.core.tor.control.ops
 
 import java.io.IOException
+import ltechnologies.onionphone.onionvpn.core.model.observability.OpTrace
 import ltechnologies.onionphone.onionvpn.core.tor.control.catalog.TorControlCatalog
 import ltechnologies.onionphone.onionvpn.core.tor.control.model.TorCircuitInfo
 import ltechnologies.onionphone.onionvpn.core.tor.control.model.TorStreamInfo
@@ -8,6 +9,7 @@ import ltechnologies.onionphone.onionvpn.core.tor.control.protocol.TorControlRep
 import ltechnologies.onionphone.onionvpn.core.tor.control.protocol.TorControlWire
 import ltechnologies.onionphone.onionvpn.core.tor.control.protocol.TorStatusListParser
 import ltechnologies.onionphone.onionvpn.core.tor.control.transport.TorControlTransport
+import timber.log.Timber
 
 /**
  * Package `control.ops` — high-level control-spec operations over an open transport.
@@ -30,9 +32,10 @@ internal class TorControlOperations(
     private var lastNewNymMs: Long = 0L
 
     fun signal(name: String): Result<Unit> = runCatching {
+        Timber.v("control SIGNAL %s", name)
         transport.command("SIGNAL $name")
         Unit
-    }
+    }.onFailure { Timber.w(it, "SIGNAL %s failed", name) }
 
     fun signal(signal: TorControlCatalog.Signal): Result<Unit> = signal(signal.wire)
 
@@ -40,7 +43,13 @@ internal class TorControlOperations(
      * SIGNAL NEWNYM only — control-spec already clears the client DNS cache with NEWNYM;
      * a follow-up CLEARDNSCACHE is redundant.
      */
-    fun newNym(): Result<Unit> = signal(TorControlCatalog.Signal.NEWNYM)
+    fun newNym(): Result<Unit> {
+        val result = signal(TorControlCatalog.Signal.NEWNYM)
+        result
+            .onSuccess { OpTrace.info("tor", "NEWNYM ok") }
+            .onFailure { OpTrace.warn("tor", "NEWNYM failed: ${it.message}", it) }
+        return result
+    }
 
     /**
      * Rate-limited NEWNYM (control-spec: Tor MAY rate-limit; ~10s → 551 in practice).
@@ -50,6 +59,7 @@ internal class TorControlOperations(
         val now = System.currentTimeMillis()
         val wait = lastNewNymMs + minIntervalMs - now
         if (wait > 0) {
+            Timber.d("NEWNYM rate-limited waitMs=%d", wait)
             return Result.failure(
                 IOException("NEWNYM rate-limited — wait ${((wait + 999) / 1000)}s (Tor ~10s)"),
             )
@@ -80,10 +90,11 @@ internal class TorControlOperations(
     }
 
     fun setDisableNetwork(disabled: Boolean): Result<Unit> = runCatching {
+        Timber.i("SETCONF DisableNetwork=%s", if (disabled) 1 else 0)
         transport.command("SETCONF DisableNetwork=${if (disabled) 1 else 0}")
         if (!disabled) setActive()
         Unit
-    }
+    }.onFailure { Timber.w(it, "setDisableNetwork(%s) failed", disabled) }
 
     /** Live SETCONF for circuit timing (no Tor restart). */
     fun setCircuitTiming(
@@ -92,9 +103,10 @@ internal class TorControlOperations(
     ): Result<Unit> = runCatching {
         val dirt = maxCircuitDirtinessSec.coerceIn(60, 7_200)
         val period = newCircuitPeriodSec.coerceIn(10, 3_600)
+        Timber.i("SETCONF MaxCircuitDirtiness=%d NewCircuitPeriod=%d", dirt, period)
         transport.command("SETCONF MaxCircuitDirtiness=$dirt NewCircuitPeriod=$period")
         Unit
-    }
+    }.onFailure { Timber.w(it, "setCircuitTiming failed") }
 
     /** Point Tor at on-disk GeoIP DBs so ip-to-country lookups work without a full restart. */
     fun setGeoIpFiles(geoIpPath: String, geoIp6Path: String): Result<Unit> = runCatching {
@@ -156,28 +168,33 @@ internal class TorControlOperations(
      */
     fun resolve(hostname: String, timeoutMs: Long = 15_000): Result<String> = runCatching {
         val host = TorControlWire.requireHostname(hostname)
+        Timber.d("control RESOLVE %s timeoutMs=%d", host, timeoutMs)
         sendResolve(host).getOrThrow()
         val deadline = System.currentTimeMillis() + timeoutMs
         var sleepMs = 50L
         while (System.currentTimeMillis() < deadline) {
-            pollResolveMapping(host)?.let { return@runCatching it }
+            pollResolveMapping(host)?.let {
+                Timber.d("control RESOLVE %s → %s", host, it)
+                return@runCatching it
+            }
             Thread.sleep(sleepMs)
             sleepMs = (sleepMs * 2).coerceAtMost(400L)
         }
         throw IOException("RESOLVE timeout for $host")
-    }
+    }.onFailure { Timber.w(it, "control RESOLVE failed host=%s", hostname) }
 
     fun extendNewCircuit(): Result<String> = runCatching {
         val lines = transport.command("EXTENDCIRCUIT 0")
         lines.firstOrNull { it.startsWith("250 ") }?.substringAfter("EXTENDED ")?.trim().orEmpty()
-    }
+    }.onFailure { Timber.w(it, "EXTENDCIRCUIT failed") }
 
     fun closeCircuit(id: String, ifUnused: Boolean = true): Result<Unit> = runCatching {
         val circId = TorControlWire.requireCircuitOrStreamId(id, "CircuitID")
         val flags = if (ifUnused) " IfUnused" else ""
+        Timber.v("CLOSECIRCUIT %s ifUnused=%s", circId, ifUnused)
         transport.command("CLOSECIRCUIT $circId$flags")
         Unit
-    }
+    }.onFailure { Timber.w(it, "CLOSECIRCUIT %s failed", id) }
 
     fun closeStream(
         id: String,
@@ -191,7 +208,7 @@ internal class TorControlOperations(
         }
         transport.command("CLOSESTREAM $streamId $code")
         Unit
-    }
+    }.onFailure { Timber.w(it, "CLOSESTREAM %s failed", id) }
 
     fun listCircuits(): List<TorCircuitInfo> =
         TorStatusListParser.parseCircuitStatus(getInfo("circuit-status"))
@@ -208,8 +225,9 @@ internal class TorControlOperations(
             }
         }
         refreshInfo()
+        Timber.i("closeBuiltCircuits closed=%d", closed)
         closed
-    }
+    }.onFailure { Timber.w(it, "closeBuiltCircuits failed") }
 
     fun getConf(vararg keys: String): Map<String, String> {
         val lines = transport.command("GETCONF ${keys.joinToString(" ")}")
@@ -239,7 +257,10 @@ internal class TorControlOperations(
         return out
     }
 
-    fun rawCommand(cmd: String): Result<List<String>> = runCatching { transport.command(cmd) }
+    fun rawCommand(cmd: String): Result<List<String>> = runCatching {
+        Timber.v("control raw: %s", cmd.take(80))
+        transport.command(cmd)
+    }.onFailure { Timber.w(it, "rawCommand failed") }
 
     fun setNodePrefs(entry: String, exit: String, exclude: String): Result<Unit> = runCatching {
         fun conf(key: String, value: String) {
@@ -252,13 +273,20 @@ internal class TorControlOperations(
                 transport.command("SETCONF $key=${TorControlWire.quotedString(v)}")
             }
         }
+        Timber.i(
+            "SETCONF nodes entryBlank=%s exitBlank=%s excludeBlank=%s",
+            entry.isBlank(),
+            exit.isBlank(),
+            exclude.isBlank(),
+        )
         conf("EntryNodes", entry)
         conf("ExitNodes", exit)
         conf("ExcludeNodes", exclude)
         // Match TorConfigWriter: StrictNodes 1 whenever any constraint is set.
         val strict = entry.isNotBlank() || exit.isNotBlank() || exclude.isNotBlank()
         transport.command("SETCONF StrictNodes=${if (strict) 1 else 0}")
-    }
+        Unit
+    }.onFailure { Timber.w(it, "setNodePrefs failed") }
 
     companion object {
         /** Tor enforces ~10s between NEWNYM; pad slightly for clock skew. */

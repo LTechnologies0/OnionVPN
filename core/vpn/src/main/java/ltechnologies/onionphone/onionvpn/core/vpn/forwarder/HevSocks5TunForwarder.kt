@@ -85,7 +85,7 @@ class HevSocks5TunForwarder(
                 protectSocket = protectSocket,
                 onFatal = onFatal,
             )
-            bridge.start(torSocks = torSocksPort)
+            bridge.start(torSocks = torSocksPort, dnsCrypt = dnsCryptPort)
             uidBridge = bridge
 
             val pair = createPacketSocketPair()

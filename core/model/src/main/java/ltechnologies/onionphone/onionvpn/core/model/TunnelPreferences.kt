@@ -53,16 +53,22 @@ data class TunnelPreferences(
     /**
      * When true, Connected establish fails unless Android Always-on VPN lockdown
      * is enabled for OnionVPN ([VpnService.isLockdownEnabled]).
+     * DataStore default: ON for release, OFF for debug
+     * (see [ltechnologies.onionphone.onionvpn.prefs.TunnelPreferencesStore]).
      */
-    val requireOsLockdown: Boolean = false,
-    /** Interactive OpenSnitch-style firewall on the TUN path. */
-    val firewallEnabled: Boolean = false,
+    val requireOsLockdown: Boolean = true,
+    /**
+     * Interactive OpenSnitch-style firewall on the TUN path.
+     * DataStore default: ON for release, OFF for debug.
+     */
+    val firewallEnabled: Boolean = true,
     val firewallDefaultAction: FirewallDefaultAction = FirewallDefaultAction.ASK,
     /** Temporary allow/deny TTL in minutes. */
     val firewallTempMinutes: Int = 5,
     /**
      * Gate the UI with the Android device lock (PIN / biometric).
      * Tunnel / kill-switch keep running while locked.
+     * DataStore default: ON for release, OFF for debug.
      */
     val appLockEnabled: Boolean = true,
     /** When false, [android.view.WindowManager.LayoutParams.FLAG_SECURE] blocks screenshots. */
@@ -70,13 +76,15 @@ data class TunnelPreferences(
     /**
      * When true, opening the app prepares VPN permission (if needed) and starts
      * Tor + DNSCrypt + Connected TUN automatically.
+     * DataStore default: ON for release, OFF for debug.
      */
     val autoStartOnAppLaunch: Boolean = true,
     /**
      * When true, [android.content.Intent.ACTION_BOOT_COMPLETED] starts the tunnel
-     * if VPN permission was already granted. Default off — user must opt in.
+     * if VPN permission was already granted.
+     * DataStore default: ON for release, OFF for debug.
      */
-    val autoStartOnBoot: Boolean = false,
+    val autoStartOnBoot: Boolean = true,
     /**
      * When true, Moat / BridgeDB requests to bridges.torproject.org go through
      * Tor SOCKS. When false (default), clearnet HTTPS is used.
@@ -85,12 +93,12 @@ data class TunnelPreferences(
     /**
      * Privacy kill-switch for diagnostics: when true, TRACE→ERROR pipeline logs,
      * Tor/Arti/DNSCrypt UI buffers, and the resource profiler are disabled.
-     * Default when unset: ON for release (non-debuggable), OFF for debug builds
-     * (see [ltechnologies.onionphone.onionvpn.prefs.TunnelPreferencesStore]).
+     * DataStore default: ON for release, OFF for debug.
      */
     val noLogsEnabled: Boolean = true,
     /**
      * Per-app VPN routing (Orbot). [VpnAppRoutingMode.ALL] = full tunnel.
+     * DataStore default: ALL for release; EXCLUDE for debug (not “All apps” chip).
      * Changing this requires VPN rebind (restart tunnel).
      */
     val vpnAppRoutingMode: VpnAppRoutingMode = VpnAppRoutingMode.ALL,
@@ -101,8 +109,8 @@ data class TunnelPreferences(
     val vpnAppPackages: Set<String> = emptySet(),
     /**
      * When true, wireless ADB (`com.android.shell` / `adbd`) is excluded from the
-     * VPN so network ADB can use clearnet. **Default false (fail-closed)** — ADB
-     * must not bypass the tunnel unless the user opts in. USB ADB is unaffected.
+     * VPN so network ADB can use clearnet. **Forced false in release** (option hidden).
+     * Debug DataStore default: true. USB ADB is unaffected.
      * Changing this requires VPN rebind (restart tunnel).
      */
     val allowAdbClearnetLeak: Boolean = false,
@@ -128,4 +136,9 @@ data class TunnelPreferences(
      */
     val openVpnAuthUser: String = "",
     val openVpnAuthPassword: String = "",
+    /**
+     * First-launch welcome dialog dismissed. False until the user taps Got it
+     * (or re-opens tips from Settings). Release auto-start waits for this.
+     */
+    val welcomeCompleted: Boolean = false,
 )

@@ -654,6 +654,7 @@ class OnionVpnService : VpnService() {
         const val EXTRA_VPN_APP_MODE = "vpn_app_mode"
         const val EXTRA_VPN_APP_PACKAGES = "vpn_app_packages"
         const val EXTRA_ALLOW_ADB_CLEARNET_LEAK = "allow_adb_clearnet_leak"
+        const val EXTRA_REQUIRE_OS_LOCKDOWN = "require_os_lockdown"
         const val EXTRA_TUN_DATA_PLANE = "tun_data_plane"
         const val EXTRA_TOR_ENGINE = "tor_engine"
         const val EXTRA_BRIDGE_LINES = "bridge_lines"
@@ -698,6 +699,10 @@ class OnionVpnService : VpnService() {
                 vpnAppRoutingMode = mode,
                 vpnAppPackages = packages,
                 allowAdbClearnetLeak = intent.getBooleanExtra(EXTRA_ALLOW_ADB_CLEARNET_LEAK, false),
+                // Must be explicit: TunnelPreferences default is true (release fail-closed).
+                // Omitting the extra previously forced Strict OS lockdown on every Connected
+                // establish even when DataStore had require_os_lockdown=false (Waydroid/debug).
+                requireOsLockdown = intent.getBooleanExtra(EXTRA_REQUIRE_OS_LOCKDOWN, false),
             )
         }
 

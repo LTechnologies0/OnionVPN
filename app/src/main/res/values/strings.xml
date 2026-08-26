@@ -29,4 +29,16 @@
     <string name="firewall_action_allow_tor">Via Tor</string>
     <string name="firewall_action_allow_ovpn">Via OVPN</string>
     <string name="firewall_action_deny">Deny</string>
+
+    <string name="welcome_title">Welcome to OnionVPN</string>
+    <string name="welcome_purpose">OnionVPN is a privacy-first Android VPN that routes device traffic through the Tor network, with fail-closed leak protection inspired by Whonix and Mullvad. Clearnet DNS goes through DNSCrypt over Tor; .onion stays Tor-native.</string>
+    <string name="welcome_features_heading">What you can do</string>
+    <string name="welcome_features_body">• Tor tunnel — full-device VPN with kill switch (traffic blocked when Tor is down)\n• DNSCrypt — app DNS over Tor SOCKS (encrypted resolvers; onion via Tor DNS)\n• Interactive firewall — Via Tor / Via OVPN / Deny prompts with domain threat colours\n• Domain threat lists — HaGeZi / URLhaus / ads &amp; tracking reputation on prompts\n• Per-app VPN — include or exclude apps from the tunnel (Orbot-style)\n• App lock — lock the UI with your device PIN/biometric; tunnel keeps running\n• Circuit tools — NEWNYM, hop view, MaxCircuitDirtiness presets (including wallets)\n• Tor engines — C Tor (default) or Arti / onionmasq when available\n• Bridges &amp; Moat — censorship circumvention when Tor is blocked\n• OpenVPN-over-Tor (optional) — TCP OpenVPN via Tor SOCKS so sites see a VPN IP, not a Tor exit\n• Always-on / OS lockdown — harden against leaks outside the VPN\n• No-logs mode — disable diagnostic buffers for everyday use</string>
+    <string name="welcome_private_space_heading">Recommended: Private Space</string>
+    <string name="welcome_private_space_body">For a dedicated, cleaner setup, create an Android Private Space (Settings → Security &amp; privacy → Private Space on Android 15+, or your OEM / GrapheneOS equivalent), install OnionVPN only there, and put the apps you want protected in that space.\n\nBenefits: separate Always-on VPN, isolated apps and data, less mixing with everyday clearnet apps, and a clearer mental model (work / private profile vs main profile). Enable Always-on VPN + lockdown for OnionVPN inside that space.</string>
+    <string name="welcome_footer">You can reopen this tip anytime from Settings → About. Revisit Settings after install to tune firewall, DNSCrypt, bridges, and per-app routing.</string>
+    <string name="welcome_got_it">Got it</string>
+    <string name="welcome_show_again">Show welcome &amp; tips</string>
+    <string name="welcome_about_title">About</string>
+    <string name="welcome_about_subtitle">Purpose, features, and Private Space recommendation.</string>
 </resources>

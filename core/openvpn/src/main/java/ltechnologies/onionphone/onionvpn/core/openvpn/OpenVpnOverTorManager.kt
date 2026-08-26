@@ -8,6 +8,7 @@ import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.Socket
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.concurrent.thread
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -26,13 +27,14 @@ import timber.log.Timber
  * Optional OpenVPN-over-Tor client: TCP OpenVPN reaches the VPN server via Tor SOCKS
  * (SessionGroup OPENVPN).
  *
- * **Control plane:** OpenVPN `socks-proxy` → Tor OPENVPN SocksPort (auth openvpn/overtor).
- * **Data plane:** ics-openvpn unix management + OPENTUN sends one end of a socketpair to
- * OpenVPN; we keep the other end and pump IP frames ↔ VpnService TUN via
+ * **Control plane:** OpenVPN `socks-proxy` → Tor OPENVPN SocksPort
+ * (auth omitted — ics-openvpn 2.7 VER=5 bug; isolation via dedicated SessionGroup).
+ * Java RESOLVE/probe still use [TunnelEndpoints.SOCKS_OPENVPN_USER]/[TunnelEndpoints.SOCKS_OPENVPN_PASS].
+ * **Data plane:** ics-openvpn unix management + OPENTUN socketpair ↔ VpnService TUN via
  * [FirewallBridge.ovpnPacketSink] / [FirewallBridge.injectToVpnTun].
  *
- * Works for both C Tor (native SocksPort) and Arti (role-mux / onionmasq sidecar).
- * Requires TARGET_ANDROID `libovpnexec.so` (ics-openvpn) in the app native library dir.
+ * Via OVPN ([FirewallBridge.openVpnOverTorUp]) is true **iff** CONNECTED **and** OPENTUN.
+ * Soft-restarts clear Via OVPN until CONNECTED returns; OPENTUN pump is kept (`persist-tun`).
  */
 class OpenVpnOverTorManager(
     private val appContext: Context,
@@ -43,6 +45,15 @@ class OpenVpnOverTorManager(
     private val running = AtomicBoolean(false)
     private val controlConnected = AtomicBoolean(false)
     private val dataPlaneReady = AtomicBoolean(false)
+    /**
+     * False when SoftEther accepts SNAT outbound but never returns DNAT replies
+     * (SecureNAT blackhole). Via OVPN demotes to Tor until replies resume.
+     */
+    private val dataPlaneHealthy = AtomicBoolean(true)
+    /** True after at least one CONNECTED this session — soft-reconnect AUTH_FAILED demotes. */
+    private val everControlConnected = AtomicBoolean(false)
+    /** Invalidates watchdog / log / fatal callbacks from a previous start(). */
+    private val sessionId = AtomicLong(0L)
     private val processRef = AtomicReference<Process?>(null)
     private var androidMgmt: OpenVpnAndroidManagement? = null
     private var tunPump: OpenVpnTunPump? = null
@@ -124,6 +135,8 @@ class OpenVpnOverTorManager(
         authPassword: String = "",
     ): Result<Unit> {
         stop()
+        OvpnIpNat.clear()
+        val sid = sessionId.incrementAndGet()
         if (!hasProfile()) {
             return fail("OpenVPN profile missing")
         }
@@ -146,6 +159,8 @@ class OpenVpnOverTorManager(
             )
         }
 
+        val softEther = OpenVpnConfigWriter.looksSoftEtherVpnGate(rawProfile)
+
         if (!waitForOpenVpnSocks(ports.torOpenVpnSocksPort)) {
             return fail(
                 "Tor OpenVPN SocksPort :${ports.torOpenVpnSocksPort} not accepting " +
@@ -153,15 +168,24 @@ class OpenVpnOverTorManager(
             )
         }
 
-        val pinnedProfile = pinRemoteViaTor(rawProfile, ports.torOpenVpnSocksPort)
+        probeSocksAuth(ports.torOpenVpnSocksPort)
+            .getOrElse { return fail(it.message ?: "SOCKS auth probe failed", it) }
+
+        val pinnedProfile = pinAllRemotesViaTor(rawProfile, ports.torOpenVpnSocksPort)
             .getOrElse { return fail(it.message ?: "remote resolve via Tor failed", it) }
 
         val authFile = File(profileDir, "socks-auth.txt")
-        val userPassFile = if (authUser.isNotEmpty() || authPassword.isNotEmpty()) {
+        // Always materialize auth-user-pass when either field is set (VPN Gate often wants vpn/vpn).
+        // Empty password still gets a blank second line so OpenVPN won't fall back to console.
+        // SoftEther/VPN Gate: many free relays are cert-only and AUTH_FAIL when an
+        // auth-user-pass file forces credentials. Use management Auth only when prompted.
+        // Commercial OpenVPN: keep auth-user-pass file from Settings.
+        val userPassFile = if (!softEther && (authUser.isNotEmpty() || authPassword.isNotEmpty())) {
             File(profileDir, "auth-user-pass.txt").also {
-                it.writeText("$authUser\n$authPassword\n")
+                it.writeText("${authUser}\n${authPassword}\n")
             }
         } else {
+            File(profileDir, "auth-user-pass.txt").delete()
             null
         }
         val rewritten = OpenVpnConfigWriter.rewrite(
@@ -175,24 +199,38 @@ class OpenVpnOverTorManager(
 
         _status.value = OpenVpnStatus(OpenVpnPhase.Starting, "starting openvpn management")
         running.set(true)
+        controlConnected.set(false)
+        dataPlaneReady.set(false)
+        dataPlaneHealthy.set(true)
+        everControlConnected.set(false)
 
         val mgmt = OpenVpnAndroidManagement(
             sockFile = managementSockFile,
             protectSocket = protect,
-            onDataPlaneReady = { fd -> attachDataPlaneTun(fd) },
+            onDataPlaneReady = { fd ->
+                if (!isCurrentSession(sid)) {
+                    runCatching { fd.close() }
+                    return@OpenVpnAndroidManagement
+                }
+                attachDataPlaneTun(fd)
+            },
             onControlConnected = {
+                if (!isCurrentSession(sid)) return@OpenVpnAndroidManagement
+                everControlConnected.set(true)
                 controlConnected.set(true)
+                dataPlaneHealthy.set(true)
                 publishUpState("control connected via Tor SOCKS")
             },
-            onFatal = { msg ->
-                Timber.w("OpenVPN fatal: %s", msg)
-                if (running.get()) {
-                    running.set(false)
-                    processRef.getAndSet(null)?.destroy()
-                    setUpFlag(false)
-                    FirewallBridge.ovpnPacketSink = null
-                    _status.value = OpenVpnStatus(OpenVpnPhase.Error, msg)
+            onControlNotReady = { reason ->
+                if (!isCurrentSession(sid)) return@OpenVpnAndroidManagement
+                if (controlConnected.getAndSet(false)) {
+                    Timber.i("OpenVPN control not ready (%s) — Via OVPN down until CONNECTED", reason)
+                    publishUpState("control not CONNECTED ($reason)")
                 }
+            },
+            onFatal = { msg ->
+                if (!isCurrentSession(sid) || !running.get()) return@OpenVpnAndroidManagement
+                handleAuthOrFatal(sid, msg)
             },
             authUser = authUser,
             authPassword = authPassword,
@@ -200,8 +238,10 @@ class OpenVpnOverTorManager(
         androidMgmt = mgmt
         return try {
             mgmt.start()
-            // Brief window so the unix server is bound before OpenVPN connects.
-            Thread.sleep(80)
+            if (!mgmt.awaitListening(MGMT_LISTEN_TIMEOUT_MS)) {
+                stop()
+                return fail("OpenVPN management unix socket failed to listen")
+            }
             val libDir = File(appContext.applicationInfo.nativeLibraryDir)
             val pb = ProcessBuilder(
                 binary.absolutePath,
@@ -219,12 +259,14 @@ class OpenVpnOverTorManager(
             }
             val proc = pb.start()
             processRef.set(proc)
-            startLogPump(proc)
-            startWatchdog(proc)
+            startLogPump(proc, sid)
+            startWatchdog(proc, sid)
+            startDataPlaneHealthMonitor(sid)
             Timber.i(
-                "OpenVPN process started binary=%s socks=:%d",
+                "OpenVPN process started binary=%s socks=:%d session=%d",
                 binary.name,
                 ports.torOpenVpnSocksPort,
+                sid,
             )
             Result.success(Unit)
         } catch (e: Exception) {
@@ -237,7 +279,7 @@ class OpenVpnOverTorManager(
      * Wait until control CONNECTED + OPENTUN data plane, or [timeoutMs] / Error.
      * Call after a successful [start] so Via OVPN is live before firewall prompts.
      */
-    suspend fun awaitReady(timeoutMs: Long = 90_000L): Result<Unit> {
+    suspend fun awaitReady(timeoutMs: Long = READY_WATCHDOG_MS): Result<Unit> {
         val done = withTimeoutOrNull(timeoutMs) {
             status.first {
                 it.phase == OpenVpnPhase.Up ||
@@ -249,23 +291,30 @@ class OpenVpnOverTorManager(
         )
         return when (done.phase) {
             OpenVpnPhase.Up -> Result.success(Unit)
-            OpenVpnPhase.Error -> Result.failure(IllegalStateException(done.detail.ifBlank { "OpenVPN error" }))
-            else -> Result.failure(IllegalStateException("OpenVPN stopped before UP (${done.phase})"))
+            OpenVpnPhase.Error -> Result.failure(
+                IllegalStateException(done.detail.ifBlank { "OpenVPN error" }),
+            )
+            else -> Result.failure(
+                IllegalStateException("OpenVPN stopped before UP (${done.phase})"),
+            )
         }
     }
 
     fun stop() {
+        sessionId.incrementAndGet()
         val wasUp = FirewallBridge.openVpnOverTorUp
         running.set(false)
         controlConnected.set(false)
         dataPlaneReady.set(false)
+        dataPlaneHealthy.set(true)
         setUpFlag(false)
         FirewallBridge.ovpnPacketSink = null
         runCatching { tunPump?.stop() }
         tunPump = null
+        OvpnIpNat.clear()
         runCatching { androidMgmt?.stop() }
         androidMgmt = null
-        processRef.getAndSet(null)?.destroy()
+        destroyProcess(processRef.getAndSet(null))
         if (_status.value.phase != OpenVpnPhase.Idle) {
             _status.value = OpenVpnStatus(OpenVpnPhase.Idle, "stopped")
         }
@@ -275,36 +324,42 @@ class OpenVpnOverTorManager(
     }
 
     /**
-     * Resolve VPN server hostname over Tor SOCKS RESOLVE and pin `remote` to IPv4 so
+     * Resolve every `remote` hostname over Tor SOCKS RESOLVE and pin to IPv4 so
      * OpenVPN never does clearnet DNS before the socks-proxy path.
+     * Multi-remote profiles keep distinct IPs (not collapsed to a single address).
      */
-    private fun pinRemoteViaTor(profileText: String, socksPort: Int): Result<String> {
-        val host = OpenVpnConfigWriter.firstRemoteHost(profileText)
-            ?: return Result.failure(IllegalStateException("profile has no remote"))
-        if (TunnelEndpoints.parseIpv4Literal(host) != null) {
-            return Result.success(OpenVpnConfigWriter.pinRemoteToIpv4(profileText, host))
+    private fun pinAllRemotesViaTor(profileText: String, socksPort: Int): Result<String> {
+        val hosts = OpenVpnConfigWriter.allRemoteHosts(profileText)
+        if (hosts.isEmpty()) {
+            return Result.failure(IllegalStateException("profile has no remote"))
         }
+        var text = profileText
+        val client = Socks5Client(
+            proxyHost = TunnelEndpoints.LOOPBACK,
+            proxyPort = socksPort,
+            username = TunnelEndpoints.SOCKS_OPENVPN_USER,
+            password = TunnelEndpoints.SOCKS_OPENVPN_PASS,
+            connectTimeoutMs = 15_000,
+            handshakeTimeoutMs = 60_000,
+        )
         return try {
-            val client = Socks5Client(
-                proxyHost = TunnelEndpoints.LOOPBACK,
-                proxyPort = socksPort,
-                username = TunnelEndpoints.SOCKS_OPENVPN_USER,
-                password = TunnelEndpoints.SOCKS_OPENVPN_PASS,
-                connectTimeoutMs = 15_000,
-                handshakeTimeoutMs = 60_000,
-            )
-            val addr: InetAddress = client.resolve(host)
-            val ipv4 = addr.hostAddress
-                ?: return Result.failure(IllegalStateException("resolve returned no address"))
-            val v4 = if (addr is java.net.Inet4Address) {
-                ipv4
-            } else {
-                return Result.failure(
-                    IllegalStateException("Tor resolved $host to non-IPv4 ($ipv4)"),
-                )
+            for (host in hosts) {
+                if (TunnelEndpoints.parseIpv4Literal(host) != null) {
+                    text = OpenVpnConfigWriter.pinRemoteHostToIpv4(text, host, host)
+                    continue
+                }
+                val addr: InetAddress = client.resolve(host)
+                val ipv4 = addr.hostAddress
+                    ?: return Result.failure(IllegalStateException("resolve returned no address for $host"))
+                if (addr !is java.net.Inet4Address) {
+                    return Result.failure(
+                        IllegalStateException("Tor resolved $host to non-IPv4 ($ipv4)"),
+                    )
+                }
+                Timber.i("OpenVPN remote %s → %s (via Tor RESOLVE)", host, ipv4)
+                text = OpenVpnConfigWriter.pinRemoteHostToIpv4(text, host, ipv4)
             }
-            Timber.i("OpenVPN remote %s → %s (via Tor RESOLVE)", host, v4)
-            Result.success(OpenVpnConfigWriter.pinRemoteToIpv4(profileText, v4))
+            Result.success(text)
         } catch (e: Exception) {
             Result.failure(e)
         }
@@ -330,12 +385,36 @@ class OpenVpnOverTorManager(
         return false
     }
 
-    private fun startWatchdog(proc: Process) {
+    /** Fail before spawn when IsolateSOCKSAuth credentials are refused (avoids SIGUSR1 storm). */
+    private fun probeSocksAuth(socksPort: Int): Result<Unit> {
+        return try {
+            Socks5Client(
+                proxyHost = TunnelEndpoints.LOOPBACK,
+                proxyPort = socksPort,
+                username = TunnelEndpoints.SOCKS_OPENVPN_USER,
+                password = TunnelEndpoints.SOCKS_OPENVPN_PASS,
+                connectTimeoutMs = 5_000,
+                handshakeTimeoutMs = 15_000,
+            ).probeAuth()
+            Result.success(Unit)
+        } catch (e: Exception) {
+            Result.failure(
+                IllegalStateException(
+                    "OpenVPN SOCKS auth probe failed for " +
+                        "${TunnelEndpoints.SOCKS_OPENVPN_USER} on :$socksPort " +
+                        "(${e.message})",
+                    e,
+                ),
+            )
+        }
+    }
+
+    private fun startWatchdog(proc: Process, sid: Long) {
         thread(name = "onionvpn-ovpn-watch", isDaemon = true) {
             var waited = 0
-            while (running.get() && waited < 90_000) {
+            while (isCurrentSession(sid) && running.get() && waited < READY_WATCHDOG_MS) {
                 if (!proc.isAlive) {
-                    if (running.get()) {
+                    if (isCurrentSession(sid) && running.get()) {
                         val msg = "OpenVPN process exited early (see openvpn: logs)"
                         Timber.w(msg)
                         setUpFlag(false)
@@ -349,7 +428,9 @@ class OpenVpnOverTorManager(
                 Thread.sleep(500)
                 waited += 500
             }
-            if (running.get() && !(controlConnected.get() && dataPlaneReady.get())) {
+            if (isCurrentSession(sid) && running.get() &&
+                !(controlConnected.get() && dataPlaneReady.get())
+            ) {
                 val msg = when {
                     !controlConnected.get() ->
                         "OpenVPN never CONNECTED via Tor SOCKS (TCP .ovpn? auth? binary?)"
@@ -358,7 +439,7 @@ class OpenVpnOverTorManager(
                 }
                 Timber.w(msg)
                 running.set(false)
-                processRef.getAndSet(null)?.destroy()
+                destroyProcess(processRef.getAndSet(null))
                 runCatching { androidMgmt?.stop() }
                 setUpFlag(false)
                 FirewallBridge.ovpnPacketSink = null
@@ -367,21 +448,69 @@ class OpenVpnOverTorManager(
         }
     }
 
+    /**
+     * SoftEther free relays often keep control CONNECTED while SecureNAT blackholes
+     * TCP. Demote Via OVPN so browsers fall back to Tor; restore when DNAT resumes.
+     */
+    private fun startDataPlaneHealthMonitor(sid: Long) {
+        thread(name = "onionvpn-ovpn-health", isDaemon = true) {
+            while (isCurrentSession(sid) && running.get()) {
+                try {
+                    Thread.sleep(DATA_PLANE_HEALTH_POLL_MS)
+                } catch (_: InterruptedException) {
+                    return@thread
+                }
+                if (!isCurrentSession(sid) || !running.get()) return@thread
+                if (!controlConnected.get() || !dataPlaneReady.get()) continue
+                val silent = OvpnIpNat.isDataPlaneSilent()
+                val healthy = dataPlaneHealthy.get()
+                when {
+                    silent && healthy -> {
+                        dataPlaneHealthy.set(false)
+                        Timber.w(
+                            "SoftEther data plane silent (snat=%d dnat=%d) — demoting Via OVPN to Tor",
+                            OvpnIpNat.snatRewriteCount,
+                            OvpnIpNat.dnatRewriteCount,
+                        )
+                        publishUpState(
+                            "SoftEther data silent (snat=${OvpnIpNat.snatRewriteCount} " +
+                                "dnat=${OvpnIpNat.dnatRewriteCount}) — using Tor",
+                        )
+                    }
+                    !silent && !healthy -> {
+                        dataPlaneHealthy.set(true)
+                        Timber.i("SoftEther data plane recovered — Via OVPN restored")
+                        publishUpState("SoftEther data plane recovered")
+                    }
+                }
+            }
+        }
+    }
+
     private fun publishUpState(detail: String) {
         val control = controlConnected.get()
         val data = dataPlaneReady.get()
-        val up = control && data
+        val healthy = dataPlaneHealthy.get()
+        val up = control && data && healthy
         setUpFlag(up)
         _status.value = when {
             up -> OpenVpnStatus(OpenVpnPhase.Up, detail)
+            control && data && !healthy -> OpenVpnStatus(
+                OpenVpnPhase.Up,
+                detail,
+            )
             control && !data -> OpenVpnStatus(
                 OpenVpnPhase.Starting,
                 "$detail — waiting for OPENTUN FD",
             )
+            data && !control -> OpenVpnStatus(
+                OpenVpnPhase.Starting,
+                "$detail — waiting for CONNECTED",
+            )
             else -> OpenVpnStatus(OpenVpnPhase.Starting, detail)
         }
         if (up) {
-            Timber.i("OpenVPN-over-Tor UP (control+data)")
+            Timber.i("OpenVPN-over-Tor UP (control+data+healthy)")
         }
     }
 
@@ -394,16 +523,94 @@ class OpenVpnOverTorManager(
         }
     }
 
-    private fun startLogPump(proc: Process) {
+    private fun startLogPump(proc: Process, sid: Long) {
         thread(name = "onionvpn-ovpn-log", isDaemon = true) {
+            var socksAuthRefusals = 0
             try {
                 proc.inputStream.bufferedReader().useLines { lines ->
-                    lines.forEach { Timber.i("openvpn: %s", it) }
+                    lines.forEach { line ->
+                        if (!isCurrentSession(sid)) return@useLines
+                        Timber.i("openvpn: %s", line)
+                        when {
+                            line.contains("socks_username_password_auth: server refused") -> {
+                                socksAuthRefusals++
+                                if (socksAuthRefusals >= SOCKS_AUTH_REFUSAL_ABORT) {
+                                    abortSocksAuthFailure(proc, sid)
+                                }
+                            }
+                            line.contains("AUTH_FAILED") ->
+                                handleAuthOrFatal(sid, "OpenVPN AUTH_FAILED (VPN credentials)")
+                        }
+                    }
                 }
             } catch (_: Exception) {
             }
         }
     }
+
+    /**
+     * SoftEther soft-reconnect after connection-reset often AUTH_FAILs when empty/vpn
+     * credentials are wrong for that attempt. If we already had CONNECTED+OPENTUN, demote
+     * Via OVPN and keep the process alive for another soft retry — do not kill Tor path.
+     */
+    private fun handleAuthOrFatal(sid: Long, msg: String) {
+        if (!isCurrentSession(sid) || !running.get()) return
+        val authLike = msg.contains("AUTH", ignoreCase = true) ||
+            msg.contains("Auth", ignoreCase = true) ||
+            msg.contains("password", ignoreCase = true)
+        if (authLike && everControlConnected.get() && dataPlaneReady.get()) {
+            Timber.w("OpenVPN %s after prior CONNECTED — demoting Via OVPN, keeping process", msg)
+            controlConnected.set(false)
+            dataPlaneHealthy.set(false)
+            setUpFlag(false)
+            _status.value = OpenVpnStatus(
+                OpenVpnPhase.Starting,
+                "$msg — soft reconnect (Via OVPN demoted)",
+            )
+            return
+        }
+        abortFatal(processRef.get() ?: return, sid, msg)
+    }
+
+    /** Stop reconnect storm when Tor/onionmasq SOCKS rejects OpenVPN credentials. */
+    private fun abortSocksAuthFailure(proc: Process, sid: Long) {
+        abortFatal(
+            proc,
+            sid,
+            "OpenVPN SOCKS auth refused — ics-openvpn 2.7 expects RFC1929 VER=5 " +
+                "(Tor sends VER=1); OnionVPN omits socks-proxy authfile for this reason",
+        )
+    }
+
+    private fun abortFatal(proc: Process, sid: Long, msg: String) {
+        if (!isCurrentSession(sid) || !running.get()) return
+        Timber.e(msg)
+        running.set(false)
+        destroyProcess(processRef.getAndSet(null))
+        runCatching { proc.destroy() }
+        runCatching { androidMgmt?.stop() }
+        setUpFlag(false)
+        FirewallBridge.ovpnPacketSink = null
+        _status.value = OpenVpnStatus(OpenVpnPhase.Error, msg)
+    }
+
+    private fun destroyProcess(proc: Process?) {
+        if (proc == null) return
+        runCatching { proc.destroy() }
+        // Give soft destroy a moment; then force (zombie / stuck SOCKS).
+        thread(name = "onionvpn-ovpn-kill", isDaemon = true) {
+            try {
+                Thread.sleep(PROCESS_DESTROY_GRACE_MS)
+                if (proc.isAlive) {
+                    Timber.w("OpenVPN still alive after destroy — destroyForcibly")
+                    runCatching { proc.destroyForcibly() }
+                }
+            } catch (_: InterruptedException) {
+            }
+        }
+    }
+
+    private fun isCurrentSession(sid: Long): Boolean = sessionId.get() == sid
 
     private fun resolveBinary(): File? {
         val dir = File(appContext.applicationInfo.nativeLibraryDir)
@@ -452,5 +659,15 @@ class OpenVpnOverTorManager(
         setUpFlag(false)
         FirewallBridge.ovpnPacketSink = null
         return Result.failure(cause ?: IllegalStateException(msg))
+    }
+
+    companion object {
+        /** Abort reconnect storm after this many SOCKS username/password refusals. */
+        private const val SOCKS_AUTH_REFUSAL_ABORT = 3
+        /** Match awaitReady / Tor SOCKS + TLS hand-window budget. */
+        const val READY_WATCHDOG_MS = 120_000L
+        private const val MGMT_LISTEN_TIMEOUT_MS = 5_000L
+        private const val PROCESS_DESTROY_GRACE_MS = 1_500L
+        private const val DATA_PLANE_HEALTH_POLL_MS = 5_000L
     }
 }

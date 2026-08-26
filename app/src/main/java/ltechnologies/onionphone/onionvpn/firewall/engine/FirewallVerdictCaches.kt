@@ -61,23 +61,34 @@ internal class FirewallVerdictCaches {
     }
 
     private fun trimFlowCache() {
-            // Prefer trimming ALLOW; DENY stays sticky so mid-flow miss can fail-open safely.
+            // Prefer trimming Tor ALLOW; keep DENY + ALLOW_OVPN sticky (OVPN demotion / fail-closed).
             var n = 0
             val it = flowCache.entries.iterator()
             while (it.hasNext() && n < FLOW_TRIM_BUDGET) {
                 val e = it.next()
-                if (e.value.forwards) {
+                if (e.value == FirewallVerdict.ALLOW_TOR) {
                     removeFlowKey(e.key)
                     it.remove()
                     n++
                 }
             }
             if (flowCache.size > MAX_FLOW_CACHE) {
-                val it2 = flowCache.keys.iterator()
+                val it2 = flowCache.entries.iterator()
                 while (it2.hasNext() && n < FLOW_TRIM_BUDGET * 2) {
-                    val k = it2.next()
+                    val e = it2.next()
+                    if (e.value != FirewallVerdict.ALLOW_OVPN && e.value != FirewallVerdict.DENY) {
+                        removeFlowKey(e.key)
+                        it2.remove()
+                        n++
+                    }
+                }
+            }
+            if (flowCache.size > MAX_FLOW_CACHE) {
+                val it3 = flowCache.keys.iterator()
+                while (it3.hasNext() && n < FLOW_TRIM_BUDGET * 3) {
+                    val k = it3.next()
                     removeFlowKey(k)
-                    it2.remove()
+                    it3.remove()
                     n++
                 }
             }
@@ -98,18 +109,30 @@ internal class FirewallVerdictCaches {
         val it = decisionCache.entries.iterator()
         while (it.hasNext() && n < DECISION_TRIM_BUDGET) {
             val e = it.next()
-            if (e.value.forwards) {
+            // Trim Tor ALLOW first; keep ALLOW_OVPN + DENY sticky.
+            if (e.value == FirewallVerdict.ALLOW_TOR) {
                 removeDecisionKey(e.key)
                 it.remove()
                 n++
             }
         }
         if (decisionCache.size > MAX_DECISION_CACHE) {
-            val it2 = decisionCache.keys.iterator()
+            val it2 = decisionCache.entries.iterator()
             while (it2.hasNext() && n < DECISION_TRIM_BUDGET * 2) {
-                val k = it2.next()
+                val e = it2.next()
+                if (e.value != FirewallVerdict.ALLOW_OVPN && e.value != FirewallVerdict.DENY) {
+                    removeDecisionKey(e.key)
+                    it2.remove()
+                    n++
+                }
+            }
+        }
+        if (decisionCache.size > MAX_DECISION_CACHE) {
+            val it3 = decisionCache.keys.iterator()
+            while (it3.hasNext() && n < DECISION_TRIM_BUDGET * 3) {
+                val k = it3.next()
                 removeDecisionKey(k)
-                it2.remove()
+                it3.remove()
                 n++
             }
         }

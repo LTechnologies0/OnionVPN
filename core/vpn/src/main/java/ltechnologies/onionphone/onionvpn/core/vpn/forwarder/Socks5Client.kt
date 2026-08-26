@@ -9,7 +9,9 @@ import java.net.Socket
 import java.nio.charset.StandardCharsets
 import ltechnologies.onionphone.onionvpn.core.model.TorNetPolicy
 import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
+import ltechnologies.onionphone.onionvpn.core.model.observability.OpTrace
 import ltechnologies.onionphone.onionvpn.core.model.stability.TorStabilityCodes
+import timber.log.Timber
 
 /**
  * Minimal SOCKS5 client with USERNAME/PASSWORD auth (RFC 1928 / 1929).
@@ -34,6 +36,7 @@ class Socks5Client(
     private val protect: ((Socket) -> Boolean)? = null,
 ) {
     fun connect(destHost: String, destPort: Int): Socket {
+        Timber.v("SOCKS5 CONNECT via %s:%d → %s:%d", proxyHost, proxyPort, destHost, destPort)
         val socket = openAuthedSocket()
         val input = DataInputStream(socket.getInputStream())
         val output = DataOutputStream(socket.getOutputStream())
@@ -50,6 +53,17 @@ class Socks5Client(
     }
 
     /**
+     * Verify SOCKS5 USERNAME/PASSWORD only (no CONNECT/RESOLVE).
+     * Used to fail-fast OpenVPN-over-Tor before spawning when onionmasq/C Tor
+     * reject IsolateSOCKSAuth credentials.
+     */
+    fun probeAuth() {
+        Timber.d("SOCKS5 auth probe %s:%d", proxyHost, proxyPort)
+        openAuthedSocket().use { /* auth handshake only */ }
+        OpTrace.debug("socks", "auth probe ok $proxyHost:$proxyPort")
+    }
+
+    /**
      * Tor SOCKS extension: resolve [hostname] over Tor without opening a stream.
      * Returns the first IPv4/IPv6 from the SOCKS reply (BND.ADDR).
      */
@@ -60,12 +74,15 @@ class Socks5Client(
         if (TunnelEndpoints.parseIpv4Literal(hostname) != null || hostname.indexOf(':') >= 0) {
             return InetAddress.getByName(hostname)
         }
+        Timber.v("SOCKS5 RESOLVE via %s:%d host=%s", proxyHost, proxyPort, hostname)
         openAuthedSocket().use { socket ->
             val input = DataInputStream(socket.getInputStream())
             val output = DataOutputStream(socket.getOutputStream())
             try {
                 writeDestinationRequest(output, CMD_RESOLVE, hostname, destPort = 0)
-                return readResolveReply(input)
+                val addr = readResolveReply(input)
+                Timber.d("SOCKS5 RESOLVE %s → %s", hostname, addr.hostAddress)
+                return addr
             } catch (e: Exception) {
                 throw wrapHandshake(e)
             }
@@ -221,12 +238,15 @@ class Socks5Client(
 
     private fun wrapHandshake(e: Exception): IOException {
         if (e is java.net.SocketTimeoutException) {
-            return IOException(
+            val msg =
                 "SOCKS5 handshake timed out after ${handshakeTimeoutMs}ms " +
-                    "(cold circuit / congested Tor)",
-                e,
-            )
+                    "(cold circuit / congested Tor)"
+            Timber.w(e, "%s proxy=%s:%d", msg, proxyHost, proxyPort)
+            OpTrace.warn("socks", msg)
+            return IOException(msg, e)
         }
+        Timber.w(e, "SOCKS5 handshake failed proxy=%s:%d", proxyHost, proxyPort)
+        OpTrace.warn("socks", "handshake failed: ${e.message}", e)
         if (e is IOException) return e
         return IOException("SOCKS5 handshake failed: ${e.message}", e)
     }

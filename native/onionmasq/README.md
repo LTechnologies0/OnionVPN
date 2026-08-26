@@ -42,7 +42,7 @@ git apply ../../native/onionmasq/safe-uninit-jni.patch
 SOCKS sidecar auth allowlist (must match `TunnelEndpoints`):
 `probe`/`check`, `dnscrypt`|`dnscrypt-nN`/`resolver`, `pac`/`dnscrypt`,
 `pac{uid}`|`pac{uid}-nN`/`p{uid}`|`p{uid}-nN`, `u{uid}`|`u{uid}-nN`/`p{uid}`|`p{uid}-nN`,
-`onionvpn`/`stream`, `openvpn`/`overtor` (OpenVPN-over-Tor via ArtiSocksRoleMux).
+`onionvpn`/`stream`, `uopenvpn`/`popenvpn` (OpenVPN-over-Tor; also `openvpn`/`overtor` after patch rebuild).
 
 Rebuild `libonionmasq_mobile.so` after changing `socks-sidecar.patch` or OpenVPN-over-Tor
 on Arti+onionmasq will get SOCKS auth failure (`0x01`).

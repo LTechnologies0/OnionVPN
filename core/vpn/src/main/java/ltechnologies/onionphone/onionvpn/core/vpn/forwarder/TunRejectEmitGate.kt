@@ -3,6 +3,7 @@ package ltechnologies.onionphone.onionvpn.core.vpn.forwarder
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
+import timber.log.Timber
 
 /**
  * Per-flow emit gate for TUN reject injection (ICMP / TCP RST).
@@ -22,6 +23,8 @@ internal object TunRejectEmitGate {
     private val lastByFlow = ConcurrentHashMap<Long, Long>(512)
     private val lastGlobalNs = AtomicLong(0)
     private val sweepCounter = AtomicInteger(0)
+    private val emitted = AtomicLong(0)
+    private val denied = AtomicLong(0)
 
     /**
      * @return true if a reject packet may be injected for this flow key now.
@@ -29,12 +32,21 @@ internal object TunRejectEmitGate {
     fun tryAcquire(flowKey: Long): Boolean {
         val now = System.nanoTime()
         val globalPrev = lastGlobalNs.get()
-        if (now - globalPrev < GLOBAL_MIN_INTERVAL_NS) return false
+        if (now - globalPrev < GLOBAL_MIN_INTERVAL_NS) {
+            noteDenied()
+            return false
+        }
 
         val flowPrev = lastByFlow[flowKey]
-        if (flowPrev != null && now - flowPrev < PER_FLOW_INTERVAL_NS) return false
+        if (flowPrev != null && now - flowPrev < PER_FLOW_INTERVAL_NS) {
+            noteDenied()
+            return false
+        }
 
-        if (!lastGlobalNs.compareAndSet(globalPrev, now)) return false
+        if (!lastGlobalNs.compareAndSet(globalPrev, now)) {
+            noteDenied()
+            return false
+        }
         lastByFlow[flowKey] = now
 
         if (lastByFlow.size > MAX_FLOWS &&
@@ -42,7 +54,23 @@ internal object TunRejectEmitGate {
         ) {
             sweepStale(now)
         }
+        val n = emitted.incrementAndGet()
+        if ((n and 0xFFL) == 0L) {
+            Timber.d(
+                "TunRejectEmitGate emitted=%d denied=%d flows=%d",
+                n,
+                denied.get(),
+                lastByFlow.size,
+            )
+        }
         return true
+    }
+
+    private fun noteDenied() {
+        val n = denied.incrementAndGet()
+        if ((n and 0x3FFL) == 0L) {
+            Timber.v("TunRejectEmitGate denied=%d emitted=%d", n, emitted.get())
+        }
     }
 
     fun flowKeyUdpV4(packet: ByteArray, length: Int): Long? {

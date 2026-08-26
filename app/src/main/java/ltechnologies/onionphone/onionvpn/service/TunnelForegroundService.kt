@@ -57,6 +57,7 @@ import ltechnologies.onionphone.onionvpn.core.validation.TunnelValidator
 import ltechnologies.onionphone.onionvpn.core.vpn.OnionVpnService
 import ltechnologies.onionphone.onionvpn.core.vpn.dns.DnsHostnameCache
 import ltechnologies.onionphone.onionvpn.core.vpn.dns.OnionAutomapAllocator
+import ltechnologies.onionphone.onionvpn.core.vpn.firewall.FirewallBridge
 import ltechnologies.onionphone.onionvpn.core.vpn.forwarder.TcpFlowUidIndex
 import ltechnologies.onionphone.onionvpn.core.vpn.forwarder.ArtiSocksRoleMux
 import ltechnologies.onionphone.onionvpn.core.vpn.forwarder.TunDataPlaneFactory
@@ -65,6 +66,9 @@ import ltechnologies.onionphone.onionvpn.core.vpn.pac.PacProxyServer
 import ltechnologies.onionphone.onionvpn.core.model.TunDataPlane
 import ltechnologies.onionphone.onionvpn.core.model.VpnAppRoutingMode
 import ltechnologies.onionphone.onionvpn.core.model.VpnProfileMode
+import ltechnologies.onionphone.onionvpn.core.openvpn.OpenVpnConfigWriter
+import ltechnologies.onionphone.onionvpn.core.openvpn.OpenVpnOverTorManager
+import ltechnologies.onionphone.onionvpn.core.openvpn.OpenVpnPhase
 import ltechnologies.onionphone.onionvpn.firewall.InteractiveFirewallEngine
 import ltechnologies.onionphone.onionvpn.prefs.TunnelPreferencesStore
 import ltechnologies.onionphone.onionvpn.service.lifecycle.TunnelStabilityRecovery
@@ -1005,6 +1009,13 @@ class TunnelForegroundService : Service() {
         }.getOrDefault(preferences)
         preferences = applyDebugBridgeOverride(preferences)
         preferences = applyDebugEngineOverride(preferences)
+        if (preferences.openVpnOverTorEnabled && !preferences.firewallEnabled) {
+            Timber.i("Enabling interactive firewall — required for Via OVPN")
+            preferences = preferences.copy(firewallEnabled = true)
+            runCatching {
+                preferencesStore.update { it.copy(firewallEnabled = true) }
+            }.onFailure { Timber.w(it, "persist firewallEnabled=true failed") }
+        }
         DiagnosticsGate.setNoLogsEnabled(preferences.noLogsEnabled)
         // Cancel Tor-bound downloads before we tear down / recycle SOCKS ports.
         domainReputation.onTorUnavailable()
@@ -1171,6 +1182,7 @@ class TunnelForegroundService : Service() {
         }
 
         // Seed firewall prefs before Connected TUN packets (ASK/DENY must not flip mid-flow).
+        firewallEngine.applySessionPreferences(preferences)
         firewallEngine.start()
 
         val vpnGeneration = OnionVpnService.nextGeneration()
@@ -1243,7 +1255,7 @@ class TunnelForegroundService : Service() {
             }
             // Point DNSCrypt + probes at sidecar (same TorClient as TUN).
             // Keep torOpenVpnSocksPort distinct and relay → sidecar so OpenVPN IsolateSOCKSAuth
-            // (openvpn/overtor) does not share the apps SOCKS listen path.
+            // KeepAliveIsolateSOCKSAuth (uopenvpn/popenvpn) does not share the apps SOCKS listen path.
             activePorts = ports.copy(
                 torDnsCryptSocksPort = sidecar,
                 torProbeSocksPort = sidecar,
@@ -1337,28 +1349,40 @@ class TunnelForegroundService : Service() {
         acquireTunnelWakeLock(timeoutMs = null)
 
         if (preferences.openVpnOverTorEnabled && preferences.openVpnProfileConfigured) {
-            updateSnapshot(TunnelPhase.StartingOpenVpn, vpnEstablished = true, torRunning = true)
-            openVpnOverTor.protectSocket = { fd -> OnionVpnService.protectSocket(fd) }
-            openVpnOverTor.onUpChanged = { up ->
-                if (up) firewallEngine.refreshActivePromptForOvpn()
-            }
-            val ovpnResult = OpTrace.stepSuspending("tunnel", "openvpn_over_tor_start") {
-                val started = openVpnOverTor.start(
-                    ports = activePorts,
-                    authUser = preferences.openVpnAuthUser,
-                    authPassword = preferences.openVpnAuthPassword,
+            // Disk is source of truth for imported .ovpn (prefs can drift after clear data).
+            val hasOnDisk = openVpnOverTor.hasProfile()
+            if (!hasOnDisk) {
+                Timber.w("OpenVPN-over-Tor enabled but profile file missing — skip")
+                preferencesStore.update {
+                    it.copy(openVpnProfileConfigured = false, openVpnOverTorEnabled = false)
+                }
+                preferences = preferences.copy(
+                    openVpnProfileConfigured = false,
+                    openVpnOverTorEnabled = false,
                 )
-                if (started.isFailure) return@stepSuspending started
-                // Block Connected until Via OVPN is actually usable (or fail soft).
-                openVpnOverTor.awaitReady(timeoutMs = 90_000L)
-            }
-            if (ovpnResult.isFailure) {
-                Timber.w(
-                    ovpnResult.exceptionOrNull(),
-                    "OpenVPN-over-Tor failed — ALLOW_OVPN unavailable (Tor path OK)",
-                )
+                openVpnOverTor.onUpChanged = null
+                openVpnOverTor.stop()
             } else {
-                Timber.i("OpenVPN-over-Tor ready — Via OVPN enabled")
+                updateSnapshot(TunnelPhase.StartingOpenVpn, vpnEstablished = true, torRunning = true)
+                openVpnOverTor.protectSocket = { fd -> OnionVpnService.protectSocket(fd) }
+                openVpnOverTor.onUpChanged = { _ ->
+                    firewallEngine.refreshActivePromptForOvpn()
+                    val p = _snapshot.value.phase
+                    if (p == TunnelPhase.Connected || p == TunnelPhase.StartingOpenVpn) {
+                        updateSnapshot(p, vpnEstablished = true, torRunning = true)
+                    }
+                }
+                val ovpnResult = OpTrace.stepSuspending("tunnel", "openvpn_over_tor_start") {
+                    startOpenVpnOverTorWithSoftEtherAuthFallback(activePorts, preferences)
+                }
+                if (ovpnResult.isFailure) {
+                    Timber.w(
+                        ovpnResult.exceptionOrNull(),
+                        "OpenVPN-over-Tor failed — ALLOW_OVPN unavailable (Tor path OK)",
+                    )
+                } else {
+                    Timber.i("OpenVPN-over-Tor ready — Via OVPN enabled")
+                }
             }
         } else {
             if (preferences.openVpnOverTorEnabled && !preferences.openVpnProfileConfigured) {
@@ -2134,6 +2158,14 @@ class TunnelForegroundService : Service() {
                 identityRefreshing = identityRefreshing,
                 onionmasqReady = isOnionmasqLive(),
                 newNymCooldownUntilMs = newNymCooldownUntilMs(),
+                openVpnUp = FirewallBridge.openVpnOverTorUp,
+                openVpnDetail = openVpnOverTor.status.value.let { st ->
+                    when {
+                        st.phase == OpenVpnPhase.Idle && !preferences.openVpnOverTorEnabled -> ""
+                        st.detail.isNotBlank() -> "${st.phase}: ${st.detail}"
+                        else -> st.phase.name
+                    }
+                },
             )
         }
         notifications.updateIfChanged(
@@ -2176,6 +2208,44 @@ class TunnelForegroundService : Service() {
         return maxOf(onion, little)
     }
 
+    /**
+     * SoftEther/VPN Gate: AUTH_FAILED with Settings credentials often means the relay
+     * wants cert-only. Retry once with empty user/pass (no auth-user-pass file).
+     */
+    private suspend fun startOpenVpnOverTorWithSoftEtherAuthFallback(
+        ports: TunnelRuntimePorts,
+        prefs: TunnelPreferences,
+    ): Result<Unit> {
+        suspend fun attempt(user: String, pass: String): Result<Unit> {
+            val started = openVpnOverTor.start(
+                ports = ports,
+                authUser = user,
+                authPassword = pass,
+            )
+            if (started.isFailure) return started
+            return openVpnOverTor.awaitReady(
+                timeoutMs = OpenVpnOverTorManager.READY_WATCHDOG_MS,
+            )
+        }
+
+        val first = attempt(prefs.openVpnAuthUser, prefs.openVpnAuthPassword)
+        if (first.isSuccess) return first
+
+        val msg = first.exceptionOrNull()?.message.orEmpty()
+        val authFail = msg.contains("AUTH", ignoreCase = true) ||
+            msg.contains("Auth", ignoreCase = true) ||
+            msg.contains("password", ignoreCase = true) ||
+            msg.contains("credentials", ignoreCase = true)
+        val hadCreds = prefs.openVpnAuthUser.isNotBlank() || prefs.openVpnAuthPassword.isNotBlank()
+        if (!authFail || !hadCreds) return first
+
+        Timber.w(
+            first.exceptionOrNull(),
+            "OpenVPN AUTH failed with Settings credentials — retrying cert-only (empty auth)",
+        )
+        return attempt("", "")
+    }
+
     companion object {
         /** Match C Tor MAX_SIGNEWNYM_RATE (~10s) / Arti restart gate. */
         private const val ONIONMASQ_NEWNYM_MIN_INTERVAL_MS = 10_500L
@@ -2207,6 +2277,7 @@ class TunnelForegroundService : Service() {
         const val EXTRA_VPN_APP_MODE = "vpn_app_mode"
         const val EXTRA_VPN_APP_PACKAGES = "vpn_app_packages"
         const val EXTRA_ALLOW_ADB_CLEARNET_LEAK = "allow_adb_clearnet_leak"
+        const val EXTRA_REQUIRE_OS_LOCKDOWN = "require_os_lockdown"
         const val EXTRA_TUN_DATA_PLANE = "tun_data_plane"
         const val EXTRA_OPENVPN_OVER_TOR = "openvpn_over_tor"
         const val EXTRA_OPENVPN_PROFILE = "openvpn_profile_configured"
@@ -2281,6 +2352,7 @@ class TunnelForegroundService : Service() {
                 ?.toSet()
                 ?: emptySet(),
             allowAdbClearnetLeak = intent.getBooleanExtra(EXTRA_ALLOW_ADB_CLEARNET_LEAK, false),
+            requireOsLockdown = intent.getBooleanExtra(EXTRA_REQUIRE_OS_LOCKDOWN, false),
             tunDataPlane = TunDataPlane.fromPreference(intent.getStringExtra(EXTRA_TUN_DATA_PLANE)),
             openVpnOverTorEnabled = intent.getBooleanExtra(EXTRA_OPENVPN_OVER_TOR, false),
             openVpnProfileConfigured = intent.getBooleanExtra(EXTRA_OPENVPN_PROFILE, false),

@@ -22,6 +22,7 @@ import ltechnologies.onionphone.onionvpn.core.model.FirewallRuleScope
 import ltechnologies.onionphone.onionvpn.core.model.FirewallVerdict
 import org.json.JSONArray
 import org.json.JSONObject
+import timber.log.Timber
 
 private val Context.firewallDataStore: DataStore<Preferences> by preferencesDataStore(name = "firewall_rules")
 
@@ -48,6 +49,11 @@ class FirewallRulesStore @Inject constructor(
         val prefs = context.firewallDataStore.data.first()
         _rules.value = decodeRules(prefs[Keys.rulesJson].orEmpty()).filterNot { it.isExpired() }
         _journal.value = decodeJournal(prefs[Keys.journalJson].orEmpty())
+        Timber.i(
+            "FirewallRulesStore load rules=%d journal=%d",
+            _rules.value.size,
+            _journal.value.size,
+        )
     }
 
     suspend fun upsert(rule: FirewallRule) {
@@ -63,6 +69,14 @@ class FirewallRulesStore @Inject constructor(
             prefs[Keys.rulesJson] = encodeRules(next)
             _rules.value = next.filterNot { it.isExpired() }
         }
+        Timber.d(
+            "Firewall rule upsert uid=%d host=%s:%d verdict=%s scope=%s",
+            rule.uid,
+            rule.destHost,
+            rule.destPort,
+            rule.verdict,
+            rule.scope,
+        )
     }
 
     suspend fun remove(id: String) {
@@ -71,6 +85,7 @@ class FirewallRulesStore @Inject constructor(
             prefs[Keys.rulesJson] = encodeRules(next)
             _rules.value = next
         }
+        Timber.d("Firewall rule remove id=%s", id)
     }
 
     suspend fun removeWhere(predicate: (FirewallRule) -> Boolean) {

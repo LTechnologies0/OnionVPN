@@ -8,9 +8,11 @@ import android.provider.Settings
 import androidx.core.content.getSystemService
 import ltechnologies.onionphone.onionvpn.core.model.ValidationCheck
 import ltechnologies.onionphone.onionvpn.core.model.ValidationStatus
+import ltechnologies.onionphone.onionvpn.core.model.observability.OpTrace
 import ltechnologies.onionphone.onionvpn.core.vpn.OnionVpnService
 import ltechnologies.onionphone.onionvpn.core.vpn.firewall.FirewallBridge
 import ltechnologies.onionphone.onionvpn.core.vpn.firewall.PacketFirewall
+import timber.log.Timber
 
 /**
  * System-level leak surfaces the TUN cannot fix alone (Tor VPN Threat Model):
@@ -19,7 +21,8 @@ import ltechnologies.onionphone.onionvpn.core.vpn.firewall.PacketFirewall
  */
 object SystemLeakInspector {
     fun inspect(context: Context, killSwitchExpected: Boolean): List<ValidationCheck> {
-        return buildList {
+        OpTrace.debug("validate", "SystemLeakInspector begin killSwitchExpected=$killSwitchExpected")
+        val checks = buildList {
             add(checkAlwaysOnLockdown(context, killSwitchExpected))
             add(checkPrivateDns(context))
             add(checkCaptivePortal(context))
@@ -28,6 +31,22 @@ object SystemLeakInspector {
             add(checkFirewallEngine())
             add(checkFirewallProxyCoverage())
         }
+        val fails = checks.count { it.status == ValidationStatus.Fail }
+        val soft = checks.count {
+            it.status == ValidationStatus.Fail && !it.tripsKillSwitch
+        }
+        Timber.i(
+            "SystemLeakInspector done checks=%d fail=%d softFail≈%d",
+            checks.size,
+            fails,
+            soft,
+        )
+        checks.filter { it.status == ValidationStatus.Fail }.forEach { c ->
+            val level = if (c.tripsKillSwitch) "HARD" else "SOFT"
+            Timber.w("[%s FAIL] %s: %s", level, c.id, c.detail)
+            OpTrace.warn("validate", "[$level] ${c.id}: ${c.detail}")
+        }
+        return checks
     }
 
     private fun checkAlwaysOnLockdown(

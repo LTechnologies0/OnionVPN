@@ -288,9 +288,15 @@ object TunnelEndpoints {
     /** OpenVPN-over-Tor control/data channel (IsolateSOCKSAuth). */
     const val SESSION_GROUP_OPENVPN = 5
 
-    /** SOCKS auth for OpenVPN → dedicated SocksPort SessionGroup. */
-    const val SOCKS_OPENVPN_USER = "openvpn"
-    const val SOCKS_OPENVPN_PASS = "overtor"
+    /**
+     * SOCKS auth for OpenVPN → dedicated SocksPort SessionGroup / onionmasq sidecar.
+     *
+     * Use `u…`/`p…` form so it matches the sidecar `u{id}` → `p{id}` allowlist already
+     * shipped in `libonionmasq_mobile.so` (literal `openvpn`/`overtor` needs a rebuild).
+     * C Tor IsolateSOCKSAuth and Arti accept any username/password.
+     */
+    const val SOCKS_OPENVPN_USER = "uopenvpn"
+    const val SOCKS_OPENVPN_PASS = "popenvpn"
 
     /**
      * Stable PAC HTTP listen port (URL does not change across sessions).
@@ -424,6 +430,10 @@ data class TunnelSnapshot(
      * 0 = no cooldown.
      */
     val newNymCooldownUntilMs: Long = 0L,
+    /** OpenVPN-over-Tor data+control plane usable (Via OVPN). */
+    val openVpnUp: Boolean = false,
+    /** Idle / Starting / Up / Error detail from OpenVpnOverTorManager. */
+    val openVpnDetail: String = "",
 ) {
     val isBusy: Boolean
         get() = when (phase) {

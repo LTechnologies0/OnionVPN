@@ -35,11 +35,14 @@ internal object TunnelSnapshotBuilder {
          */
         onionmasqReady: Boolean = false,
         newNymCooldownUntilMs: Long = 0L,
+        openVpnUp: Boolean = false,
+        openVpnDetail: String = "",
     ): TunnelSnapshot {
         val caps = torEngine.capabilities
         val proxiesLive = phase == TunnelPhase.Connected ||
             phase == TunnelPhase.Validating ||
-            phase == TunnelPhase.StartingVpn
+            phase == TunnelPhase.StartingVpn ||
+            phase == TunnelPhase.StartingOpenVpn
         // On onionmasq, "torRunning" in the snapshot means the data-plane TorClient is live,
         // not arti-mobile ProcessManager.
         val engineLive = torRunning || onionmasqReady
@@ -99,6 +102,8 @@ internal object TunnelSnapshotBuilder {
             httpProxy = "", // HTTPTunnelPort disabled — use PAC bridge (DNSCrypt), not Tor exit DNS
             identityRefreshing = identityRefreshing,
             newNymCooldownUntilMs = newNymCooldownUntilMs,
+            openVpnUp = openVpnUp,
+            openVpnDetail = openVpnDetail,
         )
     }
 

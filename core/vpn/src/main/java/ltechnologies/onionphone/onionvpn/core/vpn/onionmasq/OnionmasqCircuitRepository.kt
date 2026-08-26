@@ -8,6 +8,7 @@ import org.torproject.onionmasq.events.NewConnectionEvent
 import org.torproject.onionmasq.events.NewDirectoryEvent
 import org.torproject.onionmasq.events.OnionmasqEvent
 import org.torproject.onionmasq.events.RelayDetails
+import timber.log.Timber
 
 /**
  * Tor-VPN-style circuit aggregation keyed by Android UID (mirrors onionmasq CircuitStore).
@@ -35,15 +36,28 @@ class OnionmasqCircuitRepository {
         connections.clear()
         countryCodesByApp.clear()
         relaysByCountry = emptyMap()
+        Timber.d("OnionmasqCircuitRepository reset")
     }
 
     fun handleEvent(event: OnionmasqEvent) {
         when (event) {
-            is NewConnectionEvent -> onNew(event)
+            is NewConnectionEvent -> {
+                Timber.v("onionmasq NewConnection appId=%s dst=%s", event.appId, event.torDst)
+                onNew(event)
+            }
             is ClosedConnectionEvent -> onClosed(event.proxySrc, event.proxyDst)
-            is FailedConnectionEvent -> onClosed(event.proxySrc, event.proxyDst)
+            is FailedConnectionEvent -> {
+                Timber.d(
+                    "onionmasq FailedConnection src=%s dst=%s error=%s",
+                    event.proxySrc,
+                    event.proxyDst,
+                    event.error,
+                )
+                onClosed(event.proxySrc, event.proxyDst)
+            }
             is NewDirectoryEvent -> {
                 relaysByCountry = event.relaysByCountry?.toMap() ?: emptyMap()
+                Timber.d("onionmasq NewDirectory countries=%d", relaysByCountry.size)
             }
             else -> Unit
         }

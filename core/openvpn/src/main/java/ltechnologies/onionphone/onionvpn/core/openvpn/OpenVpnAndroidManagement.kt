@@ -4,12 +4,17 @@ import android.net.LocalServerSocket
 import android.net.LocalSocket
 import android.net.LocalSocketAddress
 import android.os.ParcelFileDescriptor
+import android.system.ErrnoException
+import android.system.Os
+import android.system.OsConstants
 import java.io.File
 import java.io.FileDescriptor
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.lang.reflect.Method
 import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.concurrent.thread
 import timber.log.Timber
@@ -19,15 +24,25 @@ import timber.log.Timber
  *
  * Handles NEED-OK (IFCONFIG, ROUTE, DNS, OPENTUN, PROTECTFD, PERSIST_TUN_ACTION) and
  * SCM_RIGHTS for tun + protect FDs. For OPENTUN we send one end of a
- * [ParcelFileDescriptor.createSocketPair] so OpenVPN and OnionVPN share a
- * bidirectional IP-packet channel (Android tun FD semantics: read=outbound,
- * write=inbound) without replacing the VpnService TUN.
+ * **SOCK_DGRAM** AF_UNIX socketpair so OpenVPN and OnionVPN share a
+ * bidirectional IP-packet channel (Android tun FD semantics: one write = one IP
+ * packet; read=outbound, write=inbound) without replacing the VpnService TUN.
+ *
+ * [ParcelFileDescriptor.createSocketPair] is SOCK_STREAM and coalesces frames —
+ * SoftEther SecureNAT then sees garbled TCP (HTTPS RST) while keepalive BYTECOUNT
+ * still looks healthy.
  */
 internal class OpenVpnAndroidManagement(
     private val sockFile: File,
     private val protectSocket: (Int) -> Boolean,
     private val onDataPlaneReady: (ParcelFileDescriptor) -> Unit,
     private val onControlConnected: () -> Unit,
+    /**
+     * Fired when management leaves CONNECTED (RECONNECTING / WAIT / EXITING / …).
+     * Caller should clear Via OVPN until CONNECTED returns; keep OPENTUN pump alive
+     * across soft-restarts (`persist-tun`).
+     */
+    private val onControlNotReady: (String) -> Unit = {},
     private val onFatal: (String) -> Unit,
     private val authUser: String = "",
     private val authPassword: String = "",
@@ -37,8 +52,15 @@ internal class OpenVpnAndroidManagement(
     private var client: LocalSocket? = null
     private var thread: Thread? = null
     private val pendingProtectFds = ConcurrentLinkedQueue<FileDescriptor>()
+    private var listeningLatch = CountDownLatch(1)
+
+    /** True after unix server is bound (OpenVPN may connect). */
+    fun awaitListening(timeoutMs: Long): Boolean =
+        listeningLatch.await(timeoutMs, TimeUnit.MILLISECONDS)
+
     fun start() {
         stop()
+        listeningLatch = CountDownLatch(1)
         sockFile.parentFile?.mkdirs()
         if (sockFile.exists()) sockFile.delete()
         val local = LocalSocket()
@@ -50,6 +72,7 @@ internal class OpenVpnAndroidManagement(
         )
         server = LocalServerSocket(local.fileDescriptor)
         running.set(true)
+        listeningLatch.countDown()
         thread = thread(name = "onionvpn-ovpn-mgmt", isDaemon = true) {
             try {
                 val c = server!!.accept()
@@ -76,6 +99,8 @@ internal class OpenVpnAndroidManagement(
         thread = null
         pendingProtectFds.clear()
         if (sockFile.exists()) sockFile.delete()
+        // Unblock any waiter if stop raced before bind completed.
+        if (listeningLatch.count > 0L) listeningLatch.countDown()
     }
 
     private fun pump(sock: LocalSocket) {
@@ -90,6 +115,9 @@ internal class OpenVpnAndroidManagement(
             collectAncillaryFds(sock)
             processLine(sock, line.trim())
         }
+        if (running.get()) {
+            onControlNotReady("management EOF")
+        }
     }
 
     private fun processLine(sock: LocalSocket, line: String) {
@@ -98,20 +126,51 @@ internal class OpenVpnAndroidManagement(
         when {
             line.startsWith(">HOLD:") -> writeCmd(sock, "hold release\n")
             line.startsWith(">NEED-OK:") -> handleNeedOk(sock, line.removePrefix(">NEED-OK:").trim())
-            line.startsWith(">STATE:") && line.contains(",CONNECTED,") -> onControlConnected()
+            line.startsWith(">STATE:") -> handleState(line)
             line.startsWith(">PASSWORD:") -> handlePassword(sock, line)
             line.startsWith(">FATAL:") -> onFatal(line)
         }
     }
 
+    private fun handleState(line: String) {
+        // >STATE:ts,CONNECTED,...  |  >STATE:ts,AUTH_FAILED,... | RECONNECTING | …
+        when {
+            line.contains(",CONNECTED,") -> onControlConnected()
+            line.contains(",AUTH_FAILED") -> {
+                // Soft reconnect AUTH_FAILED: demote Via OVPN but do not tear the process
+                // if OPENTUN is still held — OpenVPN may retry. Fatal only when never up.
+                onControlNotReady("AUTH_FAILED")
+                onFatal("OpenVPN AUTH_FAILED — check VPN username/password (VPN Gate: leave empty or vpn/vpn)")
+            }
+            line.contains(",EXITING,") -> {
+                onControlNotReady("EXITING")
+                // auth-failure already raised a specific fatal via PASSWORD / AUTH_FAILED.
+                if (!line.contains("auth-failure", ignoreCase = true)) {
+                    onFatal("OpenVPN exiting")
+                }
+            }
+            CONTROL_NOT_READY.any { line.contains(it) } -> onControlNotReady(line)
+        }
+    }
+
     private fun handlePassword(sock: LocalSocket, line: String) {
         // e.g. >PASSWORD:Need 'Auth' username/password
+        //      >PASSWORD:Verification Failed: 'Auth'
+        if (line.contains("Verification Failed", ignoreCase = true)) {
+            onFatal("OpenVPN Auth verification failed — check username/password")
+            return
+        }
         if (!line.contains("Auth", ignoreCase = true)) {
             onFatal("OpenVPN password type unsupported: $line")
             return
         }
         if (authUser.isEmpty() && authPassword.isEmpty()) {
-            onFatal("OpenVPN Auth required — set username/password in Settings (VPN Gate: vpn/vpn)")
+            // SoftEther/VPN Gate often Need Auth on soft-reconnect after a cert-only
+            // CONNECTED; answering with invented vpn/vpn causes AUTH_FAILED and kills
+            // a previously healthy Via OVPN session. Send empty credentials instead.
+            Timber.i("OVPN Auth requested with empty Settings — sending empty user/pass")
+            writeCmd(sock, "username \"Auth\" \"\"\n")
+            writeCmd(sock, "password \"Auth\" \"\"\n")
             return
         }
         // Escape quotes in credentials for management protocol.
@@ -121,10 +180,9 @@ internal class OpenVpnAndroidManagement(
     }
 
     private fun handleNeedOk(sock: LocalSocket, argument: String) {
-        // Formats: "OPENTUN tun" or "IFCONFIG 10.8.0.2 255.255.255.0 1500 net30"
-        val parts = argument.split(' ', limit = 2)
-        val needed = parts[0].trim().removeSurrounding("'")
-        val extra = parts.getOrNull(1)?.trim().orEmpty()
+        // ics-openvpn: Need 'IFCONFIG' confirmation MSG:10.8.0.2 …
+        // also tolerate bare: IFCONFIG 10.8.0.2 … / OPENTUN tun
+        val (needed, extra) = parseNeedOkArgument(argument)
         when (needed) {
             "PROTECTFD" -> {
                 val fd = pendingProtectFds.poll()
@@ -151,7 +209,13 @@ internal class OpenVpnAndroidManagement(
             "PERSIST_TUN_ACTION" -> writeCmd(sock, "needok 'PERSIST_TUN_ACTION' OPEN_BEFORE_CLOSE\n")
             // We deliberately do not apply ROUTE/DNS to the Android VpnService —
             // OnionVPN already owns the device TUN + DNSCrypt. Ack so OpenVPN proceeds.
-            "IFCONFIG", "IFCONFIG6", "ROUTE", "ROUTE6",
+            // IFCONFIG still sets OvpnIpNat so ALLOW_OVPN packets SNAT to SoftEther's
+            // assigned client IP (VpnService stays 10.8.0.2).
+            "IFCONFIG" -> {
+                OvpnIpNat.setFromIfconfigMsg(extra)
+                writeCmd(sock, "needok 'IFCONFIG' ok\n")
+            }
+            "IFCONFIG6", "ROUTE", "ROUTE6",
             "DNSSERVER", "DNS6SERVER", "DNSDOMAIN",
             -> writeCmd(sock, "needok '$needed' ok\n")
             else -> {
@@ -163,10 +227,9 @@ internal class OpenVpnAndroidManagement(
 
     private fun sendTunFd(sock: LocalSocket): Boolean {
         return try {
-            // Android VpnService TUN semantics (also what TARGET_ANDROID openvpn expects):
-            // read = outbound IP to encapsulate, write = inbound decrypted IP.
-            // A socketpair gives OpenVPN that duplex without replacing our VpnService TUN.
-            val pair = ParcelFileDescriptor.createSocketPair()
+            // Packet-oriented duplex (same as hev↔TunDnsMux): VpnService TUN and
+            // TARGET_ANDROID openvpn both expect one IP frame per read/write.
+            val pair = createPacketSocketPair()
             val ours = pair[0]
             val theirs = pair[1]
             val fdtosend = FileDescriptor()
@@ -178,7 +241,7 @@ internal class OpenVpnAndroidManagement(
             // Drop our handle to `theirs`; SCM_RIGHTS already dup'd it into the message.
             runCatching { theirs.close() }
             onDataPlaneReady(ours)
-            Timber.i("OVPN OPENTUN socketpair sent (Android tun FD semantics)")
+            Timber.i("OVPN OPENTUN SOCK_DGRAM socketpair sent (packet TUN semantics)")
             true
         } catch (e: Exception) {
             Timber.e(e, "OVPN OPENTUN failed")
@@ -209,6 +272,92 @@ internal class OpenVpnAndroidManagement(
     companion object {
         private var setIntMethod: Method? = null
         private var getIntMethod: Method? = null
+
+        /**
+         * AF_UNIX SOCK_DGRAM pair — one datagram = one IP packet (VpnService TUN / openvpn).
+         * Large buffers so SoftEther TLS bursts are not silently dropped when the pump lags.
+         */
+        fun createPacketSocketPair(): Array<ParcelFileDescriptor> {
+            val fd0 = FileDescriptor()
+            val fd1 = FileDescriptor()
+            try {
+                Os.socketpair(OsConstants.AF_UNIX, OsConstants.SOCK_DGRAM, 0, fd0, fd1)
+            } catch (error: ErrnoException) {
+                throw IllegalStateException(
+                    "OVPN OPENTUN socketpair failed errno=${error.errno}: ${error.message}",
+                    error,
+                )
+            }
+            var left: ParcelFileDescriptor? = null
+            var right: ParcelFileDescriptor? = null
+            try {
+                runCatching {
+                    val buf = 4 * 1024 * 1024
+                    Os.setsockoptInt(fd0, OsConstants.SOL_SOCKET, OsConstants.SO_SNDBUF, buf)
+                    Os.setsockoptInt(fd0, OsConstants.SOL_SOCKET, OsConstants.SO_RCVBUF, buf)
+                    Os.setsockoptInt(fd1, OsConstants.SOL_SOCKET, OsConstants.SO_SNDBUF, buf)
+                    Os.setsockoptInt(fd1, OsConstants.SOL_SOCKET, OsConstants.SO_RCVBUF, buf)
+                }
+                left = ParcelFileDescriptor.dup(fd0)
+                right = ParcelFileDescriptor.dup(fd1)
+                runCatching { Os.close(fd0) }
+                runCatching { Os.close(fd1) }
+                return arrayOf(left, right)
+            } catch (error: Throwable) {
+                runCatching { left?.close() }
+                runCatching { right?.close() }
+                runCatching { Os.close(fd0) }
+                runCatching { Os.close(fd1) }
+                throw IllegalStateException(
+                    "OVPN OPENTUN socketpair wrap failed: ${error.message}",
+                    error,
+                )
+            }
+        }
+
+        /** Management states that mean control channel is not usable for Via OVPN. */
+        private val CONTROL_NOT_READY = listOf(
+            ",RECONNECTING,",
+            ",WAIT,",
+            ",CONNECTING,",
+            ",RESOLVE,",
+            ",TCP_CONNECT,",
+            ",GET_CONFIG,",
+            ",ASSIGN_IP,",
+            ",ADD_ROUTES,",
+        )
+
+        private val NEED_OK_ICS = Regex(
+            """^Need\s+'([^']+)'\s+confirmation(?:\s+MSG:(.*))?$""",
+            RegexOption.IGNORE_CASE,
+        )
+
+        /**
+         * Parse management NEED-OK payload after `>NEED-OK:`.
+         * @return type (e.g. IFCONFIG) and MSG/extra body
+         */
+        fun parseNeedOkArgument(argument: String): Pair<String, String> {
+            val trimmed = argument.trim()
+            NEED_OK_ICS.matchEntire(trimmed)?.let { m ->
+                return m.groupValues[1] to m.groupValues[2].trim()
+            }
+            // Fallback: first token is type (legacy / bare OpenVPN)
+            val parts = trimmed.split(' ', limit = 2)
+            val type = parts[0].trim().removeSurrounding("'")
+            val rest = parts.getOrNull(1)?.trim().orEmpty()
+            return type to rest.removePrefix("confirmation").trim()
+                .removePrefix("MSG:").trim()
+        }
+
+        /** True if management STATE line means CONNECTED. */
+        fun isConnectedState(line: String): Boolean = line.contains(",CONNECTED,")
+
+        /** True if STATE line means control is down / reconnecting (not CONNECTED). */
+        fun isControlNotReadyState(line: String): Boolean =
+            !isConnectedState(line) &&
+                (line.contains(",AUTH_FAILED") ||
+                    line.contains(",EXITING,") ||
+                    CONTROL_NOT_READY.any { line.contains(it) })
 
         private fun reflectSetInt(fd: FileDescriptor, value: Int) {
             val m = setIntMethod ?: FileDescriptor::class.java
@@ -253,6 +402,16 @@ internal class OpenVpnTunPump(
                 while (running.get()) {
                     val n = input.read(buf)
                     if (n <= 0) break
+                    if (!OvpnIpNat.dnatInbound(buf, n)) continue
+                    if (inboundLogBudget.getAndDecrement() > 0) {
+                        val src = if (n >= 20) {
+                            "${buf[12].toInt() and 0xff}.${buf[13].toInt() and 0xff}." +
+                                "${buf[14].toInt() and 0xff}.${buf[15].toInt() and 0xff}"
+                        } else {
+                            "?"
+                        }
+                        Timber.i("OVPN DNAT inject len=%d src=%s", n, src)
+                    }
                     onInbound(buf, n)
                 }
             } catch (_: InterruptedException) {
@@ -264,10 +423,25 @@ internal class OpenVpnTunPump(
 
     fun offerOutbound(packet: ByteArray, length: Int): Boolean {
         if (!running.get()) return false
+        // Copy before SNAT — TunDnsMux may reuse the read buffer for the next packet.
+        val frame = packet.copyOf(length)
+        if (!OvpnIpNat.snatOutbound(frame, length)) {
+            Timber.v("OVPN outbound skipped — IP NAT not ready or non-IPv4")
+            return false
+        }
         return try {
             synchronized(outLock) {
-                out.write(packet, 0, length)
+                out.write(frame, 0, length)
                 out.flush()
+            }
+            if (outboundLogBudget.getAndDecrement() > 0) {
+                val dst = if (length >= 20) {
+                    "${frame[16].toInt() and 0xff}.${frame[17].toInt() and 0xff}." +
+                        "${frame[18].toInt() and 0xff}.${frame[19].toInt() and 0xff}"
+                } else {
+                    "?"
+                }
+                Timber.i("OVPN SNAT write len=%d dst=%s", length, dst)
             }
             true
         } catch (e: Exception) {
@@ -282,5 +456,10 @@ internal class OpenVpnTunPump(
         reader = null
         runCatching { out.close() }
         runCatching { tun.close() }
+    }
+
+    companion object {
+        private val outboundLogBudget = java.util.concurrent.atomic.AtomicInteger(48)
+        private val inboundLogBudget = java.util.concurrent.atomic.AtomicInteger(24)
     }
 }

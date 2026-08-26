@@ -9,6 +9,8 @@ import java.net.InetSocketAddress
 import java.net.Socket
 import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
 import ltechnologies.onionphone.onionvpn.core.model.TunnelRuntimePorts
+import ltechnologies.onionphone.onionvpn.core.model.observability.OpTrace
+import timber.log.Timber
 
 /**
  * Package `lifecycle` — SOCKS/DNSPort readiness probes for the Tor start pipeline.
@@ -29,11 +31,17 @@ import ltechnologies.onionphone.onionvpn.core.model.TunnelRuntimePorts
 object TorReadiness {
     /** TCP connect to loopback SOCKS. Throws on failure. */
     fun assertSocksReady(port: Int, timeoutMs: Int = 800) {
-        Socket().use { socket ->
-            socket.connect(
-                InetSocketAddress(TunnelEndpoints.LOOPBACK, port),
-                timeoutMs,
-            )
+        Timber.v("SOCKS readiness probe :%d timeoutMs=%d", port, timeoutMs)
+        try {
+            Socket().use { socket ->
+                socket.connect(
+                    InetSocketAddress(TunnelEndpoints.LOOPBACK, port),
+                    timeoutMs,
+                )
+            }
+        } catch (e: Exception) {
+            Timber.d(e, "SOCKS not ready :%d", port)
+            throw e
         }
     }
 
@@ -46,18 +54,24 @@ object TorReadiness {
      * @throws Exception on send/receive failure or timeout
      */
     fun assertDnsPortReady(port: Int, timeoutMs: Int = 8_000) {
-        DatagramSocket(0, InetAddress.getByName(TunnelEndpoints.LOOPBACK)).use { socket ->
-            socket.soTimeout = timeoutMs
-            socket.send(
-                DatagramPacket(
-                    MINIMAL_DNS_QUERY,
-                    MINIMAL_DNS_QUERY.size,
-                    InetAddress.getByName(TunnelEndpoints.LOOPBACK),
-                    port,
-                ),
-            )
-            val response = DatagramPacket(ByteArray(512), 512)
-            socket.receive(response)
+        Timber.v("DNSPort UDP readiness probe :%d timeoutMs=%d", port, timeoutMs)
+        try {
+            DatagramSocket(0, InetAddress.getByName(TunnelEndpoints.LOOPBACK)).use { socket ->
+                socket.soTimeout = timeoutMs
+                socket.send(
+                    DatagramPacket(
+                        MINIMAL_DNS_QUERY,
+                        MINIMAL_DNS_QUERY.size,
+                        InetAddress.getByName(TunnelEndpoints.LOOPBACK),
+                        port,
+                    ),
+                )
+                val response = DatagramPacket(ByteArray(512), 512)
+                socket.receive(response)
+            }
+        } catch (e: Exception) {
+            Timber.d(e, "DNSPort UDP not ready :%d", port)
+            throw e
         }
     }
 
@@ -69,24 +83,30 @@ object TorReadiness {
      * @throws Exception on connect / framing / timeout
      */
     fun assertDnsPortTcpReady(port: Int, timeoutMs: Int = 8_000) {
-        Socket().use { socket ->
-            socket.connect(InetSocketAddress(TunnelEndpoints.LOOPBACK, port), timeoutMs.coerceAtLeast(500))
-            socket.soTimeout = timeoutMs
-            // Do not close stream wrappers — that closes the Socket before the answer.
-            val out = DataOutputStream(socket.getOutputStream())
-            out.writeShort(MINIMAL_DNS_QUERY.size)
-            out.write(MINIMAL_DNS_QUERY)
-            out.flush()
-            val inp = DataInputStream(socket.getInputStream())
-            val len = inp.readUnsignedShort()
-            if (len < 12 || len > 4_096) {
-                throw IllegalStateException("DNS TCP answer length=$len")
+        Timber.v("DNSPort TCP readiness probe :%d timeoutMs=%d", port, timeoutMs)
+        try {
+            Socket().use { socket ->
+                socket.connect(InetSocketAddress(TunnelEndpoints.LOOPBACK, port), timeoutMs.coerceAtLeast(500))
+                socket.soTimeout = timeoutMs
+                // Do not close stream wrappers — that closes the Socket before the answer.
+                val out = DataOutputStream(socket.getOutputStream())
+                out.writeShort(MINIMAL_DNS_QUERY.size)
+                out.write(MINIMAL_DNS_QUERY)
+                out.flush()
+                val inp = DataInputStream(socket.getInputStream())
+                val len = inp.readUnsignedShort()
+                if (len < 12 || len > 4_096) {
+                    throw IllegalStateException("DNS TCP answer length=$len")
+                }
+                val resp = ByteArray(len)
+                inp.readFully(resp)
+                if (resp[0] != MINIMAL_DNS_QUERY[0] || resp[1] != MINIMAL_DNS_QUERY[1]) {
+                    throw IllegalStateException("DNS TCP answer TXID mismatch")
+                }
             }
-            val resp = ByteArray(len)
-            inp.readFully(resp)
-            if (resp[0] != MINIMAL_DNS_QUERY[0] || resp[1] != MINIMAL_DNS_QUERY[1]) {
-                throw IllegalStateException("DNS TCP answer TXID mismatch")
-            }
+        } catch (e: Exception) {
+            Timber.d(e, "DNSPort TCP not ready :%d", port)
+            throw e
         }
     }
 
@@ -106,6 +126,12 @@ object TorReadiness {
      * deadlock / 180s timeout). Use [isPrimarySocksReady] for Arti.
      */
     fun assertSocksPortsReady(ports: TunnelRuntimePorts) {
+        OpTrace.debug(
+            "tor",
+            "assertSocksPortsReady socks=${ports.torSocksPort} " +
+                "dnscrypt=${ports.torDnsCryptSocksPort} probe=${ports.torProbeSocksPort} " +
+                "ovpn=${ports.torOpenVpnSocksPort}",
+        )
         assertSocksReady(ports.torSocksPort)
         assertSocksReady(ports.torDnsCryptSocksPort)
         assertSocksReady(ports.torProbeSocksPort)
@@ -133,8 +159,10 @@ object TorReadiness {
      * @throws Exception from the first failing probe
      */
     fun assertAllListenersReady(ports: TunnelRuntimePorts) {
+        OpTrace.info("tor", "assertAllListenersReady dns=${ports.torDnsPort}")
         assertSocksPortsReady(ports)
         assertDnsPortReady(ports.torDnsPort)
+        OpTrace.info("tor", "all Tor listeners ready")
     }
 
     private val MINIMAL_DNS_QUERY = byteArrayOf(

@@ -168,10 +168,14 @@ class TunDnsMux(
                             val blackhole = LeakPacketFilter.blackholeBeforeTorTcp(buf, n)
                             if (blackhole != null) {
                                 LeakPacketFilter.noteBlackhole(blackhole)
-                                // Silent drops stall app failover: UDP→ICMP port-unreachable
-                                // (QUIC→TCP); clearnet IPv6 TCP→RST (Happy Eyeballs→IPv4).
-                                val reject = IcmpUnreachable.buildForBlackholedUdp(buf, n)
-                                    ?: TcpRstUnreachable.buildForBlackholedTcp(buf, n)
+                                // UDP→ICMP port-unreachable (QUIC→TCP). Clearnet IPv6 TCP: silent
+                                // drop (not RST) so Chromium Happy Eyeballs can finish on IPv4 —
+                                // RST was aborting HTTPS navigations while HTTP still worked.
+                                val reject = when (blackhole) {
+                                    LeakPacketFilter.BlackholeReason.Ipv6 -> null
+                                    else -> IcmpUnreachable.buildForBlackholedUdp(buf, n)
+                                        ?: TcpRstUnreachable.buildForBlackholedTcp(buf, n)
+                                }
                                 reject?.let { pkt ->
                                     synchronized(tunWriteLock) {
                                         if (running.get() && generation.get() == gen) {
@@ -186,10 +190,14 @@ class TunDnsMux(
                                     }
                                     FirewallVerdict.ALLOW_OVPN -> {
                                         val sink = FirewallBridge.ovpnPacketSink
-                                        if (sink == null || !FirewallBridge.openVpnOverTorUp) {
-                                            // Fail-closed: OVPN route without live tunnel.
-                                        } else if (!sink.offer(buf, n)) {
-                                            Timber.d("OVPN sink rejected packet")
+                                        if (sink != null && FirewallBridge.openVpnOverTorUp &&
+                                            sink.offer(buf, n)
+                                        ) {
+                                            // OK
+                                        } else {
+                                            Timber.w("ALLOW_OVPN demoted to Tor — OVPN data plane unavailable")
+                                            stampTcpUid(buf, n)
+                                            writeHev(localHevOut, buf, n)
                                         }
                                     }
                                     FirewallVerdict.ALLOW_TOR -> {

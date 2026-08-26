@@ -20,8 +20,9 @@ import ltechnologies.onionphone.onionvpn.tunnel.TunnelOrchestrator
 import timber.log.Timber
 
 /**
- * Starts the Tor + DNSCrypt tunnel after device boot when the user opted in
- * ([ltechnologies.onionphone.onionvpn.core.model.TunnelPreferences.autoStartOnBoot]).
+ * Starts the Tor + DNSCrypt tunnel after device boot when
+ * [ltechnologies.onionphone.onionvpn.core.model.TunnelPreferences.autoStartOnBoot]
+ * is true (release default On; debug default Off).
  *
  * Also handles [Intent.ACTION_USER_UNLOCKED]: closing/reopening an Android Private Space
  * kills the VPN process; OS Always-On may leave a Blocking TUN without Tor. Unlock is a

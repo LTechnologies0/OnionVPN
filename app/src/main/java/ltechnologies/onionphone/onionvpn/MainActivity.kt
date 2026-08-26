@@ -32,6 +32,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
@@ -57,6 +58,7 @@ import ltechnologies.onionphone.onionvpn.ui.FirewallScreen
 import ltechnologies.onionphone.onionvpn.ui.LogsScreen
 import ltechnologies.onionphone.onionvpn.ui.SettingsScreen
 import ltechnologies.onionphone.onionvpn.ui.StatusScreen
+import ltechnologies.onionphone.onionvpn.ui.WelcomeDialog
 import ltechnologies.onionphone.onionvpn.ui.applock.AppLockGate
 import ltechnologies.onionphone.onionvpn.ui.theme.OnionVpnTheme
 import ltechnologies.onionphone.onionvpn.util.BatteryOptimization
@@ -120,8 +122,25 @@ class MainActivity : FragmentActivity() {
                     // DEBUG builds skip implicit auto-start — Waydroid TCP adb dies under
                     // Blocking kill-switch during Tor bootstrap (use debug_start_tunnel or UI).
                     // Re-runs on onNewIntent via debugIntentEpoch (singleTop / already-running).
+                    // First-launch: wait until welcome dialog is dismissed.
                     LaunchedEffect(debugEpoch) {
                         handleStartupTunnelIntent(intent, isInitial = debugEpoch == 0)
+                    }
+                    // After first-launch Got it: start tunnel if release auto-start is on.
+                    var welcomePendingAutoStart by remember { mutableStateOf(false) }
+                    LaunchedEffect(Unit) {
+                        val stored = viewModel.awaitStoredPreferences()
+                        welcomePendingAutoStart = !stored.welcomeCompleted
+                    }
+                    LaunchedEffect(preferences.welcomeCompleted) {
+                        if (welcomePendingAutoStart && preferences.welcomeCompleted) {
+                            welcomePendingAutoStart = false
+                            if (!BuildConfig.DEBUG &&
+                                viewModel.shouldAutoStartTunnel(preferences)
+                            ) {
+                                requestNotificationsThenStart()
+                            }
+                        }
                     }
 
                     LaunchedEffect(preferences.noLogsEnabled) {
@@ -189,6 +208,10 @@ class MainActivity : FragmentActivity() {
             Timber.w("Ignoring debug_start/stop extras in non-DEBUG build")
             if (!isInitial) return
             val prefs = viewModel.awaitStoredPreferences()
+            if (!prefs.welcomeCompleted) {
+                Timber.i("Defer auto-start until welcome dialog is dismissed")
+                return
+            }
             if (viewModel.shouldAutoStartTunnel(prefs)) {
                 requestNotificationsThenStart()
             }
@@ -219,6 +242,10 @@ class MainActivity : FragmentActivity() {
         if (!isInitial) return
         if (!BuildConfig.DEBUG) {
             val prefs = viewModel.awaitStoredPreferences()
+            if (!prefs.welcomeCompleted) {
+                Timber.i("Defer auto-start until welcome dialog is dismissed")
+                return
+            }
             if (viewModel.shouldAutoStartTunnel(prefs)) {
                 requestNotificationsThenStart()
             }
@@ -286,6 +313,14 @@ private fun OnionVpnApp(
     torSocksPort: () -> Int?,
 ) {
     var selected by remember { mutableIntStateOf(0) }
+    var showWelcome by remember { mutableStateOf(false) }
+    var welcomeUserRequested by remember { mutableStateOf(false) }
+    LaunchedEffect(preferences.welcomeCompleted) {
+        when {
+            !preferences.welcomeCompleted -> showWelcome = true
+            !welcomeUserRequested -> showWelcome = false
+        }
+    }
     data class Dest(
         val label: String,
         val selectedIcon: ImageVector,
@@ -297,6 +332,21 @@ private fun OnionVpnApp(
         Dest("Logs", Icons.AutoMirrored.Filled.List, Icons.AutoMirrored.Outlined.List),
         Dest("Settings", Icons.Filled.Settings, Icons.Outlined.Settings),
     )
+
+    if (showWelcome) {
+        WelcomeDialog(
+            onDismiss = {
+                showWelcome = false
+                welcomeUserRequested = false
+                if (!preferences.welcomeCompleted) {
+                    onSavePreferences(
+                        preferences.copy(welcomeCompleted = true),
+                        false,
+                    )
+                }
+            },
+        )
+    }
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
@@ -349,6 +399,10 @@ private fun OnionVpnApp(
                     controlsEnabled = !snapshot.isBusy &&
                         !snapshot.identityRefreshing &&
                         snapshot.phase != ltechnologies.onionphone.onionvpn.core.model.TunnelPhase.Stopping,
+                    onShowWelcome = {
+                        welcomeUserRequested = true
+                        showWelcome = true
+                    },
                 )
             }
         }

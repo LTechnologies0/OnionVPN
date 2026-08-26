@@ -188,9 +188,13 @@ class UidIsolatingTunForwarder(
                 FirewallVerdict.ALLOW_OVPN -> {
                     val sink = FirewallBridge.ovpnPacketSink
                     if (sink == null || !FirewallBridge.openVpnOverTorUp || !sink.offer(buf, length)) {
-                        VpnForwarderDebug.uidLog { "Drop SYN — OVPN unavailable uid=$uid $remoteHost:${meta.dstPort}" }
+                        VpnForwarderDebug.uidLog {
+                            "ALLOW_OVPN demoted to Tor — OVPN unavailable uid=$uid $remoteHost:${meta.dstPort}"
+                        }
+                        // Fall through to Tor session below.
+                    } else {
+                        return
                     }
-                    return
                 }
                 FirewallVerdict.ALLOW_TOR -> Unit
             }

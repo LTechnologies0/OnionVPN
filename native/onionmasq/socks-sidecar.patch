@@ -704,7 +704,8 @@ index 0000000..7712330
 +    } else if username == "onionvpn" {
 +        Some(b"stream".to_vec())
 +    } else if username == "openvpn" {
-+        // TunnelEndpoints OpenVPN-over-Tor SOCKS (ArtiSocksRoleMux → sidecar).
++        // Prefer TunnelEndpoints uopenvpn/popenvpn (works on older sidecars via u*→p*).
++        // Literal openvpn/overtor kept for patched builds / docs.
 +        Some(b"overtor".to_vec())
 +    } else if let Some(rest) = username.strip_prefix('u') {
 +        if rest.is_empty() || rest == "unknown" {

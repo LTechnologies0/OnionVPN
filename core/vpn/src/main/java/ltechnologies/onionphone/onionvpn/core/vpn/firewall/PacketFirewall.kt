@@ -3,7 +3,19 @@ package ltechnologies.onionphone.onionvpn.core.vpn.firewall
 import ltechnologies.onionphone.onionvpn.core.model.FirewallVerdict
 
 /**
- * Hot-path gate for outbound TUN packets / loopback SOCKS (PAC).
+ * Which loopback SOCKS plane is asking for a CONNECT verdict.
+ * Both must hit the interactive engine — never dial Tor SOCKS without a review.
+ */
+enum class SocksConnectPlane {
+    /** hev → [SocksUidBridge] → Tor (TUN already gated SYN; CONNECT re-checks). */
+    HEV_UID_BRIDGE,
+
+    /** App PAC URL → [DnsCryptSocksBridge] (never hits TUN; sole gate). */
+    PAC_DNSCRYPT_BRIDGE,
+}
+
+/**
+ * Hot-path gate for outbound TUN packets / loopback SOCKS (PAC + hev bridge).
  * Implementations may block briefly while waiting for an interactive verdict.
  */
 interface PacketFirewall {
@@ -20,14 +32,15 @@ interface PacketFirewall {
         outboundRoute(packet, length).forwards
 
     /**
-     * Gate for loopback SOCKS (PAC bridge) that never hits the TUN.
-     * Default allow via Tor — interactive engine overrides.
+     * Gate for loopback SOCKS CONNECT (PAC bridge / hev UID bridge) that may not
+     * hit the TUN packet path. Default allow via Tor — interactive engine overrides.
      */
     fun socksConnectRoute(
         uid: Int,
         destHost: String,
         destIp: String,
         destPort: Int,
+        plane: SocksConnectPlane = SocksConnectPlane.PAC_DNSCRYPT_BRIDGE,
     ): FirewallVerdict = FirewallVerdict.ALLOW_TOR
 
     fun allowSocksConnect(
@@ -35,7 +48,8 @@ interface PacketFirewall {
         destHost: String,
         destIp: String,
         destPort: Int,
-    ): Boolean = socksConnectRoute(uid, destHost, destIp, destPort).forwards
+        plane: SocksConnectPlane = SocksConnectPlane.PAC_DNSCRYPT_BRIDGE,
+    ): Boolean = socksConnectRoute(uid, destHost, destIp, destPort, plane).forwards
 
     companion object {
         val AllowAll: PacketFirewall = object : PacketFirewall {

@@ -45,6 +45,10 @@ internal class TunnelVpnBridge(
                     OnionVpnService.EXTRA_ALLOW_ADB_CLEARNET_LEAK,
                     preferences.allowAdbClearnetLeak,
                 )
+                putExtra(
+                    OnionVpnService.EXTRA_REQUIRE_OS_LOCKDOWN,
+                    preferences.requireOsLockdown,
+                )
                 putExtra(OnionVpnService.EXTRA_TUN_DATA_PLANE, preferences.tunDataPlane.name)
                 putExtra(OnionVpnService.EXTRA_TOR_ENGINE, preferences.torEngine.name)
                 putExtra(OnionVpnService.EXTRA_BRIDGE_LINES, preferences.torBridges)

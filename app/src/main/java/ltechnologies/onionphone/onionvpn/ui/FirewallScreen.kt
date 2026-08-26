@@ -15,10 +15,12 @@ import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
@@ -48,6 +50,9 @@ fun FirewallScreen(
     val rules by engine.rulesFlow().collectAsStateWithLifecycle()
     val queueDepth by engine.queueDepth.collectAsStateWithLifecycle()
     val pending by engine.pendingPrompt.collectAsStateWithLifecycle()
+    val hasOvpnRules = remember(rules) {
+        rules.any { it.verdict == FirewallVerdict.ALLOW_OVPN }
+    }
 
     LazyColumn(
         modifier = Modifier
@@ -102,6 +107,16 @@ fun FirewallScreen(
         if (rules.isNotEmpty()) {
             item {
                 SectionHeader(title = "Active rules")
+            }
+            if (hasOvpnRules) {
+                item {
+                    OutlinedButton(
+                        onClick = { engine.clearAllOvpnRules() },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text("Clear Via OVPN rules")
+                    }
+                }
             }
             items(rules, key = { it.id }) { rule ->
                 RuleRow(rule = rule, onDelete = { engine.deleteRule(rule.id) })

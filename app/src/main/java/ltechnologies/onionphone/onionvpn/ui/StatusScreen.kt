@@ -206,6 +206,21 @@ fun StatusScreen(
             StatusDot(active = snapshot.dnsCryptRunning, label = "DNSCrypt")
             StatusDot(active = snapshot.vpnEstablished, label = "VPN")
             StatusDot(active = snapshot.killSwitchEnabled, label = "Kill switch")
+            if (snapshot.openVpnDetail.isNotBlank() || snapshot.openVpnUp) {
+                StatusDot(active = snapshot.openVpnUp, label = "Via OVPN")
+            }
+        }
+
+        if (snapshot.openVpnDetail.isNotBlank()) {
+            Text(
+                text = "OpenVPN-over-Tor: ${snapshot.openVpnDetail}",
+                style = MaterialTheme.typography.bodySmall,
+                color = if (snapshot.openVpnUp) {
+                    MaterialTheme.colorScheme.primary
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                },
+            )
         }
 
         if (snapshot.torRuntimeReady || snapshot.torControlConnected || snapshot.torBootstrapProgress > 0) {

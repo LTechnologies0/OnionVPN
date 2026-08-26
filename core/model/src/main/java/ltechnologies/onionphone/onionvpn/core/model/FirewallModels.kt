@@ -46,11 +46,14 @@ enum class FirewallRuleScope {
  * Least-privilege default when interactive firewall is on and no rule matches.
  * ASK queues a prompt until the user answers (no timeout).
  * [ALLOW] means [FirewallVerdict.ALLOW_TOR] (historical behaviour).
+ * [ALLOW_OVPN] means [FirewallVerdict.ALLOW_OVPN] when OpenVPN-over-Tor is up;
+ * otherwise falls back to Tor (never invents OVPN when the data plane is down).
  */
 enum class FirewallDefaultAction {
     ASK,
     DENY,
     ALLOW,
+    ALLOW_OVPN,
 }
 
 data class FirewallRule(

@@ -19,6 +19,7 @@ import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
 import ltechnologies.onionphone.onionvpn.core.model.TorNetPolicy
 import ltechnologies.onionphone.onionvpn.core.vpn.firewall.ConnectionOwnerResolver
 import ltechnologies.onionphone.onionvpn.core.vpn.firewall.FirewallBridge
+import ltechnologies.onionphone.onionvpn.core.vpn.firewall.SocksConnectPlane
 import ltechnologies.onionphone.onionvpn.core.vpn.forwarder.Socks5Client
 import timber.log.Timber
 
@@ -191,6 +192,7 @@ class DnsCryptSocksBridge(
                             destHost = host,
                             destIp = "",
                             destPort = port,
+                            plane = SocksConnectPlane.PAC_DNSCRYPT_BRIDGE,
                         )
                     ) {
                         safeReply(output, REP_NOT_ALLOWED)
@@ -228,6 +230,7 @@ class DnsCryptSocksBridge(
                             destHost = host,
                             destIp = resolvedIp,
                             destPort = port,
+                            plane = SocksConnectPlane.PAC_DNSCRYPT_BRIDGE,
                         )
                     ) {
                         safeReply(output, REP_NOT_ALLOWED)

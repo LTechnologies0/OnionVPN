@@ -3,6 +3,56 @@
 All notable changes to OnionVPN are documented here.
 
 ## [Unreleased]
+
+## [0.3.71] — 2026-08-26
+
+### OpenVPN-over-Tor data path
+- SoftEther data-plane health: SNAT without DNAT replies for 20s demotes Via OVPN to Tor (control may still look CONNECTED); restores when replies resume. Status detail shows the demotion.
+- Firewall: “Clear Via OVPN rules” drops sticky SoftEther routes without leaving the screen.
+- SoftEther/VPN Gate: omit `auth-user-pass` file (cert-only); answer Need Auth with empty credentials when Settings blank (invented vpn/vpn broke soft-reconnect after CONNECTED). AUTH_FAILED after a prior CONNECTED demotes Via OVPN without killing the process.
+- OPENTUN uses AF_UNIX **SOCK_DGRAM** (packet TUN), not `ParcelFileDescriptor.createSocketPair()` (SOCK_STREAM). Stream coalesced IP frames → SoftEther SecureNAT garbled TCP / browser HTTPS `ERR_CONNECTION_RESET` while BYTECOUNT looked fine.
+- SNAT/DNAT VpnService `10.8.0.2` ↔ SoftEther IFCONFIG client IP on the OPENTUN socketpair. Without this, Via OVPN wrote foreign sources into SoftEther net30 → SecureNAT RST (`ERR_CONNECTION_RESET`) while control/BYTECOUNT still looked healthy.
+- `mssfix 800` (was 1200) for TCP-over-Tor + SoftEther nesting so TLS ClientHello fits without SecureNAT RST.
+- Firewall: changing default away from Allow-via-OVPN clears sticky ALLOW_OVPN caches **and** permanent Via OVPN rules (otherwise SoftEther RSTs keep hitting Tor-path browsers after Settings flip).
+- SOCKS plane: `ALLOW_OVPN` demotes to Tor (never DENY) — hev cannot carry OVPN; old coerce→DENY RST'd browsers whenever default/rule was Via OVPN but traffic hit SOCKS (SoftEther down / mid-flow).
+- Clearnet IPv6 TCP blackhole: silent drop (not RST) so Happy Eyeballs can complete on IPv4; RST was killing HTTPS while HTTP still worked.
+- SoftEther inbound: inject only SNAT-tracked flows (drop keepalives/stale RSTs) so OVPN chatter cannot RST Tor-path TCP on the shared VpnService TUN.
+- HEV SOCKS re-check: unknown UID on ASK default fail-opens after TUN SYN (Waydroid WebView UID race).
+- SocksUidBridge: trust **loopback** peers when `getConnectionOwnerUid` misses (Waydroid) — old fail-closed treated hev as foreign and RST'd every HTTPS CONNECT while raw Tor SOCKS curl still worked.
+
+### Welcome dialog
+- First-launch popup explains purpose, features, and recommends installing OnionVPN in an Android Private Space; reopen from Settings → About. Release auto-start waits until Got it.
+
+### VPN establish / OS lockdown
+- Pass `requireOsLockdown` on Connected VPN intent (`TunnelVpnBridge` → `OnionVpnService`). Omitting it used `TunnelPreferences` default `true` and blocked Waydroid/debug Connected even when DataStore had lockdown off.
+
+### Build-variant preference defaults
+- Debug APK: `allowAdbClearnetLeak` On (UI visible); Off by default for app lock, no-logs, OS lockdown, auto-start (launch/boot), firewall; per-app mode defaults to EXCLUDE (not “All apps”).
+- Release APK: fail-closed — app lock, no-logs, OS lockdown, auto-start launch+boot, firewall, per-app ALL On; ADB clearnet leak forced Off and removed from Settings.
+
+### DNSCrypt-over-Tor / firewall planes
+- SocksUidBridge: never SOCKS5A clearnet hostname to Tor — pin via DNSCrypt A (cache or live stub); fail-closed if DNSCrypt unavailable. IPv6 clearnet CONNECT without A also fail-closed.
+- Firewall `SocksConnectPlane` labels PAC vs hev UID bridge; both call `allowSocksConnect` before Tor dial.
+- DNSCrypt `blocked_names`: `*.onion` / `*.exit` defense-in-depth (TunDnsMux still routes onion to Tor DNSPort).
+
+### OpenVPN-over-Tor
+- Deterministic lifecycle: session id invalidates stale watchdog/log/fatal; management listen latch (no sleep race); awaitReady = 120s aligned with watchdog; destroyForcibly after soft destroy.
+- Via OVPN clears on RECONNECTING/WAIT/EXITING until CONNECTED returns; OPENTUN pump kept across soft-restarts.
+- Pin **each** `remote` hostname via Tor RESOLVE (multi-remote safe); strip scripts/plugins; `script-security 0`.
+- Sync profile-on-disk vs prefs at tunnel start; Status shows Via OVPN chip + detail.
+- Fix management NEED-OK parser for ics-openvpn `Need 'IFCONFIG' confirmation MSG:…` (was acking type `Need`, blocking OPENTUN).
+- Workaround ics-openvpn 2.7 SOCKS bug: omit `socks-proxy` authfile (upstream checks RFC1929 reply VER=5; Tor sends VER=1 → false refusal). Isolation via dedicated SessionGroup SocksPort; Java RESOLVE/probe still use `uopenvpn`/`popenvpn`.
+- Fix SOCKS auth refused on onionmasq allowlist mismatch: use `uopenvpn`/`popenvpn` for Java SOCKS clients. Stops reconnect storm after repeated auth refusals.
+- Drop deprecated `socks-proxy-retry`; Tor-tuned timeouts (`server-poll-timeout 120`, `hand-window 120`, `connect-retry 10 120`, `connect-retry-max 4`, `ping`/`ping-restart` for Tor RTT).
+- Align `tun-mtu 1280` + `mssfix 800` with VpnService MTU + Tor/SoftEther overhead; ignore aggressive server `ping-restart` pushes.
+- SOCKS auth probe before spawn; abort on management `AUTH_FAILED` / password verification failure; awaitReady/watchdog 120s.
+- Spec alignment ([socks-extensions](https://spec.torproject.org/socks-extensions), path-spec): `proto tcp4-client`, `resolv-retry 0`, `auth-retry none`, `persist-remote-ip` (Tor RESOLVE pin + no clearnet re-resolve).
+- `management-query-passwords` so Android Auth works without console TTY.
+
+### DNSCrypt-over-Tor
+- Spec + dnscrypt-proxy Tor notes: explicit `http3`/`http3_probe`/`odoh_servers` off; `dnscrypt_servers` on.
+- Fix query `timeout` 45s → 20s (must stay under TunDnsMux 25s); `timeout_load_reduction = 0`; `lb_strategy = p2` + `lb_estimator = false` (avoid IsolateDest* circuit storm); `keepalive = 60`.
+
 ## [0.3.70] — 2026-08-24
 
 ### Waydroid / Arti + OpenVPN-over-Tor stability

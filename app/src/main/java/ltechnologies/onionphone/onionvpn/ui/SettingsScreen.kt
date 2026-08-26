@@ -46,6 +46,7 @@ import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import ltechnologies.onionphone.onionvpn.BuildConfig
 import ltechnologies.onionphone.onionvpn.R
 import ltechnologies.onionphone.onionvpn.bridges.BuiltinBridges
 import ltechnologies.onionphone.onionvpn.bridges.MoatCircumventionClient
@@ -85,6 +86,8 @@ fun SettingsScreen(
     torSocksPort: () -> Int? = { null },
     /** False while start/stop/restart/identity — disable Apply & engine-switch mash. */
     controlsEnabled: Boolean = true,
+    /** Re-open the first-launch welcome / tips dialog. */
+    onShowWelcome: () -> Unit = {},
 ) {
     // Do NOT key remember() on [preferences] — a concurrent DataStore emit (e.g. tun_data_plane
     // from tunnel start) would clobber an in-flight toggle and DisposableEffect could persist
@@ -209,7 +212,27 @@ fun SettingsScreen(
             Text(
                 text = "On (release default): disables Logs buffer, pipeline TRACE→ERROR, " +
                     "Tor/Arti/DNSCrypt UI logs, and the resource profiler. " +
-                    "Debug builds default Off so diagnostics stay available.",
+                    "Debug APKs default Off so diagnostics stay available.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+
+        SectionHeader(
+            title = stringResource(R.string.welcome_about_title),
+            subtitle = stringResource(R.string.welcome_about_subtitle),
+        )
+        TonalSection {
+            OutlinedButton(
+                onClick = onShowWelcome,
+                modifier = Modifier.fillMaxWidth(),
+                shape = MaterialTheme.shapes.large,
+            ) {
+                Text(text = stringResource(R.string.welcome_show_again))
+            }
+            Text(
+                text = "Tip: install OnionVPN in an Android Private Space for a dedicated " +
+                    "Always-on VPN profile and less mixing with everyday clearnet apps.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -219,7 +242,8 @@ fun SettingsScreen(
             title = "Per-app VPN",
             subtitle = "Orbot-style: choose which apps use the Tor tunnel. " +
                 "Apps off the VPN use clearnet (except Tor-native BYPASS, signature-pinned). " +
-                "INCLUDE + Android lockdown is refused at connect. Restart tunnel to apply.",
+                "INCLUDE + Android lockdown is refused at connect. Restart tunnel to apply. " +
+                "Release default: All apps. Debug default: Exclude selected (empty list ≈ full tunnel).",
         )
         Row(
             modifier = Modifier
@@ -314,22 +338,24 @@ fun SettingsScreen(
         )
         Text(
             text = "When on, Connected fails unless Always-on VPN lockdown is enabled for OnionVPN " +
-                "(same hard gate style as Private DNS).",
+                "(same hard gate style as Private DNS). Release default On; debug Off.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        PrefSwitch(
-            label = "Allow ADB clearnet leak (wireless)",
-            checked = local.allowAdbClearnetLeak,
-            onChecked = { commit(local.copy(allowAdbClearnetLeak = it), restart = true) },
-        )
-        Text(
-            text = "Off by default (fail-closed): wireless adbd / com.android.shell stays on the " +
-                "tunnel. On = exclude shell from VPN so network ADB / MCP Wi‑Fi can use clearnet. " +
-                "USB ADB is unaffected. Requires tunnel restart. Not available under INCLUDE+lockdown.",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
+        if (BuildConfig.DEBUG) {
+            PrefSwitch(
+                label = "Allow ADB clearnet leak (wireless)",
+                checked = local.allowAdbClearnetLeak,
+                onChecked = { commit(local.copy(allowAdbClearnetLeak = it), restart = true) },
+            )
+            Text(
+                text = "Debug only (default On): exclude wireless adbd / com.android.shell from the " +
+                    "VPN so network ADB / MCP Wi‑Fi can use clearnet. USB ADB is unaffected. " +
+                    "Requires tunnel restart. Hidden and forced Off in release builds.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
         OutlinedButton(
             onClick = {
                 if (BatteryOptimization.needsWhitelisting(context)) {
@@ -479,7 +505,7 @@ fun SettingsScreen(
         )
         Text(
             text = "Requests VPN permission if needed, then brings up Tor + DNSCrypt + TUN. " +
-                "Runs even while the UI lock screen is showing. Turn off to start manually.",
+                "Runs even while the UI lock screen is showing. Release default On; debug Off.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -489,8 +515,8 @@ fun SettingsScreen(
             onChecked = { commit(local.copy(autoStartOnBoot = it), restart = false) },
         )
         Text(
-            text = "Off by default. After reboot, starts Tor + DNSCrypt + TUN only if VPN " +
-                "permission was already granted (open the app once first). " +
+            text = "After reboot, starts Tor + DNSCrypt + TUN only if VPN permission was already " +
+                "granted (open the app once first). Release default On; debug Off. " +
                 "Also enable system Always-on VPN for strongest coverage.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -520,7 +546,8 @@ fun SettingsScreen(
             onChecked = { commit(local.copy(firewallEnabled = it)) },
         )
         Text(
-            text = "Prompts offer Via Tor / Via OVPN (when OpenVPN-over-Tor is up) / Deny.",
+            text = "Prompts offer Via Tor / Via OVPN (when OpenVPN-over-Tor is up) / Deny. " +
+                "Release default On; debug Off.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -546,6 +573,14 @@ fun SettingsScreen(
                 onClick = { commit(local.copy(firewallDefaultAction = FirewallDefaultAction.ALLOW)) },
                 enabled = local.firewallEnabled,
                 label = { Text("Allow via Tor") },
+            )
+            FilterChip(
+                selected = local.firewallDefaultAction == FirewallDefaultAction.ALLOW_OVPN,
+                onClick = {
+                    commit(local.copy(firewallDefaultAction = FirewallDefaultAction.ALLOW_OVPN))
+                },
+                enabled = local.firewallEnabled && local.openVpnOverTorEnabled,
+                label = { Text("Allow via OVPN") },
             )
         }
         if (!local.firewallEnabled) {

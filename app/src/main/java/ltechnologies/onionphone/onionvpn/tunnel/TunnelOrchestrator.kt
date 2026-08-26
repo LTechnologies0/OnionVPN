@@ -10,6 +10,7 @@ import kotlinx.coroutines.flow.StateFlow
 import ltechnologies.onionphone.onionvpn.core.model.TunnelPreferences
 import ltechnologies.onionphone.onionvpn.core.model.TunnelSnapshot
 import ltechnologies.onionphone.onionvpn.service.TunnelForegroundService
+import timber.log.Timber
 
 @Singleton
 class TunnelOrchestrator @Inject constructor(
@@ -20,6 +21,13 @@ class TunnelOrchestrator @Inject constructor(
     fun prepareVpnPermission(): Intent? = VpnService.prepare(context)
 
     fun start(preferences: TunnelPreferences = TunnelPreferences()) {
+        Timber.i(
+            "TunnelOrchestrator.start engine=%s plane=%s ovpn=%s noLogs=%s",
+            preferences.torEngine,
+            preferences.tunDataPlane,
+            preferences.openVpnOverTorEnabled,
+            preferences.noLogsEnabled,
+        )
         context.startForegroundService(
             Intent(context, TunnelForegroundService::class.java).apply {
                 action = TunnelForegroundService.ACTION_START
@@ -48,6 +56,10 @@ class TunnelOrchestrator @Inject constructor(
                     TunnelForegroundService.EXTRA_ALLOW_ADB_CLEARNET_LEAK,
                     preferences.allowAdbClearnetLeak,
                 )
+                putExtra(
+                    TunnelForegroundService.EXTRA_REQUIRE_OS_LOCKDOWN,
+                    preferences.requireOsLockdown,
+                )
                 putExtra(TunnelForegroundService.EXTRA_TUN_DATA_PLANE, preferences.tunDataPlane.name)
                 putExtra(TunnelForegroundService.EXTRA_OPENVPN_OVER_TOR, preferences.openVpnOverTorEnabled)
                 putExtra(
@@ -64,12 +76,14 @@ class TunnelOrchestrator @Inject constructor(
     }
 
     fun stop() {
+        Timber.i("TunnelOrchestrator.stop")
         context.startService(
             Intent(context, TunnelForegroundService::class.java).setAction(TunnelForegroundService.ACTION_STOP),
         )
     }
 
     fun newNym() {
+        Timber.i("TunnelOrchestrator.newNym")
         context.startService(
             Intent(context, TunnelForegroundService::class.java)
                 .setAction(TunnelForegroundService.ACTION_NEWNYM),

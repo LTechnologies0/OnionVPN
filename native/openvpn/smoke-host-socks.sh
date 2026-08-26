@@ -44,18 +44,22 @@ for line in text.splitlines():
     if low.startswith(("socks-proxy", "http-proxy", "redirect-gateway", "dhcp-option", "route ", "auth-user-pass")):
         continue
     if low.startswith("proto "):
-        lines.append("proto tcp-client")
+        lines.append("proto tcp4-client")
         continue
     lines.append(line)
 lines += [
     f"socks-proxy {host} {port}",
-    "socks-proxy-retry",
+    "nobind",
+    "server-poll-timeout 120",
+    "connect-retry 10 120",
+    "connect-retry-max 2",
+    "hand-window 120",
+    "resolv-retry 0",
+    "auth-retry none",
     "route-nopull",
     'pull-filter ignore "redirect-gateway"',
     'pull-filter ignore "dhcp-option DNS"',
     "verb 3",
-    "connect-retry-max 2",
-    "connect-timeout 30",
 ]
 if user or password:
     open(auth, "w").write(f"{user}\n{password}\n")

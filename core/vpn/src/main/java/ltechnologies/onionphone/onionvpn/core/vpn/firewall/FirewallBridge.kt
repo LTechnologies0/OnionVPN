@@ -4,7 +4,8 @@ import java.net.Socket
 
 /**
  * Process-wide hook so [ltechnologies.onionphone.onionvpn.core.vpn.forwarder.TunDnsMux]
- * and [ltechnologies.onionphone.onionvpn.core.vpn.pac.DnsCryptSocksBridge] can call the
+ * and [ltechnologies.onionphone.onionvpn.core.vpn.pac.DnsCryptSocksBridge] /
+ * [ltechnologies.onionphone.onionvpn.core.vpn.forwarder.SocksUidBridge] can call the
  * app-layer firewall without a reverse module dependency.
  *
  * Set from [ltechnologies.onionphone.onionvpn.OnionVpnApplication] to

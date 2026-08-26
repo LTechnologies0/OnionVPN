@@ -5,6 +5,7 @@ import hev.sockstun.TProxyService
 import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.max
+import timber.log.Timber
 
 /**
  * Fallback sampler for **aggregate Tor clearnet bandwidth** (OnionVPN UID).
@@ -43,6 +44,7 @@ class TorBandwidthSampler(
         lastRx = UNSUPPORTED
         lastTx = UNSUPPORTED
         lastAtMs = 0L
+        Timber.d("TorBandwidthSampler reset uid=%d", uid)
     }
 
     fun sample(): Sample {
@@ -60,6 +62,7 @@ class TorBandwidthSampler(
             if (hev != null && hev.size >= 2) {
                 Triple(hev[0], hev[1], Source.HevTun)
             } else {
+                Timber.v("TorBandwidthSampler unavailable uid=%d", uid)
                 return Sample(0.0, 0.0, "Tor ▼ —  ▲ —", Source.Unavailable)
             }
         }

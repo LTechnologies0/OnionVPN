@@ -26,6 +26,8 @@ import ltechnologies.onionphone.onionvpn.core.model.observability.MemoryHygiene
 import ltechnologies.onionphone.onionvpn.core.vpn.dns.DnsHostnameCache
 import ltechnologies.onionphone.onionvpn.core.vpn.firewall.ConnectionOwnerResolver
 import ltechnologies.onionphone.onionvpn.core.vpn.firewall.FirewallBridge
+import ltechnologies.onionphone.onionvpn.core.vpn.firewall.SocksConnectPlane
+import ltechnologies.onionphone.onionvpn.core.vpn.pac.DnsCryptResolver
 import timber.log.Timber
 
 /**
@@ -34,6 +36,7 @@ import timber.log.Timber
  *
  * UID comes from [TcpFlowUidIndex] (TunDnsMux SYN stamp). Automap virtual IPs are
  * remapped to `.onion`/`.exit` hostnames via [DnsHostnameCache] for SOCKS5A.
+ * Clearnet CONNECT is pinned to a DNSCrypt A-record (never Tor exit DNS / SOCKS5A hostname).
  *
  * Handshake workers return immediately after CONNECT succeeds; bidirectional pipes run
  * on a separate cached pool so Signal reconnect storms cannot pin all handshake threads
@@ -48,6 +51,7 @@ class SocksUidBridge(
     private val ownerResolver = ConnectionOwnerResolver(context)
     private val running = AtomicBoolean(false)
     private val torSocksPort = AtomicInteger(0)
+    private val dnsCryptPort = AtomicInteger(0)
     private val serverRef = AtomicReference<ServerSocket?>(null)
     private var acceptThread: Thread? = null
     private var clientExecutor = newClientExecutor()
@@ -62,10 +66,20 @@ class SocksUidBridge(
 
     fun updateTorSocks(port: Int) {
         torSocksPort.set(port.coerceAtLeast(0))
-        Timber.i("SocksUidBridge upstream Tor SOCKS :%d listen=:%d", torSocksPort.get(), listenPort)
+        Timber.i(
+            "SocksUidBridge upstream Tor SOCKS :%d dnsCrypt=:%d listen=:%d",
+            torSocksPort.get(),
+            dnsCryptPort.get(),
+            listenPort,
+        )
     }
 
-    fun start(torSocks: Int) {
+    fun updateDnsCrypt(port: Int) {
+        dnsCryptPort.set(port.coerceAtLeast(0))
+    }
+
+    fun start(torSocks: Int, dnsCrypt: Int = 0) {
+        updateDnsCrypt(dnsCrypt)
         updateTorSocks(torSocks)
         if (!running.compareAndSet(false, true)) return
         if (clientExecutor.isShutdown || clientExecutor.isTerminated) {
@@ -151,16 +165,12 @@ class SocksUidBridge(
             try {
                 negotiateNoAuth(input, output)
                 val (host, port) = readConnect(input, output) ?: return
-                val uid = resolveUidForConnect(host, port)
+                var uid = resolveUidForConnect(host, port)
                 if (!ConnectionOwnerResolver.isValidUid(uid)) {
-                    // Fail-closed: never merge distinct apps into FALLBACK IsolateSOCKSAuth.
-                    if ((denyLogSample.incrementAndGet() and 0x1F) == 0L) {
-                        VpnForwarderDebug.socksLog {
-                            "SocksUidBridge UID miss $host:$port — refuse CONNECT"
-                        }
-                    }
-                    reply(output, 0x01)
-                    return
+                    // Waydroid + Chromium isolated WebView: owner UID often never appears in
+                    // getConnectionOwnerUid / proc. Prefer shared IsolateSOCKSAuth over RST.
+                    Timber.w("SocksUidBridge UID miss $host:$port — IsolateSOCKSAuth uunknown")
+                    uid = -1
                 }
                 val torPort = torSocksPort.get()
                 if (torPort <= 0) {
@@ -277,14 +287,22 @@ class SocksUidBridge(
      * hev runs in-process — only our UID may dial the loopback bridge.
      * Foreign apps forging CONNECT would otherwise steal SYN UID stamps (isolation MITM).
      * Pre-Q: [ConnectionOwnerResolver.resolveAcceptedClientUid] is unavailable; rely on stamps.
-     * API ≥ Q: fail-closed on lookup miss (do not trust unknown peers).
+     * API ≥ Q + UID miss on **loopback**: Waydroid often fails owner lookup for hev→127.0.0.1
+     * even though the dialer is us — old fail-closed RST'd every HTTPS CONNECT (HTTP sometimes
+     * slipped through). Bind is loopback-only; firewall still gates CONNECT.
      */
     private fun isTrustedBridgePeer(client: Socket): Boolean {
         val peer = ownerResolver.resolveAcceptedClientUid(client)
-        if (!ConnectionOwnerResolver.isValidUid(peer)) {
-            return Build.VERSION.SDK_INT < Build.VERSION_CODES.Q
+        if (ConnectionOwnerResolver.isValidUid(peer)) {
+            return peer == Process.myUid()
         }
-        return peer == Process.myUid()
+        if (client.inetAddress?.isLoopbackAddress == true) {
+            VpnForwarderDebug.socksLog {
+                "SocksUidBridge trust loopback peer UID miss (hev) ${client.remoteSocketAddress}"
+            }
+            return true
+        }
+        return Build.VERSION.SDK_INT < Build.VERSION_CODES.Q
     }
 
     /**
@@ -317,6 +335,7 @@ class SocksUidBridge(
             destHost = destHost,
             destIp = destIp,
             destPort = port,
+            plane = SocksConnectPlane.HEV_UID_BRIDGE,
         )
         if (!allowed) {
             VpnForwarderDebug.socksLog {
@@ -345,9 +364,9 @@ class SocksUidBridge(
     /**
      * Automap virtual IP → `.onion`/`.exit` SOCKS5A hostname.
      *
-     * Clearnet: pin to DNSCrypt **IPv4** (never SOCKS5A-rewrite IP→hostname). Exit-side
-     * re-resolve of hostnames was picking AAAA paths and stalling OkHttp TLS (Speedtest
-     * RetrieveServerListTask / SSL handshake timed out) even after PreferIPv6 was removed.
+     * Clearnet: pin to DNSCrypt **IPv4** only — never SOCKS5A-rewrite hostname to Tor
+     * (exit-side re-resolve bypasses DNSCrypt-over-Tor and can pick AAAA / stall TLS).
+     * Cache miss → live [DnsCryptResolver] against the local stub; fail-closed if unavailable.
      */
     private fun rewriteAutomapHost(host: String): String? {
         if (TunnelEndpoints.isAutomapVirtual(host)) {
@@ -364,20 +383,58 @@ class SocksUidBridge(
         }
         // Already an IPv4 literal from hev — keep it (DNSCrypt A-only path).
         if (TunnelEndpoints.parseIpv4Literal(host) != null) return host
-        // Clearnet IPv6 literal: prefer cached IPv4 for the same name (Happy Eyeballs).
+        // Clearnet IPv6 literal: prefer cached/live DNSCrypt IPv4 (Happy Eyeballs → IPv4).
         if (host.indexOf(':') >= 0) {
             DnsHostnameCache.lookup(host)?.let { name ->
                 DnsHostnameCache.ipv4ForHostname(name)?.let { return it }
+                pinClearnetViaDnsCrypt(name)?.let { return it }
             }
-            return host
+            VpnForwarderDebug.socksLog { "SocksUidBridge drop clearnet IPv6 without DNSCrypt A $host" }
+            return null
         }
-        // Hostname CONNECT — pin to torrified A-record when known.
+        if (TunnelEndpoints.isOnionLikeHostname(host)) return host
+        // Hostname CONNECT — pin to torrified A-record (cache or DNSCrypt stub).
         DnsHostnameCache.ipv4ForHostname(host)?.let { return it }
         repeat(DNS_REWRITE_RETRY) {
             LockSupport.parkNanos(DNS_REWRITE_PARK_NS)
             DnsHostnameCache.ipv4ForHostname(host)?.let { return it }
         }
-        return host
+        return pinClearnetViaDnsCrypt(host)
+    }
+
+    /** Live DNSCrypt A lookup — never Tor DNSPort / exit DNS for clearnet. */
+    private fun pinClearnetViaDnsCrypt(hostname: String): String? {
+        val dnsPort = dnsCryptPort.get()
+        if (dnsPort <= 0) {
+            VpnForwarderDebug.socksLog {
+                "SocksUidBridge DNSCrypt port unset — refuse clearnet hostname $hostname"
+            }
+            return null
+        }
+        return try {
+            val ip = DnsCryptResolver.resolveIpv4(
+                hostname = hostname,
+                dnsCryptHost = TunnelEndpoints.LOOPBACK,
+                dnsCryptPort = dnsPort,
+            )
+            val v4 = ip.hostAddress ?: return null
+            if (TunnelEndpoints.parseIpv4Literal(v4) == null) return null
+            TunnelEndpoints.parseIpv4Literal(v4)?.let { ipInt ->
+                if (TorNetPolicy.mustBlackholeIpv4Destination(ipInt)) {
+                    VpnForwarderDebug.socksLog {
+                        "SocksUidBridge DNSCrypt A blackholed $hostname → $v4"
+                    }
+                    return null
+                }
+            }
+            DnsHostnameCache.put(v4, hostname)
+            v4
+        } catch (e: Exception) {
+            VpnForwarderDebug.socksLog(e) {
+                "SocksUidBridge DNSCrypt resolve failed $hostname"
+            }
+            null
+        }
     }
 
     private fun negotiateNoAuth(input: DataInputStream, output: DataOutputStream) {

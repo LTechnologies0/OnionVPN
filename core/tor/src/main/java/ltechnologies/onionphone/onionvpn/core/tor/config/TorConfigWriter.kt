@@ -3,6 +3,8 @@ package ltechnologies.onionphone.onionvpn.core.tor.config
 import java.io.File
 import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
 import ltechnologies.onionphone.onionvpn.core.model.TunnelPreferences
+import ltechnologies.onionphone.onionvpn.core.model.observability.OpTrace
+import timber.log.Timber
 
 /**
  * Package `config` — torrc generation only (no process I/O).
@@ -82,7 +84,8 @@ object TorConfigWriter {
         dnsPort: Int = TunnelEndpoints.TOR_DNS_PORT,
         preferences: TunnelPreferences = TunnelPreferences(),
         nativeLibraryDir: String? = null,
-    ): String = buildString {
+    ): String {
+        val torrc = buildString {
         appendLine("DataDirectory $dataDirectory")
         appendLine("ClientOnly 1")
         appendLine("AvoidDiskWrites 1")
@@ -105,6 +108,8 @@ object TorConfigWriter {
         )
         appendLine(
             "SOCKSPort ${TunnelEndpoints.LOOPBACK}:$dnsCryptSocksPort " +
+                // path-spec: IsolateDest* optional; kept for DNSCrypt so resolver peers
+                // don't share circuits with each other (lb_estimator disabled in toml).
                 "SessionGroup=${TunnelEndpoints.SESSION_GROUP_DNSCRYPT} $SOCKS_ISOLATION_MAX " +
                 "IPv6Traffic KeepAliveIsolateSOCKSAuth",
         )
@@ -115,6 +120,8 @@ object TorConfigWriter {
         )
         appendLine(
             "SOCKSPort ${TunnelEndpoints.LOOPBACK}:$openVpnSocksPort " +
+                // socks-extensions: one long TCP CONNECT; IsolateSOCKSAuth + KeepAlive
+                // (prop 368) so soft-restarts reuse the OPENVPN circuit.
                 "SessionGroup=${TunnelEndpoints.SESSION_GROUP_OPENVPN} $SOCKS_ISOLATION_MAX " +
                 "IPv6Traffic KeepAliveIsolateSOCKSAuth",
         )
@@ -225,5 +232,16 @@ object TorConfigWriter {
             appendLine("ExcludeNodes $it")
             appendLine("StrictNodes 1")
         }
+        }
+        Timber.i(
+            "torrc written socks=:%d dns=:%d bridges=%s dirt=%d bytes=%d",
+            socksPort,
+            dnsPort,
+            preferences.torBridges.isNotBlank(),
+            preferences.torMaxCircuitDirtinessSec,
+            torrc.length,
+        )
+        OpTrace.info("tor", "torrc written socks=:$socksPort dns=:$dnsPort bytes=${torrc.length}")
+        return torrc
     }
 }

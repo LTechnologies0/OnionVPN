@@ -10,8 +10,8 @@ class TunnelLogTree : Timber.Tree() {
         if (!DiagnosticsGate.enabled()) return
         // Tor / DNSCrypt have dedicated buffers — avoid duplicating them under OnionVPN.
         if (tag == "tor" || tag == "dnscrypt" || tag == "arti") return
-        // VERBOSE/TRACE is for expected handshake noise (PAC EOF, SETEVENTS 552, DNS probes).
-        if (priority < Log.DEBUG) return
+        // Accept VERBOSE→ASSERT (TRACE→CRITICAL). DiagnosticsGate already gates this tree;
+        // no-logs mode keeps the UI silent. Prefer Timber.v / OpTrace.trace for handshake noise.
 
         val prefix = tag?.let { "[$it] " }.orEmpty()
         val text = if (t != null) "$prefix$message (${t.message})" else "$prefix$message"

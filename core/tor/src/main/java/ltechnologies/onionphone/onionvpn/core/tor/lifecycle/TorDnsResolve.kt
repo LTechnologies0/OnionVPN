@@ -7,6 +7,8 @@ import java.net.InetSocketAddress
 import java.nio.ByteBuffer
 import java.util.concurrent.ThreadLocalRandom
 import kotlin.math.min
+import ltechnologies.onionphone.onionvpn.core.model.observability.OpTrace
+import timber.log.Timber
 
 /**
  * Minimal DNS A resolver aimed at Arti's DNSPort — app-layer equivalent of
@@ -25,6 +27,7 @@ object TorDnsResolve {
         val host = hostname.trim().trimEnd('.').lowercase()
         require(host.isNotEmpty()) { "empty hostname" }
         require(!host.contains(' ')) { "invalid hostname" }
+        Timber.v("DNSPort RESOLVE A %s via %s:%d", host, dnsHost, dnsPort)
         val id = ThreadLocalRandom.current().nextInt(0, 0xFFFF)
         val query = buildQuery(host, id)
         DatagramSocket(null).use { sock ->
@@ -56,12 +59,25 @@ object TorDnsResolve {
                 val flags = ((buf[2].toInt() and 0xff) shl 8) or (buf[3].toInt() and 0xff)
                 if (flags and 0x8000 == 0) continue // QR must be response
                 if (flags and 0x000f != 0) {
-                    throw IllegalStateException("DNSPort RCODE=${flags and 0x000f} for $host")
+                    val err = "DNSPort RCODE=${flags and 0x000f} for $host"
+                    Timber.w(err)
+                    OpTrace.warn("tor", err)
+                    throw IllegalStateException(err)
                 }
-                return parseFirstA(buf, resp.length)
-                    ?: throw IllegalStateException("DNSPort returned no A for $host")
+                val ip = parseFirstA(buf, resp.length)
+                if (ip == null) {
+                    val err = "DNSPort returned no A for $host"
+                    Timber.w(err)
+                    OpTrace.warn("tor", err)
+                    throw IllegalStateException(err)
+                }
+                Timber.d("DNSPort RESOLVE %s → %s", host, ip)
+                return ip
             }
-            throw IllegalStateException("DNSPort timeout/no matching TXID for $host")
+            val err = "DNSPort timeout/no matching TXID for $host"
+            Timber.w(err)
+            OpTrace.warn("tor", err)
+            throw IllegalStateException(err)
         }
     }
 

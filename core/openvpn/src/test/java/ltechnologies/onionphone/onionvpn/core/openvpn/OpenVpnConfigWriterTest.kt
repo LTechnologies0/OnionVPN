@@ -27,18 +27,70 @@ class OpenVpnConfigWriterTest {
             managementSockPath = mgmt,
             socksAuthFile = auth,
         )
-        assertTrue(out.contains("proto tcp-client"))
+        assertTrue(out.contains("proto tcp4-client"))
         assertFalse(out.contains("proto udp"))
         assertTrue(out.contains("remote vpn.example.com 1194 tcp"))
         assertFalse(out.contains("1194 udp"))
-        assertTrue(out.contains("socks-proxy 127.0.0.1 19050"))
-        assertTrue(out.contains(auth.absolutePath))
+        // Authfile written for docs/probes but NOT on socks-proxy (OpenVPN 2.7 VER=5 bug).
+        assertTrue(out.contains("socks-proxy 127.0.0.1 19050\n") || out.contains("socks-proxy 127.0.0.1 19050"))
+        assertFalse(out.contains(auth.absolutePath))
+        assertFalse(out.contains("socks-proxy-retry"))
+        assertTrue(out.contains("server-poll-timeout 120"))
+        assertTrue(out.contains("connect-retry 10 120"))
+        assertTrue(out.contains("connect-retry-max 12"))
+        assertTrue(out.contains("hand-window 120"))
+        assertTrue(out.contains("resolv-retry 0"))
+        assertTrue(out.contains("auth-retry none"))
+        assertTrue(out.contains("persist-remote-ip"))
+        assertTrue(out.contains("tun-mtu 1280"))
+        assertTrue(out.contains("mssfix 800"))
+        assertTrue(out.contains("ping 3"))
+        assertTrue(out.contains("ping-restart 180"))
         assertTrue(out.contains("management $mgmt unix"))
         assertTrue(out.contains("management-client"))
+        assertTrue(out.contains("management-query-passwords"))
         assertTrue(out.contains("pull-filter ignore \"redirect-gateway\""))
+        assertTrue(out.contains("pull-filter ignore \"ping-restart\""))
+        assertFalse(out.contains("pull-filter ignore \"ping\""))
         assertTrue(out.contains("route-nopull"))
         assertFalse(out.contains("explicit-exit-notify"))
-        assertTrue(auth.readText().contains("openvpn"))
+        assertFalse(out.contains("fragment"))
+        assertTrue(auth.readText().contains("uopenvpn"))
+        assertTrue(auth.readText().contains("popenvpn"))
+        dir.deleteRecursively()
+    }
+
+    @Test
+    fun rewrite_stripsConflictingTorTimeoutsAndMtu() {
+        val dir = File.createTempFile("ovpn-strip", null).apply {
+            delete()
+            mkdirs()
+        }
+        val out = OpenVpnConfigWriter.rewrite(
+            profileText = """
+                client
+                proto tcp-client
+                remote 203.0.113.1 443 tcp
+                tun-mtu 1500
+                mssfix 1450
+                fragment 1300
+                ping 5
+                ping-restart 30
+                socks-proxy-retry
+                connect-retry 1
+                server-poll-timeout 10
+            """.trimIndent(),
+            socksPort = 19050,
+            managementSockPath = File(dir, "mgmt.sock").absolutePath,
+        )
+        assertEquals(1, out.lineSequence().count { it.trimStart().startsWith("tun-mtu ") })
+        assertTrue(out.contains("tun-mtu 1280"))
+        assertTrue(out.contains("mssfix 800"))
+        assertFalse(out.contains("fragment"))
+        assertFalse(out.contains("socks-proxy-retry"))
+        assertTrue(out.contains("server-poll-timeout 120"))
+        assertFalse(out.contains("ping-restart 30"))
+        assertTrue(out.contains("ping-restart 180"))
         dir.deleteRecursively()
     }
 
@@ -90,5 +142,58 @@ class OpenVpnConfigWriterTest {
                 """.trimIndent(),
             ),
         )
+    }
+
+    @Test
+    fun pinRemoteHostToIpv4_onlyTouchesMatchingHost() {
+        val pinned = OpenVpnConfigWriter.pinRemoteHostToIpv4(
+            """
+                remote a.example.com 443 tcp
+                remote b.example.com 443 tcp
+            """.trimIndent(),
+            "a.example.com",
+            "203.0.113.10",
+        )
+        assertTrue(pinned.contains("remote 203.0.113.10 443 tcp"))
+        assertTrue(pinned.contains("remote b.example.com 443 tcp"))
+        assertFalse(pinned.contains("a.example.com"))
+    }
+
+    @Test
+    fun allRemoteHosts_preservesOrderAndDedupes() {
+        assertEquals(
+            listOf("a.example.com", "1.2.3.4"),
+            OpenVpnConfigWriter.allRemoteHosts(
+                """
+                    remote a.example.com 443
+                    remote 1.2.3.4 1194 tcp
+                    remote a.example.com 443
+                """.trimIndent(),
+            ),
+        )
+    }
+
+    @Test
+    fun rewrite_stripsScriptsAndForcesScriptSecurity0() {
+        val dir = File.createTempFile("ovpn-script", null).apply {
+            delete()
+            mkdirs()
+        }
+        val out = OpenVpnConfigWriter.rewrite(
+            profileText = """
+                client
+                remote 1.2.3.4 443 tcp
+                up /tmp/evil.sh
+                script-security 2
+                verb 1
+            """.trimIndent(),
+            socksPort = 19050,
+            managementSockPath = File(dir, "mgmt.sock").absolutePath,
+        )
+        assertFalse(out.contains("up /tmp"))
+        assertTrue(out.contains("script-security 0"))
+        assertTrue(out.contains("verb 3"))
+        assertEquals(1, out.lineSequence().count { it.trimStart().startsWith("verb ") })
+        dir.deleteRecursively()
     }
 }
