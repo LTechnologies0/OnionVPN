@@ -216,7 +216,7 @@ object SystemLeakInspector {
                 label = "No global HTTP proxy",
                 status = ValidationStatus.Fail,
                 detail = "Global HTTP proxy='$host' — clear it (local MITM risk)",
-                tripsKillSwitch = false,
+                tripsKillSwitch = true,
             )
         }
     }

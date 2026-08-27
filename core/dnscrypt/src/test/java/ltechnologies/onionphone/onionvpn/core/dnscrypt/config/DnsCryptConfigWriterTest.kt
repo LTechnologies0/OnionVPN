@@ -26,6 +26,7 @@ class DnsCryptConfigWriterTest {
         assertTrue(config.contains("http3 = false"))
         assertTrue(config.contains("http3_probe = false"))
         assertTrue(config.contains("dnscrypt_servers = true"))
+        assertTrue(config.contains("doh_servers = false"))
         assertTrue(config.contains("odoh_servers = false"))
         assertTrue(config.contains("timeout = 20000"))
         assertTrue(config.contains("timeout_load_reduction = 0.0"))

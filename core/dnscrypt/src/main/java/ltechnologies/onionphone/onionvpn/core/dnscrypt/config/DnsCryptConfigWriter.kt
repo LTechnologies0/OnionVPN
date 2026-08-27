@@ -153,9 +153,9 @@ object DnsCryptConfigWriter {
             # AAAA answers make apps Happy-Eyeballs onto IPv6 TUN (Signal/WhatsApp).
             # Tor exits + hev IPv6 are slower/flakier than IPv4 — force A-only.
             block_ipv6 = true
-            # Prefer classic DNSCrypt over DoH/ODoH on Tor (TCP-friendly; no QUIC).
+            # Prefer classic DNSCrypt stamps over DoH (DoH = TLS to system CA).
             dnscrypt_servers = true
-            doh_servers = true
+            doh_servers = false
             odoh_servers = false
             dnscrypt_ephemeral_keys = true
             tls_disable_session_tickets = true

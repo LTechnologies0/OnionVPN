@@ -361,6 +361,30 @@ object OpenVpnConfigWriter {
         return false
     }
 
+    /**
+     * Fail-closed MitM gate: profile must ship a CA (`<ca>` / `ca` / `capath`) **or**
+     * explicit peer pinning (`peer-fingerprint` / `verify-x509-name` / `verify-hash`).
+     * `remote-cert-tls` alone is not enough without a CA to verify against.
+     */
+    fun hasServerTrustMaterial(profileText: String): Boolean {
+        val lines = profileText.lineSequence().map { it.trimEnd() }.toList()
+        if (profileHasCa(lines)) return true
+        for (raw in lines) {
+            val lower = raw.trim().lowercase()
+            if (lower.startsWith("peer-fingerprint") ||
+                lower.startsWith("verify-x509-name") ||
+                lower.startsWith("verify-hash")
+            ) {
+                return true
+            }
+        }
+        return false
+    }
+
+    const val NO_SERVER_TRUST_DETAIL =
+        "OpenVPN profile needs a CA (<ca>/ca/capath) or peer-fingerprint / " +
+            "verify-x509-name / verify-hash — refuse MitM-friendly imports"
+
     private fun shouldStrip(line: String): Boolean {
         val t = line.trim()
         if (t.isEmpty() || t.startsWith("#") || t.startsWith(";")) return false

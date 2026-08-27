@@ -265,6 +265,8 @@ object TunnelValidator {
             // OS Private DNS DoT actually active / forced hostname (Tor VPN §5.2.4).
             // tripsKillSwitch set by SystemLeakInspector — opportunistic-only is Soft.
             "android.dns.private" -> true
+            // Global HTTP proxy can MitM app/system cleartext and some TLS stacks.
+            "android.http_proxy" -> true
             // Another app owns Always-on, or Always-on without Lockdown (tripsKillSwitch).
             // Missing Always-on entirely stays Soft (user has not opted into OS Lockdown yet).
             "android.vpn.always_on" -> true

@@ -94,17 +94,26 @@ class OpenVpnOverTorManager(
         val authUser: String = "",
         val authPassword: String = "",
         val hadEmbeddedAuth: Boolean = false,
+        val detail: String = "",
     )
 
     fun importProfile(bytes: ByteArray): Boolean = importProfileDetailed(bytes).ok
 
     fun importProfileDetailed(bytes: ByteArray): ImportResult {
-        if (bytes.isEmpty()) return ImportResult(ok = false)
+        if (bytes.isEmpty()) {
+            return ImportResult(ok = false, detail = "Empty .ovpn")
+        }
         val text = bytes.toString(Charsets.UTF_8)
+        if (!OpenVpnConfigWriter.hasServerTrustMaterial(text)) {
+            return ImportResult(
+                ok = false,
+                detail = OpenVpnConfigWriter.NO_SERVER_TRUST_DETAIL,
+            )
+        }
         val embedded = OpenVpnConfigWriter.extractAuthUserPass(text)
         val cleaned = OpenVpnConfigWriter.stripEmbeddedAuthUserPass(text)
         profileFile.writeText(cleaned)
-        if (!hasProfile()) return ImportResult(ok = false)
+        if (!hasProfile()) return ImportResult(ok = false, detail = "Failed to store profile")
         return ImportResult(
             ok = true,
             authUser = embedded?.username.orEmpty(),
@@ -175,6 +184,9 @@ class OpenVpnOverTorManager(
         }
 
         val rawProfile = profileFile.readText()
+        if (!OpenVpnConfigWriter.hasServerTrustMaterial(rawProfile)) {
+            return fail(OpenVpnConfigWriter.NO_SERVER_TRUST_DETAIL)
+        }
         if (OpenVpnConfigWriter.looksUdpOnly(rawProfile)) {
             return fail(
                 "Profile looks UDP-only — OpenVPN-over-Tor needs a TCP .ovpn " +

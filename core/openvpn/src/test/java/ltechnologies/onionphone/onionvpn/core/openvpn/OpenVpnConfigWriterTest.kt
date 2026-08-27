@@ -381,4 +381,39 @@ class OpenVpnConfigWriterTest {
         assertTrue(cleaned.contains("<ca>"))
         assertTrue(cleaned.contains("CERT"))
     }
+
+    @Test
+    fun hasServerTrustMaterial_requiresCaOrPeerPin() {
+        assertFalse(
+            OpenVpnConfigWriter.hasServerTrustMaterial(
+                "client\nremote 203.0.113.1 443 tcp\n",
+            ),
+        )
+        assertFalse(
+            OpenVpnConfigWriter.hasServerTrustMaterial(
+                "client\nremote-cert-tls server\nremote 203.0.113.1 443 tcp\n",
+            ),
+        )
+        assertTrue(
+            OpenVpnConfigWriter.hasServerTrustMaterial(
+                """
+                client
+                remote 203.0.113.1 443 tcp
+                <ca>
+                CERT
+                </ca>
+                """.trimIndent(),
+            ),
+        )
+        assertTrue(
+            OpenVpnConfigWriter.hasServerTrustMaterial(
+                "client\npeer-fingerprint SHA256:aabb\nremote 203.0.113.1 443 tcp\n",
+            ),
+        )
+        assertTrue(
+            OpenVpnConfigWriter.hasServerTrustMaterial(
+                "client\nverify-x509-name vpn.example.com name\nremote 203.0.113.1 443 tcp\n",
+            ),
+        )
+    }
 }

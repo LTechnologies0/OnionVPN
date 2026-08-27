@@ -4,6 +4,20 @@ All notable changes to OnionVPN are documented here.
 
 ## [Unreleased]
 
+## [0.3.73] — 2026-08-27
+
+### MITM hardening (in-scope)
+- OpenVPN import/start refuse profiles without CA or `peer-fingerprint` /
+  `verify-x509-name` / `verify-hash` (MitM-friendly `.ovpn` rejected).
+- DNSCrypt: `doh_servers = false` — resolver authenticity via DNSCrypt stamps, not
+  system-TLS DoH.
+- Global Android HTTP proxy fails Connected / trips kill-switch (local MitM risk).
+- Moat bridge fetch defaults to Tor SOCKS (`moatRequestViaTor = true`).
+- Threat model: OnionVPN mitigates clearnet DNS/DoT bypass, OVPN without server
+  trust, app HTTPS cleartext, and local HTTP proxy while TUN+Tor are up. Out of
+  scope: Wi‑Fi ARP/Evil Twin L2, ISP BGP, physical taps, IMSI catchers, SCADA/IoT,
+  and third-party apps’ TLS stacks.
+
 ## [0.3.72] — 2026-08-26
 
 ### OpenVPN-over-Tor / Arti SOCKS

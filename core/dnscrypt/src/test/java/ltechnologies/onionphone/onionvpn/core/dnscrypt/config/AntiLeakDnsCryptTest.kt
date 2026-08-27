@@ -47,6 +47,7 @@ class AntiLeakDnsCryptTest(private val requiredSubstring: String) {
             "lb_strategy = 'p2'",
             "timeout_load_reduction = 0.0",
             "odoh_servers = false",
+            "doh_servers = false",
             "dnscrypt_servers = true",
         ).map { arrayOf(it) }
     }

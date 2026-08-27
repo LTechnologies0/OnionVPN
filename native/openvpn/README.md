@@ -3,6 +3,18 @@
 OnionVPN can run a **TCP OpenVPN** client whose control channel exits via Tor SOCKS
 (`SessionGroup` OPENVPN + `IsolateSOCKSAuth` / credentials `uopenvpn`/`popenvpn`).
 
+## MITM / trust (in-scope)
+
+Import and start **require** server trust material: a CA (`<ca>` / `ca` / `capath`)
+or `peer-fingerprint` / `verify-x509-name` / `verify-hash`. Profiles with neither
+are rejected. When a CA is present without a verify method, rewrite injects
+`remote-cert-tls server`. Remotes are resolved and pinned via Tor SOCKS (no
+clearnet DNS). Auth follows OpenVPN man (inline `<auth-user-pass>` or Settings).
+
+**Out of scope for this app:** Wi‑Fi ARP / Evil Twin at L2, ISP BGP, physical
+taps, cellular IMSI catchers — Tor encrypts after bootstrap; VpnService cannot
+rewrite the uplink L2 path.
+
 ## Binary (required)
 
 TARGET_ANDROID binaries from F-Droid **OpenVPN for Android** (`de.blinkt.openvpn`):
@@ -17,7 +29,8 @@ stays fail-closed. See `NOTICE` (GPL).
 ## Test profiles (optional)
 
 Public TCP OpenVPN samples for CI/smoke (e.g. academic relays) — **not** for private
-traffic. Import any standard `.ovpn`; auth follows OpenVPN man (inline block or Settings).
+traffic. Import requires CA (or peer pin); auth follows OpenVPN man (inline block or
+Settings).
 
 ```bash
 ./native/openvpn/fetch-vpngate-testdata.sh   # → testdata/*.ovpn samples

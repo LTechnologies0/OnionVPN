@@ -621,11 +621,12 @@ fun SettingsScreen(
             text = if (local.openVpnProfileConfigured) {
                 "Profile imported (app-private). “Via OVPN” appears only when control+data plane are up."
             } else {
-                "Import a TCP-capable .ovpn profile first."
+                "Import a TCP-capable .ovpn with a CA or peer-fingerprint first."
             },
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+        var ovpnImportError by remember { mutableStateOf<String?>(null) }
         LaunchedEffect(Unit) {
             val has = withContext(Dispatchers.IO) {
                 ltechnologies.onionphone.onionvpn.core.openvpn.OpenVpnOverTorManager(context).hasProfile()
@@ -649,6 +650,7 @@ fun SettingsScreen(
                     }.getOrNull()
                 }
                 if (result?.ok == true) {
+                    ovpnImportError = null
                     commit(
                         local.copy(
                             openVpnProfileConfigured = true,
@@ -659,6 +661,10 @@ fun SettingsScreen(
                         ),
                         restart = true,
                     )
+                } else {
+                    ovpnImportError = result?.detail
+                        ?.takeIf { it.isNotBlank() }
+                        ?: "Import failed — need CA or peer-fingerprint / verify-x509-name"
                 }
             }
         }
@@ -674,6 +680,7 @@ fun SettingsScreen(
                                 ltechnologies.onionphone.onionvpn.core.openvpn.OpenVpnOverTorManager(context)
                                     .clearProfile()
                             }
+                            ovpnImportError = null
                             commit(
                                 local.copy(
                                     openVpnProfileConfigured = false,
@@ -689,6 +696,13 @@ fun SettingsScreen(
                     Text("Clear profile")
                 }
             }
+        }
+        ovpnImportError?.let { err ->
+            Text(
+                text = err,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+            )
         }
         OutlinedTextField(
             value = local.openVpnAuthUser,
@@ -1109,8 +1123,9 @@ fun SettingsScreen(
             onChecked = { commit(local.copy(moatRequestViaTor = it), restart = false) },
         )
         Text(
-            text = "Off = clearnet HTTPS to bridges.torproject.org (default). " +
-                "On = Moat through Tor SOCKS (needed when the site is blocked; tunnel must be up).",
+            text = "On (default) = Moat through Tor SOCKS when the tunnel is up — " +
+                "avoids clearnet TLS MitM of bridges.torproject.org. " +
+                "Off = clearnet HTTPS (only if you accept local MitM risk).",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )

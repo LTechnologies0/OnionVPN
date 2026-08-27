@@ -87,9 +87,10 @@ data class TunnelPreferences(
     val autoStartOnBoot: Boolean = true,
     /**
      * When true, Moat / BridgeDB requests to bridges.torproject.org go through
-     * Tor SOCKS. When false (default), clearnet HTTPS is used.
+     * Tor SOCKS (default — avoids clearnet TLS MitM of bridge fetch). When false,
+     * clearnet HTTPS is used (local MitM risk if a hostile CA is trusted).
      */
-    val moatRequestViaTor: Boolean = false,
+    val moatRequestViaTor: Boolean = true,
     /**
      * Privacy kill-switch for diagnostics: when true, TRACE→ERROR pipeline logs,
      * Tor/Arti/DNSCrypt UI buffers, and the resource profiler are disabled.

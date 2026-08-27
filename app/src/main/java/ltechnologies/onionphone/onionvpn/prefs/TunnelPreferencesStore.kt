@@ -175,7 +175,7 @@ class TunnelPreferencesStore @Inject constructor(
         allowScreenshots = this[Keys.allowScreenshots] ?: false,
         autoStartOnAppLaunch = this[Keys.autoStartOnLaunch] ?: !isDebuggable,
         autoStartOnBoot = this[Keys.autoStartOnBoot] ?: !isDebuggable,
-        moatRequestViaTor = this[Keys.moatRequestViaTor] ?: false,
+        moatRequestViaTor = this[Keys.moatRequestViaTor] ?: true,
         noLogsEnabled = this[Keys.noLogs] ?: !isDebuggable,
         vpnAppRoutingMode = this[Keys.vpnAppMode]
             ?.let { runCatching { VpnAppRoutingMode.valueOf(it) }.getOrNull() }

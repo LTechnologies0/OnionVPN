@@ -41,6 +41,7 @@ class AntiLeakHardKillSwitchIdsTest(private val id: String) {
             "tor.socks",
             "vpn.not.established",
             "android.dns.private",
+            "android.http_proxy",
             "android.vpn.route.default",
             "android.vpn.route.ipv6",
             // Hard only when inspector sets tripsKillSwitch (other app owns Always-on /
@@ -141,6 +142,18 @@ class AntiLeakDnsCryptConfigValidatorTest {
             label = "Android Always-on VPN lockdown",
             status = ValidationStatus.Fail,
             detail = "Always-on ON but Lockdown OFF",
+            tripsKillSwitch = true,
+        )
+        assertTrue(TunnelValidator.isHardKillSwitchFailure(check))
+    }
+
+    @Test
+    fun globalHttpProxyIsHard() {
+        val check = ValidationCheck(
+            id = "android.http_proxy",
+            label = "No global HTTP proxy",
+            status = ValidationStatus.Fail,
+            detail = "Global HTTP proxy='127.0.0.1:8080' — clear it (local MITM risk)",
             tripsKillSwitch = true,
         )
         assertTrue(TunnelValidator.isHardKillSwitchFailure(check))

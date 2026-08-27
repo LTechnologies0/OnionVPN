@@ -228,7 +228,7 @@ Generated from source enumeration — do not invent IDs without evidence paths.
 | AL-220 | validation | `core/validation/src/main/java/ltechnologies/onionphone/onionvpn/core/validation/leak/SystemLeakInspector.kt` | check id android.vpn.always_on defined | TunnelValidator* | Pass |
 | AL-221 | validation | `core/validation/src/main/java/ltechnologies/onionphone/onionvpn/core/validation/leak/SystemLeakInspector.kt` | check id android.dns.private defined | TunnelValidator* | Pass |
 | AL-222 | validation | `core/validation/src/main/java/ltechnologies/onionphone/onionvpn/core/validation/leak/SystemLeakInspector.kt` | check id android.captive_portal defined | TunnelValidator* | Pass |
-| AL-223 | validation | `core/validation/src/main/java/ltechnologies/onionphone/onionvpn/core/validation/leak/SystemLeakInspector.kt` | check id android.http_proxy defined | TunnelValidator* | Pass |
+| AL-223 | validation | `core/validation/src/main/java/ltechnologies/onionphone/onionvpn/core/validation/leak/SystemLeakInspector.kt` | android.http_proxy Fail tripsKillSwitch + hard in TunnelValidator | AntiLeakHardKillSwitch* | Pass |
 | AL-224 | validation | `core/validation/src/main/java/ltechnologies/onionphone/onionvpn/core/validation/leak/SystemLeakInspector.kt` | check id android.vpn.permission defined | TunnelValidator* | Pass |
 | AL-225 | validation | `core/validation/src/main/java/ltechnologies/onionphone/onionvpn/core/validation/leak/SystemLeakInspector.kt` | check id firewall.engine defined | TunnelValidator* | Pass |
 | AL-226 | mapped-torsocks | `LeakPacketFilter.blackholeBeforeTorTcp` | deny UDP app traffic | AntiLeakMappedTest | Pass |
