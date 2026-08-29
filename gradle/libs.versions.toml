@@ -1,5 +1,5 @@
 [versions]
-agp = "9.3.1"
+agp = "9.3.2"
 kotlin = "2.4.10"
 ksp = "2.3.11"
 compileSdk = "37"
@@ -10,12 +10,12 @@ core-ktx = "1.19.0"
 activity-compose = "1.13.0"
 lifecycle = "2.11.0"
 navigation = "2.9.0"
-compose-bom = "2026.06.01"
+compose-bom = "2026.08.00"
 compose-material3 = "1.5.0-alpha25"
 hilt = "2.60.1"
 coroutines = "1.11.0"
 timber = "5.0.1"
-okhttp = "5.4.0"
+okhttp = "5.5.0"
 datastore = "1.1.7"
 biometric = "1.1.0"
 arti-mobile = "1.7.0.1"
@@ -28,7 +28,7 @@ benchmark = "1.4.1"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "core-ktx" }
-androidx-appcompat = { group = "androidx.appcompat", name = "appcompat", version = "1.7.0" }
+androidx-appcompat = { group = "androidx.appcompat", name = "appcompat", version = "1.8.0" }
 androidx-activity-compose = { group = "androidx.activity", name = "activity-compose", version.ref = "activity-compose" }
 androidx-lifecycle-runtime-ktx = { group = "androidx.lifecycle", name = "lifecycle-runtime-ktx", version.ref = "lifecycle" }
 androidx-lifecycle-viewmodel-compose = { group = "androidx.lifecycle", name = "lifecycle-viewmodel-compose", version.ref = "lifecycle" }
