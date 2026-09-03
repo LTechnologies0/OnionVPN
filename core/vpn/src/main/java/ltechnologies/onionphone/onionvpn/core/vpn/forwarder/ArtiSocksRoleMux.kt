@@ -19,6 +19,9 @@ import timber.log.Timber
  *
  * Do **not** construct with a Service/`ContextWrapper` from a field initializer —
  * [Context.getApplicationContext] NPEs before [android.app.Service.onCreate].
+ *
+ * [start] hot-swaps upstream when listen ports are unchanged (onionmasq sidecar rebind)
+ * so the OpenVPN auth shim keeps its accept FD and does not force soft-reconnect.
  */
 class ArtiSocksRoleMux {
     private var ownerResolver: ConnectionOwnerResolver? = null
@@ -32,49 +35,44 @@ class ArtiSocksRoleMux {
      * @param appContext application context (never a half-constructed Service).
      */
     fun start(ports: TunnelRuntimePorts, appContext: Context? = null) {
-        stop()
         ownerResolver = appContext?.applicationContext?.let { ConnectionOwnerResolver(it) }
         if (ports.torDnsCryptSocksPort == ports.torSocksPort &&
             ports.torProbeSocksPort == ports.torSocksPort &&
             ports.torOpenVpnSocksPort == ports.torSocksPort
         ) {
+            stop()
             Timber.i("ArtiSocksRoleMux: ports collapsed — nothing to relay")
             return
         }
-        if (ports.torDnsCryptSocksPort != ports.torSocksPort) {
-            dnsCryptRelay = SocksTcpRelay(
-                listenPort = ports.torDnsCryptSocksPort,
-                upstreamHost = TunnelEndpoints.LOOPBACK,
-                upstreamPort = ports.torSocksPort,
-                label = "dnscrypt",
-                acceptPeer = ::isTrustedPeer,
-            ).also { it.start() }
-        }
-        if (ports.torProbeSocksPort != ports.torSocksPort &&
+
+        val wantDns = ports.torDnsCryptSocksPort != ports.torSocksPort
+        val wantProbe = ports.torProbeSocksPort != ports.torSocksPort &&
             ports.torProbeSocksPort != ports.torDnsCryptSocksPort
-        ) {
-            probeRelay = SocksTcpRelay(
-                listenPort = ports.torProbeSocksPort,
-                upstreamHost = TunnelEndpoints.LOOPBACK,
-                upstreamPort = ports.torSocksPort,
-                label = "probe",
-                acceptPeer = ::isTrustedPeer,
-            ).also { it.start() }
-        }
-        if (ports.torOpenVpnSocksPort != ports.torSocksPort &&
+        val wantOvpn = ports.torOpenVpnSocksPort != ports.torSocksPort &&
             ports.torOpenVpnSocksPort != ports.torDnsCryptSocksPort &&
             ports.torOpenVpnSocksPort != ports.torProbeSocksPort
-        ) {
-            // OpenVPN omits socks-proxy auth (ics-openvpn VER=5 bug). Arti requires
-            // IsolateSOCKSAuth — terminate NO-AUTH locally and inject uopenvpn/popenvpn.
-            openVpnRelay = SocksAuthInjectingRelay(
-                listenPort = ports.torOpenVpnSocksPort,
-                upstreamHost = TunnelEndpoints.LOOPBACK,
-                upstreamPort = ports.torSocksPort,
-                label = "openvpn",
-                acceptPeer = ::isTrustedPeer,
-            ).also { it.start() }
-        }
+
+        dnsCryptRelay = syncTcpRelay(
+            current = dnsCryptRelay,
+            want = wantDns,
+            listen = ports.torDnsCryptSocksPort,
+            upstream = ports.torSocksPort,
+            label = "dnscrypt",
+        )
+        probeRelay = syncTcpRelay(
+            current = probeRelay,
+            want = wantProbe,
+            listen = ports.torProbeSocksPort,
+            upstream = ports.torSocksPort,
+            label = "probe",
+        )
+        openVpnRelay = syncAuthRelay(
+            current = openVpnRelay,
+            want = wantOvpn,
+            listen = ports.torOpenVpnSocksPort,
+            upstream = ports.torSocksPort,
+        )
+
         Timber.i(
             "ArtiSocksRoleMux up arti=%d dnscrypt=%d probe=%d openvpn=%d peerGate=%s",
             ports.torSocksPort,
@@ -93,6 +91,56 @@ class ArtiSocksRoleMux {
         probeRelay = null
         openVpnRelay = null
         ownerResolver = null
+    }
+
+    private fun syncTcpRelay(
+        current: SocksTcpRelay?,
+        want: Boolean,
+        listen: Int,
+        upstream: Int,
+        label: String,
+    ): SocksTcpRelay? {
+        if (!want) {
+            current?.stop()
+            return null
+        }
+        if (current != null && current.listenPort == listen) {
+            current.updateUpstream(upstream)
+            return current
+        }
+        current?.stop()
+        return SocksTcpRelay(
+            listenPort = listen,
+            upstreamHost = TunnelEndpoints.LOOPBACK,
+            upstreamPort = upstream,
+            label = label,
+            acceptPeer = ::isTrustedPeer,
+        ).also { it.start() }
+    }
+
+    private fun syncAuthRelay(
+        current: SocksAuthInjectingRelay?,
+        want: Boolean,
+        listen: Int,
+        upstream: Int,
+    ): SocksAuthInjectingRelay? {
+        if (!want) {
+            current?.stop()
+            return null
+        }
+        if (current != null && current.listenPort == listen) {
+            current.updateUpstream(upstream)
+            Timber.i("ArtiSocksRoleMux openvpn hot-swap upstream=%d (listen kept)", upstream)
+            return current
+        }
+        current?.stop()
+        return SocksAuthInjectingRelay(
+            listenPort = listen,
+            upstreamHost = TunnelEndpoints.LOOPBACK,
+            upstreamPort = upstream,
+            label = "openvpn",
+            acceptPeer = ::isTrustedPeer,
+        ).also { it.start() }
     }
 
     private fun isTrustedPeer(client: Socket): Boolean {

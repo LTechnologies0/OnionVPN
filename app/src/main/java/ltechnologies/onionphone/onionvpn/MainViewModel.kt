@@ -1,11 +1,13 @@
 package ltechnologies.onionphone.onionvpn
 
 import android.app.Activity
+import android.content.Context
 import android.content.Intent
 import android.net.VpnService
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
+import dagger.hilt.android.qualifiers.ApplicationContext
 import java.io.File
 import javax.inject.Inject
 import kotlinx.coroutines.Dispatchers
@@ -26,12 +28,14 @@ import ltechnologies.onionphone.onionvpn.core.model.TunnelPhase
 import ltechnologies.onionphone.onionvpn.core.model.TunnelPreferences
 import ltechnologies.onionphone.onionvpn.core.model.TunnelSnapshot
 import ltechnologies.onionphone.onionvpn.core.tor.TorProcessManager
+import ltechnologies.onionphone.onionvpn.core.vpn.forwarder.TunDataPlaneFactory
 import ltechnologies.onionphone.onionvpn.prefs.TunnelPreferencesStore
 import ltechnologies.onionphone.onionvpn.tunnel.TunnelOrchestrator
 import timber.log.Timber
 
 @HiltViewModel
 class MainViewModel @Inject constructor(
+    @ApplicationContext private val appContext: Context,
     private val orchestrator: TunnelOrchestrator,
     private val preferencesStore: TunnelPreferencesStore,
     private val tor: TorProcessManager,
@@ -61,12 +65,13 @@ class MainViewModel @Inject constructor(
      * race the broadcast receiver's async DataStore write (which previously left LITTLE_T running).
      */
     suspend fun applyDebugTunnelIntent(engineRaw: String?, planeRaw: String?): TunnelPreferences {
+        val engine = TorEngine.fromPreference(engineRaw ?: TorEngine.ARTI.name)
+        val requested = TunDataPlane.fromPreference(planeRaw ?: TunDataPlane.ONIONMASQ.name)
+        val plane = TunDataPlaneFactory.resolve(appContext, requested, engine)
         preferencesStore.update { prefs ->
             prefs.copy(
-                torEngine = TorEngine.fromPreference(engineRaw ?: TorEngine.ARTI.name),
-                tunDataPlane = TunDataPlane.fromPreference(
-                    planeRaw ?: TunDataPlane.ONIONMASQ.name,
-                ),
+                torEngine = engine,
+                tunDataPlane = plane,
                 appLockEnabled = false,
                 autoStartOnAppLaunch = true,
                 allowAdbClearnetLeak = true,

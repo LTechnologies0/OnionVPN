@@ -6,7 +6,8 @@
 Apps → VpnService TUN → TunDnsMux → hev-socks5-tunnel → SocksUidBridge → Tor SOCKS
 ```
 
-Works with C Tor always. Arti uses HEV only when `libonionmasq_mobile.so` is missing.
+Works with C Tor always. Arti may use HEV (arti-mobile SOCKS) or onionmasq;
+Settings defaults Arti to onionmasq when `libonionmasq_mobile.so` is present.
 
 ### Arti + DNSCrypt bootstrap (HEV / arti-mobile — fallback only)
 
@@ -24,12 +25,14 @@ DNSCrypt bootstrap/netprobe (TCP DNS)
 
 C Tor keeps classic DNSPort (UDP+TCP) — no adapter required.
 
-## ONIONMASQ (forced for Arti when `libonionmasq_mobile.so` present)
+## ONIONMASQ (Arti default when `libonionmasq_mobile.so` present)
 
 Tor Project **onionmasq**: TUN packets (via TunDnsMux socketpair) → smoltcp → **arti-client** in-process.
 
-**Policy:** `TunDataPlaneFactory` forces ONIONMASQ whenever engine=ARTI and the native
-library is present (Settings cannot keep Arti on HEV).
+**Policy:** Settings defaults Arti to ONIONMASQ when the native library is present;
+`TunDataPlaneFactory` only coerces invalid combinations (missing `.so` → HEV,
+C Tor × onionmasq → HEV). **Arti + HEV** remains selectable (arti-mobile SOCKS +
+Automap→SOCKS5A). C Tor always uses HEV.
 
 **Single TorClient** (Tor VPN parity — no parallel arti-mobile):
 
@@ -46,15 +49,21 @@ Blocking TUN (kill-switch)
 
 ```
 Apps → TUN → TunDnsMux → DNSCrypt (UDP/53 IPv4+IPv6 ULA `fd00:8:8:8::1`)
-                      └→ socketpair → OnionMasq.start(fd) → Arti TorClient
+                      ├→ socketpair → OnionMasq.start(fd) → Arti TorClient  (clearnet TCP)
+                      └→ Automap TCP (`10.192.0.0/10`) → hev → SocksUidBridge
+                           → onionmasq SOCKS sidecar (SOCKS5A `.onion` hostname)
 DNSCrypt / probes → onionmasq SOCKS sidecar (dnscrypt[-nN] / probe + role passwords)
+```
+
+**Why Automap divert:** onionmasq smoltcp only sees the synthesized Automap IP. Without
+hostname rewrite, `.onion` CONNECT fails (browser + Cake Wallet). C Tor+hev already
+rewrote via [SocksUidBridge]; Arti+onionmasq now uses the same bridge toward the sidecar.
 
 App streams use IsolateSOCKSAuth tokens `u{uid}` / `u{uid}-n{epoch}` (epoch bumps on NEWNYM —
 KeepAliveIsolateSOCKSAuth must not stick pre-NEWNYM identity). DNSCrypt stays on a separate
 SessionGroup / `dnscrypt[-nN]` token (Whonix: DNS ≠ app circuits). Apps SocksPort omits
 `IsolateClientAddr` (every bridge client is 127.0.0.1). PAC refuses CONNECT when UID is unknown
 (no shared `pac` pool).
-```
 
 No live MaxCircuitDirtiness on onionmasq (Tor VPN same gap) — UI hides Arti Ext timing;
 exit country via `setCountryCode` + NEWNYM via `refreshCircuits` (~10.5s rate limit).
@@ -78,7 +87,7 @@ exit country via `setCountryCode` + NEWNYM via `refreshCircuits` (~10.5s rate li
 
 ### Anti-leak
 
-OnionVPN keeps fail-closed routing (no Tor VPN `allowFamily`). Own package stays disallowed from the VPN; onionmasq/Arti sockets use clearnet uplink via `protect`. Tor-native apps (Orbot, Tor Browser, …) use a dual bypass: **hev / all planes** — `VpnService.Builder.addDisallowedApplication` (Orbot BYPASS, **signature-pinned** via `TorNativeAppUids`); **onionmasq** — additionally `setExcludedUids` before `OnionMasq.start` (clearnet via `protect`). PACKAGE_ADDED/REMOVED/REPLACED for Tor-native candidates **rebinds Connected** on hev (disallow list is establish-time only) and refreshes onionmasq UIDs. **INCLUDE × Android lockdown** refuses Connected establish (Builder cannot mix allow + disallow; lockdown would offline BYPASS apps — never Orbot #774 skip-BYPASS). DNSCrypt bootstrap never uses system DNS (`SocksDnsBootstrapRelay` TCP+UDP over sidecar on onionmasq; TCP adapter + Arti resolve/RESOLVE/DoH on Arti HEV; Tor DNSPort on C Tor).
+OnionVPN keeps fail-closed routing (no Tor VPN `allowFamily`). Own package stays disallowed from the VPN; onionmasq/Arti sockets use clearnet uplink via `protect`. Tor-native apps (Orbot, Tor Browser, …) use a dual bypass: **hev / all planes** — `VpnService.Builder.addDisallowedApplication` (Orbot BYPASS, **signature-pinned** via `TorNativeAppUids`); **onionmasq** — additionally `setExcludedUids` before `OnionMasq.start` (clearnet via `protect`). PACKAGE_ADDED/REMOVED/REPLACED for Tor-native candidates **rebinds Connected** on hev (disallow list is establish-time only); **onionmasq** refreshes UIDs via `setExcludedUids` only (no Connected rebind — preserves Automap→sidecar wiring). **INCLUDE × Android lockdown** refuses Connected establish (Builder cannot mix allow + disallow; lockdown would offline BYPASS apps — never Orbot #774 skip-BYPASS). DNSCrypt bootstrap never uses system DNS (`SocksDnsBootstrapRelay` TCP+UDP over sidecar on onionmasq; TCP adapter + Arti resolve/RESOLVE/DoH on Arti HEV; Tor DNSPort on C Tor).
 
 ### Lifecycle (native abort hazard)
 

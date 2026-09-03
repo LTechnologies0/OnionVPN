@@ -9,9 +9,11 @@ import java.io.File
 /**
  * Selects TUN→Tor forwarder. onionmasq path is gated on native availability + Arti.
  *
- * **Arti policy:** when `libonionmasq_mobile.so` is present, Arti always uses
- * [TunDataPlane.ONIONMASQ] (single TorClient). HEV is only for C Tor or Arti
- * without the native library.
+ * **Settings default:** Arti → [TunDataPlane.ONIONMASQ] when `libonionmasq_mobile.so`
+ * is present (UI chip). This factory does **not** invent a default — it only coerces
+ * invalid combinations: missing `.so` → HEV; C Tor × onionmasq → HEV.
+ * **Arti + HEV:** allowed when explicitly requested (arti-mobile SOCKS + Automap).
+ * **C Tor:** always [TunDataPlane.HEV_SOCKS].
  */
 object TunDataPlaneFactory {
     fun resolve(
@@ -19,18 +21,19 @@ object TunDataPlaneFactory {
         requested: TunDataPlane,
         engine: TorEngine,
     ): TunDataPlane {
-        if (engine == TorEngine.ARTI && isOnionmasqNativePresent(context)) {
-            if (requested != TunDataPlane.ONIONMASQ) {
-                Timber.i("Arti + onionmasq native — forcing ONIONMASQ (was %s)", requested)
-            }
-            return TunDataPlane.ONIONMASQ
-        }
-        if (requested == TunDataPlane.ONIONMASQ) {
-            if (engine != TorEngine.ARTI) {
-                Timber.w("onionmasq requires Arti — falling back to HEV_SOCKS")
+        if (engine == TorEngine.ARTI) {
+            if (requested == TunDataPlane.ONIONMASQ) {
+                if (isOnionmasqNativePresent(context)) {
+                    return TunDataPlane.ONIONMASQ
+                }
+                Timber.w("libonionmasq_mobile.so missing — Arti falling back to HEV_SOCKS")
                 return TunDataPlane.HEV_SOCKS
             }
-            Timber.w("libonionmasq_mobile.so missing — falling back to HEV_SOCKS")
+            // Explicit HEV with Arti (arti-mobile SOCKS + Automap rewrite).
+            return TunDataPlane.HEV_SOCKS
+        }
+        if (requested == TunDataPlane.ONIONMASQ) {
+            Timber.w("onionmasq requires Arti — falling back to HEV_SOCKS")
             return TunDataPlane.HEV_SOCKS
         }
         return TunDataPlane.HEV_SOCKS

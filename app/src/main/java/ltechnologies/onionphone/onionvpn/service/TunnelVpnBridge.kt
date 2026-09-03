@@ -5,6 +5,7 @@ import android.content.Intent
 import kotlinx.coroutines.delay
 import ltechnologies.onionphone.onionvpn.core.model.TunnelPreferences
 import ltechnologies.onionphone.onionvpn.core.model.TunnelRuntimePorts
+import ltechnologies.onionphone.onionvpn.core.model.TunDataPlane
 import ltechnologies.onionphone.onionvpn.core.model.VpnProfileMode
 import ltechnologies.onionphone.onionvpn.core.vpn.OnionVpnService
 import ltechnologies.onionphone.onionvpn.core.vpn.dns.DnsHostnameCache
@@ -129,7 +130,7 @@ internal class TunnelVpnBridge(
         repeat(VPN_READY_POLLS) {
             val established = OnionVpnService.vpnEstablished.value
             val genOk = OnionVpnService.vpnGeneration.value == generation
-            if (established && genOk && hevPortsMatch(ports, useDnsCrypt)) return true
+            if (established && genOk && planePortsMatch(ports, useDnsCrypt)) return true
             delay(VPN_READY_POLL_MS)
         }
         Timber.e(
@@ -158,10 +159,25 @@ internal class TunnelVpnBridge(
     }
 
     fun hevPortsMatch(ports: TunnelRuntimePorts, useDnsCrypt: Boolean): Boolean {
+        if (!OnionVpnService.tunForwarderAlive.value) return false
         val hevSocks = OnionVpnService.hevSocksPort.value
         val hevDns = OnionVpnService.hevDnsCryptPort.value
         return hevSocks == ports.torSocksPort &&
             (!useDnsCrypt || hevDns == ports.dnsCryptListenPort)
+    }
+
+    /**
+     * HEV: socks + DNSCrypt listen must match allocated ports AND forwarder alive.
+     * onionmasq (cold Connected): DNSCrypt listen + alive; socks stay -1 until sidecar
+     * is wired (validated later by [TunnelValidator.validateOnionmasqPlane]).
+     */
+    fun planePortsMatch(ports: TunnelRuntimePorts, useDnsCrypt: Boolean): Boolean {
+        if (!OnionVpnService.tunForwarderAlive.value) return false
+        if (OnionVpnService.vpnDataPlane.value == TunDataPlane.ONIONMASQ) {
+            val hevDns = OnionVpnService.hevDnsCryptPort.value
+            return !useDnsCrypt || hevDns == ports.dnsCryptListenPort
+        }
+        return hevPortsMatch(ports, useDnsCrypt)
     }
 
     companion object {

@@ -4,6 +4,34 @@ All notable changes to OnionVPN are documented here.
 
 ## [Unreleased]
 
+## [0.3.74] — 2026-09-04
+
+### .onion on C Tor and Arti
+- Automap TCP divert on onionmasq → SocksUidBridge → sidecar SOCKS5A; rebuild
+  `libonionmasq_mobile.so` with `connect_to_onion_services` + `allow_onion_addrs`.
+- Arti + hev selectable (arti-mobile); onionmasq validation requires Automap upstream == sidecar.
+
+### Consistency (firewall / planes / ports)
+- Blocking establish clears SOCKS publish gate (`stopForwarder`) — no stale hevSocksPort on blackhole TUN.
+- SOCKS decision keys namespaced (`PACL`) — PAC/hev ALLOW_TOR no longer poisons TUN Via OVPN.
+- CircuitLifecycle gated on `classicControlPlane` (not Arti `circuitInspection`).
+- ArtiSocksRoleMux hot-swaps upstream on sidecar rebind (OpenVPN listen FD kept).
+- Arti Settings copy: “role-mux SocksPorts” (not native SessionGroup).
+- Via OVPN ASK when OVPN down stores ALLOW_TOR (was DENY blackhole).
+- Sticky ALLOW_OVPN rules/cache demote to Tor when SNAT/health is down (`coerceLiveOvpn`).
+- `setTorSocksUpstream(0)` clears published `hevSocksPort` to -1; positive publish only when bridge updater exists.
+- onionmasq Connected wait is DNSCrypt-listen-aware; socks stay -1 until sidecar wired.
+- startForwarder failure / onFatal clear ports → -1 (fail-closed).
+- `waitForConnected` / `hevPortsMatch` / `planePortsMatch` require `tunForwarderAlive`.
+- onionmasq forwarder rebind rewires sidecar (Automap + DNSCrypt + PAC); Tor-native package rebind is HEV-only.
+- Downtime restore on onionmasq uses live sidecar only (no stale remapped port).
+- Automap: firewall DENY when hostname unknown; SYN brief cache retry; remap cancels ASK.
+- SOCKS flow-cache entries go through `coerceSocksVerdict` (OVPN demotion).
+- Hard-kill IDs: `uid.forwarder.wiring`, `onionmasq.plane.wiring` (drop unused hev.* aliases).
+- Debug tunnel start resolves plane via `TunDataPlaneFactory` (no onionmasq without `.so`).
+- Arti chip defaults to onionmasq when native present; hev remains explicit opt-in.
+- Hide dead FakeDNS Settings mode; CLOSECIRCUIT 552 → debug (no Error spam).
+
 ## [0.3.73] — 2026-08-27
 
 ### MITM hardening (in-scope)

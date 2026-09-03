@@ -194,7 +194,16 @@ internal class TorControlOperations(
         Timber.v("CLOSECIRCUIT %s ifUnused=%s", circId, ifUnused)
         transport.command("CLOSECIRCUIT $circId$flags")
         Unit
-    }.onFailure { Timber.w(it, "CLOSECIRCUIT %s failed", id) }
+    }.onFailure { err ->
+        // Tor often races: circuit already closed → 552 Unknown circuit.
+        // Avoid the word "failed" (TunnelLogTree escalates it to Error).
+        val msg = err.message.orEmpty()
+        if (msg.contains("Unknown circuit", ignoreCase = true) || msg.contains("552")) {
+            Timber.d(err, "CLOSECIRCUIT %s skipped (already gone)", id)
+        } else {
+            Timber.w(err, "CLOSECIRCUIT %s error", id)
+        }
+    }
 
     fun closeStream(
         id: String,

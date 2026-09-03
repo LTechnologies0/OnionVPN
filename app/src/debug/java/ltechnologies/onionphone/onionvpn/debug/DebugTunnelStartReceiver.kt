@@ -12,6 +12,7 @@ import kotlinx.coroutines.launch
 import ltechnologies.onionphone.onionvpn.MainActivity
 import ltechnologies.onionphone.onionvpn.core.model.TorEngine
 import ltechnologies.onionphone.onionvpn.core.model.TunDataPlane
+import ltechnologies.onionphone.onionvpn.core.vpn.forwarder.TunDataPlaneFactory
 import ltechnologies.onionphone.onionvpn.prefs.TunnelPreferencesStore
 import timber.log.Timber
 
@@ -52,12 +53,15 @@ class DebugTunnelStartReceiver : BroadcastReceiver() {
         val appContext = context.applicationContext
         scope.launch {
             try {
+                val engine = TorEngine.fromPreference(engineExtra ?: TorEngine.ARTI.name)
+                val requested = TunDataPlane.fromPreference(
+                    planeExtra ?: TunDataPlane.ONIONMASQ.name,
+                )
+                val plane = TunDataPlaneFactory.resolve(appContext, requested, engine)
                 preferencesStore.update { prefs ->
                     prefs.copy(
-                        torEngine = TorEngine.fromPreference(engineExtra ?: TorEngine.ARTI.name),
-                        tunDataPlane = TunDataPlane.fromPreference(
-                            planeExtra ?: TunDataPlane.ONIONMASQ.name,
-                        ),
+                        torEngine = engine,
+                        tunDataPlane = plane,
                         appLockEnabled = false,
                         autoStartOnAppLaunch = true,
                         allowAdbClearnetLeak = true,
@@ -65,15 +69,15 @@ class DebugTunnelStartReceiver : BroadcastReceiver() {
                 }
                 Timber.i(
                     "DEBUG_START_TUNNEL prefs saved — launching MainActivity engine=%s plane=%s",
-                    engineExtra ?: TorEngine.ARTI.name,
-                    planeExtra ?: TunDataPlane.ONIONMASQ.name,
+                    engine.name,
+                    plane.name,
                 )
                 appContext.startActivity(
                     Intent(appContext, MainActivity::class.java).apply {
                         addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
                         putExtra(EXTRA_DEBUG_START_TUNNEL, true)
-                        putExtra(EXTRA_TOR_ENGINE, engineExtra ?: TorEngine.ARTI.name)
-                        putExtra(EXTRA_TUN_DATA_PLANE, planeExtra ?: TunDataPlane.ONIONMASQ.name)
+                        putExtra(EXTRA_TOR_ENGINE, engine.name)
+                        putExtra(EXTRA_TUN_DATA_PLANE, plane.name)
                     },
                 )
             } catch (t: Throwable) {

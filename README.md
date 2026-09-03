@@ -1,6 +1,6 @@
 # OnionVPN
 
-Privacy-focused Android VPN that routes **all device traffic through Tor**, with **DNSCrypt** for app DNS (over Tor SOCKS by default; FakeDNS / SOCKS5A as a settings fallback). Inspired by InviZible and Mullvad-style leak protection.
+Privacy-focused Android VPN that routes **all device traffic through Tor**, with **DNSCrypt** for app DNS over Tor SOCKS (TunDnsMux divert). Inspired by InviZible and Mullvad-style leak protection.
 
 **Package:** `ltechnologies.onionphone.onionvpn`  
 **Min SDK 26 · Target / Compile SDK 37 · Java/Kotlin 21 · Jetpack Compose**

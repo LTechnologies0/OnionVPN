@@ -42,8 +42,12 @@ import timber.log.Timber
 /**
  * Tor-VPN-style data plane: VpnService TUN → [TunDnsMux] → socketpair → onionmasq (smoltcp→Arti).
  *
- * DNSCrypt divert stays on [TunDnsMux]; DNSCrypt upstream still needs a Tor SOCKS sidecar
- * (arti-mobile interim or onionmasq SOCKS when patched) — not provided by this forwarder.
+ * DNSCrypt divert stays on [TunDnsMux]. Clearnet TCP enters onionmasq; Automap virtual IPs
+ * (`10.192.0.0/10`) divert to a side hev→[SocksUidBridge]→onionmasq SOCKS sidecar so
+ * SOCKS5A can carry the real `.onion` hostname (smoltcp only sees the synth IP otherwise).
+ *
+ * DNSCrypt / probes use the same SOCKS sidecar (patched onionmasq) — not provided by this
+ * forwarder beyond [updateTorSocks] wiring.
  */
 class OnionmasqTunForwarder(
     private val context: Context,
@@ -51,6 +55,7 @@ class OnionmasqTunForwarder(
     private val bridgeLines: String? = null,
     private val exitCountryCode: String? = null,
     private val allowAdbClearnetLeak: Boolean = false,
+    private val protectSocket: ((java.net.Socket) -> Boolean)? = null,
     private val onFatal: ((Throwable) -> Unit)? = null,
     private val onBootstrap: ((BootstrapEvent) -> Unit)? = null,
     private val onOnionmasqEvent: ((OnionmasqEvent) -> Unit)? = null,
@@ -58,6 +63,7 @@ class OnionmasqTunForwarder(
     private val supervisor = SupervisorJob()
     private val scope = CoroutineScope(supervisor + Dispatchers.IO)
     private val worker = AtomicReference<Job?>(null)
+    private val automapHevWorker = AtomicReference<Job?>(null)
     private val running = AtomicBoolean(false)
     /**
      * True once we have handed a TUN fd to [OnionMasq.start] (or are about to).
@@ -72,6 +78,8 @@ class OnionmasqTunForwarder(
     private val proxyOwned = AtomicBoolean(false)
     private var dnsMux: TunDnsMux? = null
     private var omEnd: ParcelFileDescriptor? = null
+    private var automapHevEnd: ParcelFileDescriptor? = null
+    private var uidBridge: SocksUidBridge? = null
     private val mainHandler = Handler(Looper.getMainLooper())
     private var eventObserver: Observer<OnionmasqEvent>? = null
     /** Tor VPN parity: drives OnionMasqJni.setInternetConnectivity on uplink changes. */
@@ -81,6 +89,14 @@ class OnionmasqTunForwarder(
      * are installed/removed (setExcludedUids was previously one-shot at start).
      */
     private var packageReceiver: BroadcastReceiver? = null
+
+    /**
+     * Point Automap [SocksUidBridge] at the onionmasq SOCKS sidecar (or 0 to pause).
+     * Call after [OnionmasqSocksSidecar.awaitPort] without tearing down hev.
+     */
+    fun updateTorSocks(port: Int) {
+        uidBridge?.updateTorSocks(port)
+    }
 
     override fun start(
         tunFd: ParcelFileDescriptor,
@@ -137,6 +153,51 @@ class OnionmasqTunForwarder(
             }.onFailure { Timber.w(it, "ConnectivityHandler.register failed") }
 
             try {
+                // Automap → hev → SocksUidBridge → sidecar SOCKS5A (hostname).
+                // Upstream Tor port starts at 0; TunnelForegroundService calls
+                // updateTorSocks(sidecar) after OnionMasq bootstrap.
+                val bridge = SocksUidBridge(
+                    context = context,
+                    protectSocket = protectSocket,
+                    onFatal = onFatal,
+                )
+                bridge.start(torSocks = 0, dnsCrypt = dnsCryptPort)
+                uidBridge = bridge
+
+                val automapPair = HevSocks5TunForwarder.createPacketSocketPair()
+                val automapHevNative = automapPair[0]
+                val automapMuxEnd = automapPair[1]
+                automapHevEnd = automapHevNative
+                val automapJob = scope.launch {
+                    val configFile = java.io.File(context.filesDir, "hev-onionmasq-automap.yaml")
+                    configFile.writeText(
+                        buildAutomapHevConfig(
+                            TunnelEndpoints.LOOPBACK,
+                            TunnelEndpoints.SOCKS_UID_BRIDGE_PORT,
+                        ),
+                    )
+                    Timber.i(
+                        "Starting Automap hev on fd=%d → SocksUidBridge :%d",
+                        automapHevNative.fd,
+                        TunnelEndpoints.SOCKS_UID_BRIDGE_PORT,
+                    )
+                    try {
+                        hev.sockstun.TProxyService.TProxyStartService(
+                            configFile.absolutePath,
+                            automapHevNative.fd,
+                        )
+                    } catch (error: Exception) {
+                        Timber.e(error, "Automap hev exited")
+                        onFatal?.invoke(
+                            TunnelFailure.ForwarderDead(
+                                "Automap hev exited: ${error.message}",
+                                error,
+                            ),
+                        )
+                    }
+                }
+                automapHevWorker.set(automapJob)
+
                 val pair = HevSocks5TunForwarder.createPacketSocketPair()
                 val onionEnd = pair[0]
                 val muxEnd = pair[1]
@@ -154,6 +215,7 @@ class OnionmasqTunForwarder(
                     torDnsHost = TunnelEndpoints.LOOPBACK,
                     torDnsPort = torDnsPort,
                     synthesizeOnionAutomap = synthesizeOnionAutomap,
+                    automapHevFd = automapMuxEnd,
                     onFatal = { error ->
                         Timber.e(error, "TunDnsMux died (onionmasq path)")
                         onFatal?.invoke(error)
@@ -245,14 +307,40 @@ class OnionmasqTunForwarder(
             .onFailure { Timber.w(it, "OnionMasq.unbindVPNService failed") }
         dnsMux?.stop()
         dnsMux = null
+        try {
+            hev.sockstun.TProxyService.TProxyStopService()
+        } catch (error: Exception) {
+            Timber.w(error, "Failed to stop Automap hev")
+        }
+        automapHevWorker.getAndSet(null)?.cancel()
+        uidBridge?.stop()
+        uidBridge = null
         worker.getAndSet(null)?.cancel()
         supervisor.cancelChildren()
         // Only if start() failed before detachFd(); after detach, native owns the fd.
         runCatching { omEnd?.close() }
         omEnd = null
+        runCatching { automapHevEnd?.close() }
+        automapHevEnd = null
     }
 
     fun isRunning(): Boolean = running.get() && proxyOwned.get()
+
+    private fun buildAutomapHevConfig(socksHost: String, socksPort: Int): String = buildString {
+        appendLine("tunnel:")
+        appendLine("  mtu: ${TunnelEndpoints.VPN_MTU}")
+        appendLine("  ipv4: ${TunnelEndpoints.VPN_CLIENT_ADDRESS}")
+        appendLine("  ipv6: '${TunnelEndpoints.VPN_CLIENT_ADDRESS_V6}'")
+        appendLine("  icmp: 'off'")
+        appendLine("socks5:")
+        appendLine("  port: $socksPort")
+        appendLine("  address: '$socksHost'")
+        appendLine("  udp: 'tcp'")
+        appendLine("misc:")
+        appendLine("  log-level: warn")
+        appendLine("  tcp-read-write-timeout: 300000")
+        appendLine("  udp-read-write-timeout: 60000")
+    }
 
     /** Pre-start: init required, running not required (sample Tor VPN pattern). */
     private fun applyExcludedUidsPreStart() {

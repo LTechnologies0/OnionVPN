@@ -102,8 +102,8 @@ object ExitIpValidator {
                     isTor = if (json.has("IsTor")) json.getBoolean("IsTor") else null,
                 )
             } catch (error: Exception) {
-                Timber.w(error, "Tor exit IP check failed")
-                TorCheckResult(null, null, error.message ?: "fetch failed")
+                Timber.w(error, "Tor exit IP check soft-miss")
+                TorCheckResult(null, null, error.message ?: "check.torproject.org unreachable")
             }
         }
     }
@@ -113,11 +113,12 @@ object ExitIpValidator {
         underlying: Set<String>,
     ): ValidationCheck {
         val ip = egress.ip
-        if (ip == null) {
+                if (ip == null) {
             return ValidationCheck(
                 id = "tor.exit.ip",
                 label = "Egress IP is Tor exit (not ISP/LAN)",
                 status = ValidationStatus.Fail,
+                // Soft flake (SOCKS RST / check.torproject timeout) — not a leak signal.
                 detail = egress.error ?: "No IP from check.torproject.org via SOCKS",
                 tripsKillSwitch = false,
             )

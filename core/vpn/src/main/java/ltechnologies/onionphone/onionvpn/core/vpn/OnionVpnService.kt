@@ -235,15 +235,20 @@ class OnionVpnService : VpnService() {
                     } catch (error: Exception) {
                         // Previous forwarder already stopped — fail-closed blackhole TUN,
                         // never leave isRebinding=true (watchdog/validation would freeze).
+                        // Clear published socks/DNS ports so wait/validators cannot see a
+                        // stale "live" bridge after start() threw mid-bind.
                         forwarderOk = false
-                        forwarderAlive.value = false
+                        stopForwarder()
                         stopUnderlyingTracking()
                         Timber.e(error, "startForwarder failed after TUN establish — blackhole fail-closed")
                         OpTrace.error("vpn", "startForwarder failed", error)
                     }
                 } else {
+                    // Blocking / no-forwarder Connected: previous plane already stopped.
+                    // Must clear updater+alive — otherwise downtime restore republishes
+                    // hevSocksPort>0 while TUN is blackhole (no SocksUidBridge).
                     stopUnderlyingTracking()
-                    tunForwarder = null
+                    stopForwarder()
                 }
                 if (previousTun != null && previousTun !== tunInterface) {
                     previousTun.close()
@@ -303,9 +308,10 @@ class OnionVpnService : VpnService() {
         val result = establish(preferences, VpnProfileMode.Blocking)
         when (result) {
             is VpnEstablishResult.Success -> {
-                // Blocking owns routes — stop drain + close previous after new iface is up.
+                // Blocking owns routes — stop drain + clear publish gate after new iface is up.
                 previousForwarder?.stop()
                 if (tunForwarder === previousForwarder) tunForwarder = null
+                stopForwarder()
                 if (previousTun != null && previousTun !== tunInterface) {
                     previousTun.close()
                 }
@@ -488,9 +494,13 @@ class OnionVpnService : VpnService() {
                 bridgeLines = bridgeLines,
                 exitCountryCode = exitCountry,
                 allowAdbClearnetLeak = allowAdbClearnetLeak,
+                protectSocket = { socket -> protect(socket) },
                 onFatal = { error ->
                     Timber.e(error, "onionmasq forwarder died — signalling fail-closed")
                     forwarderAlive.value = false
+                    forwarderSocksPort.value = -1
+                    forwarderDnsCryptPort.value = -1
+                    onionmasqBootstrapReady.value = false
                 },
                 onBootstrap = { event: BootstrapEvent ->
                     // Tor VPN: CONNECTED when ready_for_traffic AND pct==100 (same event).
@@ -529,16 +539,23 @@ class OnionVpnService : VpnService() {
                 onFatal = { error ->
                     Timber.e(error, "TUN forwarder died — signalling fail-closed")
                     forwarderAlive.value = false
+                    forwarderSocksPort.value = -1
+                    forwarderDnsCryptPort.value = -1
                 },
             )
         }
         tunForwarder = forwarder
-        forwarderSocksPort.value = torSocksPort
+        // onionmasq Automap bridge starts with upstream=0 until sidecar is wired —
+        // never publish the allocated apps SocksPort as "live" before setTorSocksUpstream.
+        forwarderSocksPort.value = if (effective == TunDataPlane.ONIONMASQ) -1 else torSocksPort
         forwarderDnsCryptPort.value = dnsCryptPort
         forwarderAlive.value = true
         activeDataPlane.value = effective
         torSocksUpstreamUpdater = { port ->
-            (tunForwarder as? HevSocks5TunForwarder)?.updateTorSocks(port)
+            when (val f = tunForwarder) {
+                is HevSocks5TunForwarder -> f.updateTorSocks(port)
+                is OnionmasqTunForwarder -> f.updateTorSocks(port)
+            }
         }
         forwarder.start(
             tunFd = tun,
@@ -573,6 +590,7 @@ class OnionVpnService : VpnService() {
         forwarderSocksPort.value = -1
         forwarderDnsCryptPort.value = -1
         forwarderAlive.value = false
+        onionmasqBootstrapReady.value = false
     }
 
     private fun stopTunnel(destroyService: Boolean = true) {
@@ -756,7 +774,8 @@ class OnionVpnService : VpnService() {
         var onOnionmasqEvent: ((org.torproject.onionmasq.events.OnionmasqEvent) -> Unit)? = null
 
         /**
-         * Live updater for [HevSocks5TunForwarder.updateTorSocks] while TUN is up.
+         * Live updater for [HevSocks5TunForwarder.updateTorSocks] /
+         * [OnionmasqTunForwarder.updateTorSocks] while TUN is up.
          * Cleared on forwarder stop.
          */
         @Volatile
@@ -768,15 +787,25 @@ class OnionVpnService : VpnService() {
          */
         fun setTorSocksUpstream(port: Int) {
             val p = port.coerceAtLeast(0)
-            torSocksUpstreamUpdater?.invoke(p)
-            if (p > 0) {
-                forwarderSocksPort.value = p
+            val updater = torSocksUpstreamUpdater
+            if (updater == null) {
+                // No live bridge — never publish a positive socks as "wired Automap upstream".
+                forwarderSocksPort.value = -1
+                return
             }
+            updater.invoke(p)
+            // Publish 0→-1 so validators / waitForConnected treat pause as down
+            // (bridge refuses CONNECT when upstream is 0).
+            forwarderSocksPort.value = if (p > 0) p else -1
         }
 
-        /** After a successful hev rebind, clear the dead-forwarder latch. */
+        /**
+         * Historical latch clear after VPN wait. Kept as no-op: [startForwarder] sets
+         * alive; [onFatal] / [stopForwarder] clear it. Forcing true after wait hid
+         * dead-plane races (stale ports while alive=false).
+         */
         fun markForwarderAlive() {
-            forwarderAlive.value = true
+            // no-op
         }
 
         /**

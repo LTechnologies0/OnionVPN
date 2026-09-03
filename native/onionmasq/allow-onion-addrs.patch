@@ -1,0 +1,13 @@
+diff --git a/crates/onion-tunnel/src/config.rs b/crates/onion-tunnel/src/config.rs
+index 2099002..a1b2c3d 100644
+--- a/crates/onion-tunnel/src/config.rs
++++ b/crates/onion-tunnel/src/config.rs
+@@ -135,6 +135,8 @@ impl TunnelConfig {
+         }
+ 
+         builder.address_filter().allow_local_addrs(true);
++        // OnionVPN: HS client (.onion) via TUN + SOCKS sidecar.
++        builder.address_filter().allow_onion_addrs(true);
+ 
+         #[cfg(feature = "pluggable-transports")]
+         {

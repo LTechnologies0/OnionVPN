@@ -19,19 +19,24 @@ import timber.log.Timber
  * forward to the single Arti SOCKS listener; SOCKS auth (IsolationToken) passes through.
  */
 class SocksTcpRelay(
-    private val listenPort: Int,
+    val listenPort: Int,
     private val upstreamHost: String,
-    private val upstreamPort: Int,
+    upstreamPort: Int,
     private val label: String,
     /** When set, reject clients that fail the predicate (e.g. foreign UID on loopback). */
     private val acceptPeer: ((Socket) -> Boolean)? = null,
 ) {
+    private val upstreamPort = java.util.concurrent.atomic.AtomicInteger(upstreamPort)
     private val running = AtomicBoolean(false)
     private var server: ServerSocket? = null
     private var acceptExecutor: ThreadPoolExecutor? = null
     /** Coordinates CONNECT + join; must not share the pipe pool (nested get() deadlock). */
     private var sessionExecutor: ThreadPoolExecutor? = null
     private var pipeExecutor: ThreadPoolExecutor? = null
+
+    fun updateUpstream(port: Int) {
+        upstreamPort.set(port.coerceAtLeast(0))
+    }
 
     fun start() {
         if (!running.compareAndSet(false, true)) return
@@ -53,7 +58,9 @@ class SocksTcpRelay(
         sessionExecutor = sessions
         pipeExecutor = pipe
         accept.execute {
-            Timber.i("SocksTcpRelay[$label] listen=$listenPort → $upstreamHost:$upstreamPort")
+            Timber.i(
+                "SocksTcpRelay[$label] listen=$listenPort → $upstreamHost:${upstreamPort.get()}",
+            )
             while (running.get()) {
                 val client = try {
                     ss.accept()
@@ -93,7 +100,10 @@ class SocksTcpRelay(
             client.tcpNoDelay = true
             upstream = Socket()
             upstream.tcpNoDelay = true
-            upstream.connect(InetSocketAddress(upstreamHost, upstreamPort), CONNECT_TIMEOUT_MS)
+            upstream.connect(
+                InetSocketAddress(upstreamHost, upstreamPort.get()),
+                CONNECT_TIMEOUT_MS,
+            )
             val up = upstream
             val c2u = pipe.submit { copy(client, up) }
             val u2c = pipe.submit { copy(up, client) }

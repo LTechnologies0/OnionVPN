@@ -64,6 +64,21 @@ class OnionAutomapRoutingTest {
         DnsHostnameCache.clear()
     }
 
+    @Test
+    fun onionmasqAutomapDivert_requiresHostnameRewriteNotRawIp() {
+        // onionmasq smoltcp cannot CONNECT to synth Automap IPs — SOCKS5A must
+        // carry the real .onion (SocksUidBridge.rewriteAutomapHost path).
+        OnionAutomapAllocator.clear()
+        DnsHostnameCache.clear()
+        val virt = OnionAutomapAllocator.ipv4ForHostname(ddgOnion)
+        assertTrue(TunnelEndpoints.isAutomapVirtual(virt))
+        assertFalse(TunnelEndpoints.isOnionLikeHostname(virt))
+        assertEquals(ddgOnion, DnsHostnameCache.lookup(virt))
+        assertTrue(TunnelEndpoints.isOnionLikeHostname(DnsHostnameCache.lookup(virt)!!))
+        OnionAutomapAllocator.clear()
+        DnsHostnameCache.clear()
+    }
+
     private fun encodeDnsName(hostname: String): ByteArray {
         val labels = hostname.trimEnd('.').lowercase().split('.')
         val out = ArrayList<Byte>()

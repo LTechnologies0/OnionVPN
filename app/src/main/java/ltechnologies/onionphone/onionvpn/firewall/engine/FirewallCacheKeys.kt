@@ -31,8 +31,13 @@ internal object FirewallCacheKeys {
         return h
     }
 
-    fun decisionKey(uid: Int, matchDest: String, info: IpPacketInfo): Long =
-        socksDecisionKey(uid, matchDest, info.dstPort, info.protocol)
+    fun decisionKey(uid: Int, matchDest: String, info: IpPacketInfo): Long {
+        var h = uid.toLong()
+        h = h * MIX + matchDest.lowercase().hashCode().toLong()
+        h = h * MIX + info.dstPort
+        h = h * MIX + info.protocol
+        return h
+    }
 
     fun socksFlowKey(uid: Int, matchDest: String, destPort: Int): Long {
         var h = uid.toLong()
@@ -43,11 +48,13 @@ internal object FirewallCacheKeys {
         return h
     }
 
+    /** Namespaced separately from TUN [decisionKey] — SOCKS ALLOW_TOR must not poison Via OVPN. */
     fun socksDecisionKey(uid: Int, matchDest: String, destPort: Int, protocol: Int): Long {
         var h = uid.toLong()
         h = h * MIX + matchDest.lowercase().hashCode().toLong()
         h = h * MIX + destPort
         h = h * MIX + protocol
+        h = h * MIX + PACL
         return h
     }
 

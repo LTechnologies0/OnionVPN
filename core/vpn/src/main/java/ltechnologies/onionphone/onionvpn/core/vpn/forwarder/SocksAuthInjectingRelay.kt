@@ -29,9 +29,9 @@ import timber.log.Timber
  * DNSCrypt / probe role ports stay on [SocksTcpRelay] (clients already authenticate).
  */
 class SocksAuthInjectingRelay(
-    private val listenPort: Int,
+    val listenPort: Int,
     private val upstreamHost: String,
-    private val upstreamPort: Int,
+    upstreamPort: Int,
     private val label: String = "openvpn-auth",
     private val username: String = TunnelEndpoints.SOCKS_OPENVPN_USER,
     private val password: String = TunnelEndpoints.SOCKS_OPENVPN_PASS,
@@ -41,11 +41,16 @@ class SocksAuthInjectingRelay(
 ) {
     enum class Method { NO_AUTH, USER_PASS }
 
+    private val upstreamPort = java.util.concurrent.atomic.AtomicInteger(upstreamPort)
     private val running = AtomicBoolean(false)
     private var server: ServerSocket? = null
     private var acceptExecutor: ThreadPoolExecutor? = null
     private var sessionExecutor: ThreadPoolExecutor? = null
     private var pipeExecutor: ThreadPoolExecutor? = null
+
+    fun updateUpstream(port: Int) {
+        upstreamPort.set(port.coerceAtLeast(0))
+    }
 
     fun start() {
         if (!running.compareAndSet(false, true)) return
@@ -67,7 +72,7 @@ class SocksAuthInjectingRelay(
         accept.execute {
             Timber.i(
                 "SocksAuthInjectingRelay[$label] listen=$listenPort → " +
-                    "$upstreamHost:$upstreamPort (NO-AUTH|USERPASS→user=$username)",
+                    "$upstreamHost:${upstreamPort.get()} (NO-AUTH|USERPASS→user=$username)",
             )
             while (running.get()) {
                 val client = try {
@@ -149,7 +154,7 @@ class SocksAuthInjectingRelay(
             val up = try {
                 Socks5Client(
                     proxyHost = upstreamHost,
-                    proxyPort = upstreamPort,
+                    proxyPort = upstreamPort.get(),
                     username = username,
                     password = password,
                     connectTimeoutMs = connectTimeoutMs,

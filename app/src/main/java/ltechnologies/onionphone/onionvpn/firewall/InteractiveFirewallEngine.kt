@@ -9,6 +9,7 @@ import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.locks.LockSupport
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.CoroutineScope
@@ -120,6 +121,8 @@ class InteractiveFirewallEngine @Inject constructor(
             caches.invalidateDestination(ip)
             caches.invalidateDestination(oldHost)
             caches.invalidateDestination(newHost)
+            // Drop ASK prompts keyed to the old/new Automap identity (IP reuse).
+            cancelAutomapPrompts(ip, oldHost, newHost)
         }
         // Drop sticky ALLOW_OVPN/Tor decisions from the previous tunnel session.
         caches.clearAll()
@@ -239,7 +242,7 @@ class InteractiveFirewallEngine @Inject constructor(
 
         val tupleKey = FirewallCacheKeys.tupleFlowKey(info)
         if (info.isTcp && !info.isTcpSyn) {
-            caches.flowCache[tupleKey]?.let { return it }
+            caches.flowCache[tupleKey]?.let { return coerceLiveOvpn(it, prefs) }
         }
 
         // Resolve UID before uid-scoped caches — 5-tuple-only keys poisoned UNKNOWN→real UID races.
@@ -273,13 +276,13 @@ class InteractiveFirewallEngine @Inject constructor(
         }
 
         val flowKey = FirewallCacheKeys.flowKey(uid, info)
-        caches.flowCache[flowKey]?.let { return it }
+        caches.flowCache[flowKey]?.let { return coerceLiveOvpn(it, prefs) }
 
         val matchDest = matchDestination(info)
         if (matchDest == null) {
-            // Automap IP without hostname yet (DNS still in flight / dropped).
-            // SYN: fail-closed. Mid-flow: sticky path only — no invented Tor route.
-            return if (info.isTcp && !info.isTcpSyn) midFlowFallback(prefs) else FirewallVerdict.DENY
+            // Automap IP without hostname yet — fail-closed (SYN and mid-flow).
+            // Never invent Tor via midFlowFallback; SocksUidBridge also refuses CONNECT.
+            return FirewallVerdict.DENY
         }
 
         // Mid-flow: never open ASK/DENY prompts. Prefer sticky decision / rules when the
@@ -287,11 +290,13 @@ class InteractiveFirewallEngine @Inject constructor(
         if (info.isTcp && !info.isTcpSyn) {
             val matching = findRule(uid, matchDest, info)
             if (matching != null) {
-                rememberPacketFlow(flowKey, matching.verdict, matchDest, info)
-                return matching.verdict
+                val v = coerceLiveOvpn(matching.verdict, prefs)
+                rememberPacketFlow(flowKey, v, matchDest, info)
+                return v
             }
             val rk = FirewallCacheKeys.decisionKey(uid, matchDest, info)
-            caches.decisionCache[rk]?.let { v ->
+            caches.decisionCache[rk]?.let { cached ->
+                val v = coerceLiveOvpn(cached, prefs)
                 rememberPacketFlow(flowKey, v, matchDest, info)
                 return v
             }
@@ -306,12 +311,14 @@ class InteractiveFirewallEngine @Inject constructor(
 
         val matching = findRule(uid, matchDest, info)
         if (matching != null) {
-            rememberPacketFlow(flowKey, matching.verdict, matchDest, info)
-            return matching.verdict
+            val v = coerceLiveOvpn(matching.verdict, prefs)
+            rememberPacketFlow(flowKey, v, matchDest, info)
+            return v
         }
 
         val rk = FirewallCacheKeys.decisionKey(uid, matchDest, info)
-        caches.decisionCache[rk]?.let { v ->
+        caches.decisionCache[rk]?.let { cached ->
+            val v = coerceLiveOvpn(cached, prefs)
             rememberPacketFlow(flowKey, v, matchDest, info)
             return v
         }
@@ -418,7 +425,7 @@ class InteractiveFirewallEngine @Inject constructor(
         val displayHost = host.ifBlank { null }
         val protocol = IpPacketParser.PROTO_TCP
         val flowKey = FirewallCacheKeys.socksFlowKey(uid, matchDest, destPort)
-        caches.flowCache[flowKey]?.let { return it }
+        caches.flowCache[flowKey]?.let { return coerceSocksVerdict(it) }
 
         val matching = findRule(uid, matchDest, destPort, protocol)
         if (matching != null) {
@@ -634,8 +641,11 @@ class InteractiveFirewallEngine @Inject constructor(
         val prefs = preferences.get()
         val effective = when {
             verdict == FirewallVerdict.ALLOW_OVPN && !ovpnRouteAvailable(prefs) -> {
-                Timber.w("ALLOW_OVPN rejected — OpenVPN-over-Tor not available; storing DENY")
-                FirewallVerdict.DENY
+                // Match TunDnsMux / coerceSocksVerdict: demote to Tor, never store DENY —
+                // otherwise a Via-OVPN answer while SNAT/AUTH is briefly down permanently
+                // blackholes that destination even after OVPN recovers / Tor could carry it.
+                Timber.w("ALLOW_OVPN unavailable at answer — storing ALLOW_TOR (demote)")
+                FirewallVerdict.ALLOW_TOR
             }
             else -> verdict
         }
@@ -784,13 +794,66 @@ class InteractiveFirewallEngine @Inject constructor(
 
     /**
      * Clearnet → packet IP. Automap → `.onion`/`.exit` hostname (IP reuse must not reuse rules).
+     * Brief retry mirrors [SocksUidBridge] Automap wait so DNS→cache races do not silent-DENY SYN.
      * @return null when Automap IP has no hostname yet (fail-closed).
      */
     private fun matchDestination(info: IpPacketInfo): String? {
         val ip = info.dstIp
         if (!TunnelEndpoints.isAutomapVirtual(ip)) return ip
-        val host = DnsHostnameCache.lookup(ip) ?: return null
-        return if (TunnelEndpoints.isOnionLikeHostname(host)) host else null
+        DnsHostnameCache.lookup(ip)?.let { host ->
+            if (TunnelEndpoints.isOnionLikeHostname(host)) return host
+        }
+        // SYN only: park briefly for TunDnsMux synth / DNSPort Automap cache fill.
+        if (info.isTcpSyn) {
+            repeat(AUTOMAP_HOST_RETRY) {
+                LockSupport.parkNanos(AUTOMAP_HOST_PARK_NS)
+                DnsHostnameCache.lookup(ip)?.let { host ->
+                    if (TunnelEndpoints.isOnionLikeHostname(host)) return host
+                }
+            }
+        }
+        return null
+    }
+
+    /** Drop ASK queue entries tied to an Automap IP or its old/new hostnames. */
+    private fun cancelAutomapPrompts(ip: String, oldHost: String, newHost: String) {
+        val targets = setOf(ip, oldHost, newHost)
+            .map { it.trim().lowercase() }
+            .filter { it.isNotBlank() }
+            .toSet()
+        if (targets.isEmpty()) return
+        fun matches(dest: String?): Boolean {
+            val d = dest?.trim()?.lowercase() ?: return false
+            return d in targets
+        }
+        fun QueuedPrompt.tiedToAutomap(): Boolean =
+            matches(matchDest) || matches(request.destHost) || matches(request.destIp)
+
+        synchronized(queueLock) {
+            val toDrop = pendingByKey.values.filter { it.tiedToAutomap() }.toList()
+            var clearedActive = false
+            active?.let { cur ->
+                if (cur.tiedToAutomap()) {
+                    active = null
+                    _pendingPrompt.value = null
+                    mainHandler.post { promptNotifier.cancel() }
+                    clearedActive = true
+                }
+            }
+            for (q in toDrop) {
+                pendingByKey.remove(q.ruleKey)
+                waitQueue.remove(q.ruleKey)
+            }
+            if (toDrop.isNotEmpty() || clearedActive) {
+                Timber.i(
+                    "Automap remap — cancelled %d ASK prompt(s) for %s",
+                    toDrop.size,
+                    targets.joinToString(","),
+                )
+                promoteLocked()
+                publishQueueDepthLocked()
+            }
+        }
     }
 
     private fun publishQueueDepthLocked() {
@@ -896,6 +959,17 @@ class InteractiveFirewallEngine @Inject constructor(
         if (ovpnRouteAvailable(prefs)) FirewallVerdict.ALLOW_OVPN else FirewallVerdict.ALLOW_TOR
 
     /**
+     * Sticky ALLOW_OVPN rules/cache must still honor live SNAT health — same demotion as
+     * TunDnsMux when Via OVPN is down (never leave the packet on a dead OVPN sink).
+     */
+    private fun coerceLiveOvpn(v: FirewallVerdict, prefs: TunnelPreferences): FirewallVerdict =
+        if (v == FirewallVerdict.ALLOW_OVPN && !ovpnRouteAvailable(prefs)) {
+            FirewallVerdict.ALLOW_TOR
+        } else {
+            v
+        }
+
+    /**
      * Mid-flow cache miss (UID lost / trim). Prefer the configured default over a blanket DENY.
      *
      * Historical Tor-only builds fail-open to Tor. With OpenVPN-over-Tor, a blanket DENY here
@@ -935,6 +1009,9 @@ class InteractiveFirewallEngine @Inject constructor(
         private const val MAX_JOURNAL = 200
         private const val JOURNAL_CHANNEL_CAP = 64
         private const val MAX_QUEUE = 64
+        /** Match SocksUidBridge Automap wait (~200ms) for DNS→cache races. */
+        private const val AUTOMAP_HOST_RETRY = 40
+        private const val AUTOMAP_HOST_PARK_NS = 5_000_000L
     }
 }
 
