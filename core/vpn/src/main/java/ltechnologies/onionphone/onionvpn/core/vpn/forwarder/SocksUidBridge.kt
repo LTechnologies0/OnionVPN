@@ -169,7 +169,7 @@ class SocksUidBridge(
                 if (!ConnectionOwnerResolver.isValidUid(uid)) {
                     // Waydroid + Chromium isolated WebView: owner UID often never appears in
                     // getConnectionOwnerUid / proc. Prefer shared IsolateSOCKSAuth over RST.
-                    Timber.w("SocksUidBridge UID miss $host:$port — IsolateSOCKSAuth uunknown")
+                    Timber.w("SocksUidBridge UID miss — IsolateSOCKSAuth uunknown")
                     uid = -1
                 }
                 val torPort = torSocksPort.get()
@@ -179,7 +179,7 @@ class SocksUidBridge(
                     return
                 }
                 val socksHost = rewriteAutomapHost(host) ?: run {
-                    VpnForwarderDebug.socksLog { "SocksUidBridge drop Automap IP without hostname $host" }
+                    VpnForwarderDebug.socksLog { "SocksUidBridge drop Automap IP without hostname" }
                     reply(output, 0x04)
                     return
                 }
@@ -231,7 +231,8 @@ class SocksUidBridge(
                 // client.getOutputStream() — otherwise Tor→client bytes race the reply
                 // and hev treats TLS as a broken SOCKS header (Speedtest read/SSL timeouts).
                 reply(output, 0x00)
-                Timber.i("SocksUidBridge uid=%d %s → %s:%d", uid, user, socksHost, port)
+                // OPSEC: uid only — IsolateSOCKSAuth user + dest fingerprint circuits/activity.
+                Timber.i("SocksUidBridge uid=%d ok", uid)
                 if (!startPipe(client, upstream, slotsAcquired = true)) {
                     runCatching { upstream.close() }
                     return

@@ -13,6 +13,7 @@ import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
 import kotlinx.coroutines.delay
 import ltechnologies.onionphone.onionvpn.core.model.TunnelPreferences
+import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
 import ltechnologies.onionphone.onionvpn.prefs.TunnelPreferencesStore
 import ltechnologies.onionphone.onionvpn.ui.theme.OnionVpnTheme
 import ltechnologies.onionphone.onionvpn.util.WindowSecureHelper
@@ -46,7 +47,12 @@ class FirewallPromptActivity : ComponentActivity() {
                         FirewallPromptContent(
                             info = current,
                             tempMinutes = prefs.firewallTempMinutes,
-                            ovpnAvailable = engine.ovpnRouteAvailable(prefs),
+                            ovpnAvailable = engine.ovpnRouteAvailable(prefs) &&
+                                !current.socksPlane &&
+                                !TunnelEndpoints.isOnionLikeHostname(
+                                    current.destHost ?: current.destIp,
+                                ) &&
+                                !TunnelEndpoints.isAutomapVirtual(current.destIp),
                             onAnswer = { verdict, scope ->
                                 engine.answerPrompt(current.requestId, verdict, scope)
                             },

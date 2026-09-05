@@ -13,8 +13,7 @@ internal object FirewallCacheKeys {
 
     fun tupleFlowKey(info: IpPacketInfo): Long {
         var h = 0L
-        h = h * MIX + (info.srcIpInt.toLong() and 0xffffffffL)
-        h = h * MIX + (info.dstIpInt.toLong() and 0xffffffffL)
+        h = mixAddrs(h, info)
         h = h * MIX + info.srcPort
         h = h * MIX + info.dstPort
         h = h * MIX + info.protocol
@@ -23,11 +22,24 @@ internal object FirewallCacheKeys {
 
     fun flowKey(uid: Int, info: IpPacketInfo): Long {
         var h = uid.toLong()
-        h = h * MIX + (info.srcIpInt.toLong() and 0xffffffffL)
-        h = h * MIX + (info.dstIpInt.toLong() and 0xffffffffL)
+        h = mixAddrs(h, info)
         h = h * MIX + info.srcPort
         h = h * MIX + info.dstPort
         h = h * MIX + info.protocol
+        return h
+    }
+
+    /** IPv4 ints on hot path; IPv6 must mix host strings (srcIpInt/dstIpInt stay 0). */
+    private fun mixAddrs(h0: Long, info: IpPacketInfo): Long {
+        var h = h0
+        if (info.isIpv6) {
+            h = h * MIX + info.srcIp.hashCode().toLong()
+            h = h * MIX + info.dstIp.hashCode().toLong()
+            h = h * MIX + 6L
+        } else {
+            h = h * MIX + (info.srcIpInt.toLong() and 0xffffffffL)
+            h = h * MIX + (info.dstIpInt.toLong() and 0xffffffffL)
+        }
         return h
     }
 

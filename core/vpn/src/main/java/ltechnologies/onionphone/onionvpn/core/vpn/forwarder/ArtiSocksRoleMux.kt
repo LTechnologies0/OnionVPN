@@ -153,7 +153,9 @@ class ArtiSocksRoleMux {
             if (ConnectionOwnerResolver.isValidUid(peer)) {
                 return peer == ownUid
             }
-            return true
+            // Pre-Q: getConnectionOwnerUid often missing. API ≥ Q: fail-closed so a
+            // foreign UID cannot dial the OVPN NO-AUTH role port.
+            return android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.Q
         }
         val resolver = ownerResolver ?: return true
         val peer = resolver.resolveAcceptedClientUid(client)

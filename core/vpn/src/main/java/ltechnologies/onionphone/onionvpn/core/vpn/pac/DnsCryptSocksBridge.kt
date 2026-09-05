@@ -205,8 +205,15 @@ class DnsCryptSocksBridge(
                         password = socksPass,
                     ).connect(host, port)
                 } else {
+                    // DNSCrypt path is A-only (like SocksUidBridge pin). IPv6 literals would
+                    // SOCKS-CONNECT clearnet IPv6 and bypass that fail-closed policy.
+                    if (atyp == ATYP_IPV6) {
+                        Timber.v("PAC SOCKS refuse IPv6 literal CONNECT")
+                        safeReply(output, REP_NOT_ALLOWED)
+                        return
+                    }
                     val connectHost = when (atyp) {
-                        ATYP_IPV4, ATYP_IPV6 -> host
+                        ATYP_IPV4 -> host
                         else -> {
                             val ip = DnsCryptResolver.resolveIpv4(
                                 hostname = host,

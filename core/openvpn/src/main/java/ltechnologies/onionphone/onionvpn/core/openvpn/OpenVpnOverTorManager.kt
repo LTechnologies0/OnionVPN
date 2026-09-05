@@ -33,7 +33,8 @@ import timber.log.Timber
  * **Data plane:** ics-openvpn unix management + OPENTUN socketpair ↔ VpnService TUN via
  * [FirewallBridge.ovpnPacketSink] / [FirewallBridge.injectToVpnTun].
  *
- * Via OVPN ([FirewallBridge.openVpnOverTorUp]) is true **iff** CONNECTED **and** OPENTUN.
+ * Via OVPN ([FirewallBridge.openVpnOverTorUp]) is true **iff** CONNECTED **and**
+ * OPENTUN **and** [dataPlaneHealthy] (SNAT without DNAT silence demotes to Tor).
  * Soft-restarts clear Via OVPN until CONNECTED returns; OPENTUN pump is kept (`persist-tun`).
  */
 class OpenVpnOverTorManager(
@@ -381,13 +382,13 @@ class OpenVpnOverTorManager(
                 }
                 val addr: InetAddress = client.resolve(host)
                 val ipv4 = addr.hostAddress
-                    ?: return Result.failure(IllegalStateException("resolve returned no address for $host"))
+                    ?: return Result.failure(IllegalStateException("resolve returned no address"))
                 if (addr !is java.net.Inet4Address) {
                     return Result.failure(
-                        IllegalStateException("Tor resolved $host to non-IPv4 ($ipv4)"),
+                        IllegalStateException("Tor resolved remote to non-IPv4"),
                     )
                 }
-                Timber.i("OpenVPN remote %s → %s (via Tor RESOLVE)", host, ipv4)
+                Timber.i("OpenVPN remote pinned via Tor RESOLVE")
                 text = OpenVpnConfigWriter.pinRemoteHostToIpv4(text, host, ipv4)
             }
             Result.success(text)
@@ -527,8 +528,8 @@ class OpenVpnOverTorManager(
         _status.value = when {
             up -> OpenVpnStatus(OpenVpnPhase.Up, detail)
             control && data && !healthy -> OpenVpnStatus(
-                OpenVpnPhase.Up,
-                detail,
+                OpenVpnPhase.Starting,
+                "$detail — data plane unhealthy (Via OVPN paused)",
             )
             control && !data -> OpenVpnStatus(
                 OpenVpnPhase.Starting,

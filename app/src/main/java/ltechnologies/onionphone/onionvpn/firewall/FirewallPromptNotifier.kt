@@ -18,6 +18,7 @@ import androidx.core.graphics.drawable.IconCompat
 import ltechnologies.onionphone.onionvpn.R
 import ltechnologies.onionphone.onionvpn.core.model.DomainThreatCategory
 import ltechnologies.onionphone.onionvpn.core.model.FirewallConnectionInfo
+import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
 import ltechnologies.onionphone.onionvpn.core.vpn.firewall.FirewallBridge
 import timber.log.Timber
 
@@ -41,24 +42,16 @@ internal class FirewallPromptNotifier(
             setShowBadge(true)
             enableVibration(true)
             enableLights(true)
-            lockscreenVisibility = android.app.Notification.VISIBILITY_PUBLIC
+            lockscreenVisibility = android.app.Notification.VISIBILITY_SECRET
         }
         nm.createNotificationChannel(channel)
     }
 
     fun show(info: FirewallConnectionInfo) {
         ensureChannel()
-        // Coloured spans are unreliable on OEMs — emoji next to the domain:
-        // 🟢 sûr (pas tracking/malware) · 🟠 tracking · 🔴 malware
-        // protocolLabel is DPI-enhanced (DNS / HTTP / HTTPS / TLS / QUIC / TCP / UDP).
-        val dest = "${info.threatCategory.notificationEmoji()} ${info.displayDestination()}"
-        val base = appContext.getString(
-            R.string.firewall_prompt_notif_text,
-            info.protocolLabel,
-            dest,
-            info.destPort,
-        )
-        val dpiSuffix = info.dpiDetail?.takeIf { it.isNotBlank() }?.let { " · $it" }.orEmpty()
+        // OPSEC: never put destination / DPI (SNI, Host, DNS qname) on the notification —
+        // VISIBILITY_PUBLIC + dumpsys notification / lockscreen leak browsing intent.
+        // Full dest + DPI live only in FirewallPromptActivity.
         val threatSuffix = when (info.threatCategory) {
             DomainThreatCategory.MALWARE ->
                 " · " + appContext.getString(R.string.firewall_threat_malware)
@@ -66,7 +59,10 @@ internal class FirewallPromptNotifier(
                 " · " + appContext.getString(R.string.firewall_threat_tracking)
             DomainThreatCategory.NONE -> ""
         }
-        val content = base + dpiSuffix + threatSuffix
+        val content = appContext.getString(
+            R.string.firewall_prompt_notif_text_safe,
+            info.protocolLabel,
+        ) + threatSuffix
         val openPending = detailPendingIntent(info.requestId)
         val allowPending = actionPendingIntent(
             FirewallPromptActionReceiver.ACTION_ALLOW_TOR,
@@ -92,7 +88,7 @@ internal class FirewallPromptNotifier(
             .setStyle(NotificationCompat.BigTextStyle().bigText(content))
             .setPriority(NotificationCompat.PRIORITY_MAX)
             .setCategory(NotificationCompat.CATEGORY_STATUS)
-            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .setVisibility(NotificationCompat.VISIBILITY_SECRET)
             .setContentIntent(openPending)
             .setOngoing(true)
             .setAutoCancel(false)
@@ -102,7 +98,11 @@ internal class FirewallPromptNotifier(
                 appContext.getString(R.string.firewall_action_allow_tor),
                 allowPending,
             )
-        if (FirewallBridge.openVpnOverTorUp) {
+        if (FirewallBridge.openVpnOverTorUp &&
+            !info.socksPlane &&
+            !TunnelEndpoints.isOnionLikeHostname(info.destHost ?: info.destIp) &&
+            !TunnelEndpoints.isAutomapVirtual(info.destIp)
+        ) {
             builder.addAction(
                 0,
                 appContext.getString(R.string.firewall_action_allow_ovpn),

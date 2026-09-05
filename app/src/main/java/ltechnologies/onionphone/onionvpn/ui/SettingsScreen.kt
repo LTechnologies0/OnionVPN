@@ -60,7 +60,9 @@ import ltechnologies.onionphone.onionvpn.core.model.TunnelPreferences
 import ltechnologies.onionphone.onionvpn.core.model.VpnAppRoutingMode
 import ltechnologies.onionphone.onionvpn.core.tor.config.TorBridgeConfig
 import ltechnologies.onionphone.onionvpn.core.vpn.OnionVpnService
+import ltechnologies.onionphone.onionvpn.core.vpn.firewall.FirewallBridge
 import ltechnologies.onionphone.onionvpn.core.vpn.forwarder.TunDataPlaneFactory
+import ltechnologies.onionphone.onionvpn.firewall.InteractiveFirewallEngine
 import ltechnologies.onionphone.onionvpn.threat.repo.DomainReputationRepository
 import ltechnologies.onionphone.onionvpn.ui.components.SectionHeader
 import ltechnologies.onionphone.onionvpn.ui.components.TonalSection
@@ -543,11 +545,21 @@ fun SettingsScreen(
         PrefSwitch(
             label = "Enable firewall",
             checked = local.firewallEnabled,
-            onChecked = { commit(local.copy(firewallEnabled = it)) },
+            onChecked = {
+                if (!it && local.openVpnOverTorEnabled) {
+                    // Prefs coerce firewall on when OVPN is enabled — match UI to that.
+                    return@PrefSwitch
+                }
+                commit(local.copy(firewallEnabled = it))
+            },
         )
         Text(
-            text = "Prompts offer Via Tor / Via OVPN (when OpenVPN-over-Tor is up) / Deny. " +
-                "Release default On; debug Off.",
+            text = if (local.openVpnOverTorEnabled) {
+                "Required while OpenVPN-over-Tor is on (Via OVPN needs interactive routing)."
+            } else {
+                "Prompts offer Via Tor / Via OVPN (when OpenVPN-over-Tor is up) / Deny. " +
+                    "Release default On; debug Off."
+            },
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -607,14 +619,33 @@ fun SettingsScreen(
             subtitle = "Optional TCP OpenVPN client reaches the VPN server via Tor SOCKS so " +
                 "websites see the VPN egress IP (not a Tor exit). Device DNS stays DNSCrypt-over-Tor. " +
                 "Needs a TCP .ovpn + libovpnexec.so (ics-openvpn). UDP-only profiles are rejected. " +
-                "Works with C Tor and Arti. Via OVPN appears only after CONNECTED+OPENTUN. " +
+                "Works with C Tor and Arti. Via OVPN appears only after CONNECTED+OPENTUN " +
+                "and a healthy data plane (no SNAT blackhole). " +
                 "Changing this restarts the tunnel.",
         )
         PrefSwitch(
             label = "Enable OpenVPN over Tor",
             checked = local.openVpnOverTorEnabled,
             onChecked = {
-                commit(local.copy(openVpnOverTorEnabled = it), restart = true)
+                if (!it) {
+                    // Leave Via OVPN default / sticky rules would blackhole or lie.
+                    val nextDefault =
+                        if (local.firewallDefaultAction == FirewallDefaultAction.ALLOW_OVPN) {
+                            FirewallDefaultAction.ASK
+                        } else {
+                            local.firewallDefaultAction
+                        }
+                    (FirewallBridge.engine as? InteractiveFirewallEngine)?.clearAllOvpnRules()
+                    commit(
+                        local.copy(
+                            openVpnOverTorEnabled = false,
+                            firewallDefaultAction = nextDefault,
+                        ),
+                        restart = true,
+                    )
+                } else {
+                    commit(local.copy(openVpnOverTorEnabled = true), restart = true)
+                }
             },
         )
         Text(
@@ -681,10 +712,19 @@ fun SettingsScreen(
                                     .clearProfile()
                             }
                             ovpnImportError = null
+                            // Same cleanup as PrefSwitch off — else ALLOW_OVPN default + sticky Via OVPN linger.
+                            val nextDefault =
+                                if (local.firewallDefaultAction == FirewallDefaultAction.ALLOW_OVPN) {
+                                    FirewallDefaultAction.ASK
+                                } else {
+                                    local.firewallDefaultAction
+                                }
+                            (FirewallBridge.engine as? InteractiveFirewallEngine)?.clearAllOvpnRules()
                             commit(
                                 local.copy(
                                     openVpnProfileConfigured = false,
                                     openVpnOverTorEnabled = false,
+                                    firewallDefaultAction = nextDefault,
                                     openVpnAuthUser = "",
                                     openVpnAuthPassword = "",
                                 ),

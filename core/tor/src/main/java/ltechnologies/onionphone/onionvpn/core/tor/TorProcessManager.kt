@@ -97,6 +97,9 @@ class TorProcessManager(
      */
     private val maintenanceDepth = AtomicInteger(0)
 
+    private val controlReconnectLock = Any()
+    @Volatile private var lastControlReconnectAttemptMs: Long = 0L
+
     /** Serializes Arti stop/start and C Tor DisableNetwork bounce (no concurrent restarts). */
     private val downtimeMutex = Mutex()
 
@@ -409,7 +412,7 @@ class TorProcessManager(
         if (activeEngine == TorEngine.ARTI) {
             return Result.failure(IOException(TorControlCompat.unsupportedMessage(op)))
         }
-        if (!control.isConnected) {
+        if (!control.isConnected && !ensureClassicControlConnected()) {
             return Result.failure(IOException("control not connected"))
         }
         return null
@@ -454,7 +457,7 @@ class TorProcessManager(
                 )
             }
             TorEngine.LITTLE_T -> {
-                if (!control.isConnected) {
+                if (!control.isConnected && !ensureClassicControlConnected()) {
                     return@withContext Result.failure(IOException("control not connected"))
                 }
                 // Holdoff so validation/watchdog don't treat circuit rebuild as a leak.
@@ -797,7 +800,46 @@ class TorProcessManager(
             publishArtiReadyStatus()
             return
         }
+        // Reader EOF leaves little-t alive but ControlPort dead — heal before lite GETINFO.
+        if (!control.isConnected) {
+            ensureClassicControlConnected()
+        }
         if (control.isConnected) control.refreshHealthLite()
+    }
+
+    /**
+     * Re-open ControlSocket when the reader died but `libtor` is still running.
+     * Without this, NEWNYM / CIRC / SETCONF stay broken until a full tunnel restart.
+     */
+    fun ensureClassicControlConnected(): Boolean {
+        if (activeEngine != TorEngine.LITTLE_T) return false
+        if (control.isConnected) return true
+        val proc = process
+        if (proc == null || !proc.isAlive) return false
+        if (!controlSocketFile.exists() || !cookieFile.exists() || cookieFile.length() == 0L) {
+            return false
+        }
+        val now = System.currentTimeMillis()
+        synchronized(controlReconnectLock) {
+            if (control.isConnected) return true
+            if (now - lastControlReconnectAttemptMs < CONTROL_RECONNECT_MIN_INTERVAL_MS) {
+                return false
+            }
+            lastControlReconnectAttemptMs = now
+            return try {
+                control.connect(
+                    controlSocketPath = controlSocketFile,
+                    cookieFile = cookieFile,
+                    bridgesConfigured = TorBridgeConfig.isConfigured(preferences.torBridges),
+                )
+                runCatching { control.setActive() }
+                Timber.i("Tor ControlPort reconnected after reader death")
+                true
+            } catch (error: Exception) {
+                Timber.w(error, "Tor ControlPort reconnect failed")
+                false
+            }
+        }
     }
 
     fun refreshControlTraffic() {
@@ -1522,6 +1564,8 @@ class TorProcessManager(
 
         /** Match C Tor [TorControlOperations.NEWNYM_MIN_INTERVAL_MS] (~10.5s). */
         private const val ARTI_NEWNYM_MIN_INTERVAL_MS = 10_500L
+        /** Avoid hammering ControlSocket after reader death / cookie race. */
+        private const val CONTROL_RECONNECT_MIN_INTERVAL_MS = 5_000L
         /** Brief maintenance hold after SIGNAL NEWNYM while circuits rebuild. */
         private const val NEWNYM_SETTLE_MS = 2_500L
         /** After DisableNetwork=0, wait for SocksPort to accept before unpausing bridges. */

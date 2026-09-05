@@ -22,6 +22,8 @@ internal class TunnelVpnBridge(
     private val context: Context,
 ) {
     fun startConnected(preferences: TunnelPreferences, ports: TunnelRuntimePorts, generation: Int) {
+        // OPSEC: bridges must not ride Intent extras (dumpsys / bugreport).
+        OnionVpnService.offerBridgeLines(preferences.torBridges)
         context.startService(
             Intent(context, OnionVpnService::class.java).apply {
                 action = OnionVpnService.ACTION_START
@@ -52,7 +54,6 @@ internal class TunnelVpnBridge(
                 )
                 putExtra(OnionVpnService.EXTRA_TUN_DATA_PLANE, preferences.tunDataPlane.name)
                 putExtra(OnionVpnService.EXTRA_TOR_ENGINE, preferences.torEngine.name)
-                putExtra(OnionVpnService.EXTRA_BRIDGE_LINES, preferences.torBridges)
                 // onionmasq setCountryCode: one ISO country (Arti ExitNodes semantics).
                 val exitCodes = TorCountryCatalog.parseNodeCodes(preferences.torExitNodes)
                 when {

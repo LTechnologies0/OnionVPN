@@ -32,6 +32,7 @@ import ltechnologies.onionphone.onionvpn.core.model.FirewallJournalEntry
 import ltechnologies.onionphone.onionvpn.core.model.FirewallRule
 import ltechnologies.onionphone.onionvpn.core.model.FirewallRuleScope
 import ltechnologies.onionphone.onionvpn.core.model.FirewallVerdict
+import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
 import ltechnologies.onionphone.onionvpn.core.model.TunnelPreferences
 import ltechnologies.onionphone.onionvpn.firewall.FirewallPromptContent
 import ltechnologies.onionphone.onionvpn.firewall.InteractiveFirewallEngine
@@ -80,7 +81,12 @@ fun FirewallScreen(
                     FirewallPromptContent(
                         info = pending!!,
                         tempMinutes = preferences.firewallTempMinutes,
-                        ovpnAvailable = engine.ovpnRouteAvailable(preferences),
+                        ovpnAvailable = engine.ovpnRouteAvailable(preferences) &&
+                            !pending!!.socksPlane &&
+                            !TunnelEndpoints.isOnionLikeHostname(
+                                pending!!.destHost ?: pending!!.destIp,
+                            ) &&
+                            !TunnelEndpoints.isAutomapVirtual(pending!!.destIp),
                         onAnswer = { verdict, scope ->
                             engine.answerPrompt(pending!!.requestId, verdict, scope)
                         },

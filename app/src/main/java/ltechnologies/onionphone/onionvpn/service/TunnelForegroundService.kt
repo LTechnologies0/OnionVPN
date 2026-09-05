@@ -35,6 +35,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 import ltechnologies.onionphone.onionvpn.BuildConfig
 import ltechnologies.onionphone.onionvpn.core.dnscrypt.DnsCryptProcessManager
 import ltechnologies.onionphone.onionvpn.core.model.DnsResolverMode
+import ltechnologies.onionphone.onionvpn.core.model.FirewallDefaultAction
 import ltechnologies.onionphone.onionvpn.core.model.TorEngine
 import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
 import ltechnologies.onionphone.onionvpn.core.model.TunnelFailure
@@ -457,31 +458,19 @@ class TunnelForegroundService : Service() {
                     val hops = event.circuit?.joinToString(">") { r ->
                         r.country_code ?: "?"
                     }.orEmpty()
-                    Timber.i(
-                        "onionmasq conn uid=%d %s→%s tor=%s hops=%s",
-                        event.appId,
-                        event.proxySrc,
-                        event.proxyDst,
-                        event.torDst,
-                        hops,
-                    )
+                    // OPSEC: uid + country hops only — never proxy/tor destinations.
+                    Timber.i("onionmasq conn uid=%d hops=%s", event.appId, hops)
                     ltechnologies.onionphone.onionvpn.logging.TunnelLogBuffer.append(
                         ltechnologies.onionphone.onionvpn.logging.LogSource.TOR,
-                        "onionmasq: uid=${event.appId} ${event.torDst} [$hops]",
+                        "onionmasq: uid=${event.appId} [$hops]",
                         isError = false,
                     )
                 }
                 is org.torproject.onionmasq.events.FailedConnectionEvent -> {
-                    Timber.w(
-                        "onionmasq fail uid=%d %s→%s err=%s",
-                        event.appId,
-                        event.proxySrc,
-                        event.proxyDst,
-                        event.error,
-                    )
+                    Timber.w("onionmasq fail uid=%d err=%s", event.appId, event.error)
                     ltechnologies.onionphone.onionvpn.logging.TunnelLogBuffer.append(
                         ltechnologies.onionphone.onionvpn.logging.LogSource.TOR,
-                        "onionmasq fail uid=${event.appId} ${event.torDst}: ${event.error}",
+                        "onionmasq fail uid=${event.appId}: ${event.error}",
                         isError = true,
                     )
                 }
@@ -1411,13 +1400,25 @@ class TunnelForegroundService : Service() {
             val hasOnDisk = openVpnOverTor.hasProfile()
             if (!hasOnDisk) {
                 Timber.w("OpenVPN-over-Tor enabled but profile file missing — skip")
+                val nextDefault =
+                    if (preferences.firewallDefaultAction == FirewallDefaultAction.ALLOW_OVPN) {
+                        FirewallDefaultAction.ASK
+                    } else {
+                        preferences.firewallDefaultAction
+                    }
                 preferencesStore.update {
-                    it.copy(openVpnProfileConfigured = false, openVpnOverTorEnabled = false)
+                    it.copy(
+                        openVpnProfileConfigured = false,
+                        openVpnOverTorEnabled = false,
+                        firewallDefaultAction = nextDefault,
+                    )
                 }
                 preferences = preferences.copy(
                     openVpnProfileConfigured = false,
                     openVpnOverTorEnabled = false,
+                    firewallDefaultAction = nextDefault,
                 )
+                firewallEngine.clearAllOvpnRules()
                 openVpnOverTor.onUpChanged = null
                 openVpnOverTor.stop()
             } else {
@@ -2084,9 +2085,8 @@ class TunnelForegroundService : Service() {
                     }
                 }
                 if (ticks % LITE_CONTROL_REFRESH_TICKS == 0 || phase == TunnelPhase.StartingTor) {
-                    if (preferences.torEngine.capabilities.classicControlPlane &&
-                        tor.control.isConnected
-                    ) {
+                    if (preferences.torEngine.capabilities.classicControlPlane) {
+                        // Also runs when disconnected — heals ControlPort after reader EOF.
                         tor.refreshControlHealthLite()
                     }
                 }
@@ -2397,10 +2397,12 @@ class TunnelForegroundService : Service() {
                 ?.let { runCatching { DnsResolverMode.valueOf(it) }.getOrNull() }
                 ?: DnsResolverMode.DNSCRYPT_MUX,
             torEngine = TorEngine.fromPreference(intent.getStringExtra(EXTRA_TOR_ENGINE)),
-            torBridges = intent.getStringExtra(EXTRA_TOR_BRIDGES).orEmpty(),
-            torEntryNodes = intent.getStringExtra(EXTRA_TOR_ENTRY).orEmpty(),
-            torExitNodes = intent.getStringExtra(EXTRA_TOR_EXIT).orEmpty(),
-            torExcludeNodes = intent.getStringExtra(EXTRA_TOR_EXCLUDE).orEmpty(),
+            // OPSEC: bridges / Entry/Exit/Exclude / OVPN Auth never ride Intent extras —
+            // startTunnel() reloads them from DataStore (source of truth).
+            torBridges = "",
+            torEntryNodes = "",
+            torExitNodes = "",
+            torExcludeNodes = "",
             torNewCircuitPeriodSec = intent.getIntExtra(EXTRA_TOR_NEW_CIRCUIT, 30),
             torMaxCircuitDirtinessSec = intent.getIntExtra(EXTRA_TOR_MAX_DIRTINESS, 600),
             dnsCryptRequireNoLog = intent.getBooleanExtra(EXTRA_DNS_NOLOG, true),
@@ -2426,8 +2428,8 @@ class TunnelForegroundService : Service() {
             tunDataPlane = TunDataPlane.fromPreference(intent.getStringExtra(EXTRA_TUN_DATA_PLANE)),
             openVpnOverTorEnabled = intent.getBooleanExtra(EXTRA_OPENVPN_OVER_TOR, false),
             openVpnProfileConfigured = intent.getBooleanExtra(EXTRA_OPENVPN_PROFILE, false),
-            openVpnAuthUser = intent.getStringExtra(EXTRA_OPENVPN_AUTH_USER).orEmpty(),
-            openVpnAuthPassword = intent.getStringExtra(EXTRA_OPENVPN_AUTH_PASSWORD).orEmpty(),
+            openVpnAuthUser = "",
+            openVpnAuthPassword = "",
         )
     }
 

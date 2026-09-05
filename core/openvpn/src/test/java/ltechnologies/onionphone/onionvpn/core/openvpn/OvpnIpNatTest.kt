@@ -111,6 +111,47 @@ class OvpnIpNatTest {
         assertFalse(OvpnIpNat.isDataPlaneSilent(silenceMs = 20_000L))
     }
 
+    @Test
+    fun tcpAndUdpFlowsDoNotCollideAcrossDifferentRemotes() {
+        // Regression: XOR proto into IP bits made 10.0.0.5/TCP collide with 10.23.0.5/UDP.
+        OvpnIpNat.setFromIfconfigMsg("10.211.1.173 10.211.1.174 1280 net30")
+        val tcp = buildTcpSyn(
+            src = TunnelEndpoints.VPN_CLIENT_ADDRESS,
+            dst = "10.0.0.5",
+            srcPort = 50_000,
+            dstPort = 443,
+        )
+        assertTrue(OvpnIpNat.snatOutbound(tcp, tcp.size))
+        val udpInject = buildUdp(
+            src = "10.23.0.5",
+            dst = "10.211.1.173",
+            srcPort = 443,
+            dstPort = 50_000,
+        )
+        assertFalse(
+            "UDP peer must not DNAT-inject on TCP-only flow key",
+            OvpnIpNat.dnatInbound(udpInject, udpInject.size),
+        )
+    }
+
+    private fun buildUdp(src: String, dst: String, srcPort: Int, dstPort: Int): ByteArray {
+        val buf = ByteArray(28) // 20 IP + 8 UDP
+        buf[0] = 0x45.toByte()
+        buf[2] = 0
+        buf[3] = 28
+        buf[8] = 64
+        buf[9] = 17 // UDP
+        writeIp(buf, 12, src)
+        writeIp(buf, 16, dst)
+        buf[20] = (srcPort ushr 8).toByte()
+        buf[21] = (srcPort and 0xff).toByte()
+        buf[22] = (dstPort ushr 8).toByte()
+        buf[23] = (dstPort and 0xff).toByte()
+        buf[24] = 0
+        buf[25] = 8
+        return buf
+    }
+
     private fun buildTcpSyn(src: String, dst: String, srcPort: Int, dstPort: Int): ByteArray {
         val buf = ByteArray(40) // 20 IP + 20 TCP
         buf[0] = 0x45.toByte()

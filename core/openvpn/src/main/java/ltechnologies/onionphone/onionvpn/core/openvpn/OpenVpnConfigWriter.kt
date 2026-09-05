@@ -42,14 +42,10 @@ object OpenVpnConfigWriter {
             .map { forceRemoteTcp(it) }
             .toMutableList()
 
-        // Force IPv4 TCP — Tor SOCKS has no UDP ASSOCIATE (socks-extensions);
-        // tcp4 avoids Happy-Eyeballs IPv6 CONNECT on the OPENVPN SessionGroup.
-        if (lines.none { it.trimStart().startsWith("proto ", ignoreCase = true) }) {
-            lines.add(0, "proto tcp4-client")
-        } else {
-            val idx = lines.indexOfFirst { it.trimStart().startsWith("proto ", ignoreCase = true) }
-            lines[idx] = "proto tcp4-client"
-        }
+        // Force a single IPv4 TCP proto — OpenVPN last-wins; leftover `proto udp` after the
+        // first rewritten line would still break Tor SOCKS (no UDP ASSOCIATE).
+        lines.removeAll { it.trimStart().startsWith("proto ", ignoreCase = true) }
+        lines.add(0, "proto tcp4-client")
 
         // OpenVPN 2.7 (ics-openvpn / F-Droid ≥ Jan 2026) checks RFC1929 auth reply as
         // VER==5 (socks.c). Spec + Tor/Arti send VER==1 → false "server refused".
@@ -91,6 +87,10 @@ object OpenVpnConfigWriter {
             "pull-filter ignore \"dhcp-option DOMAIN\"",
             "pull-filter ignore \"block-ipv6\"",
             "pull-filter ignore \"ping-restart\"",
+            // VORACLE/CRIME: never negotiate link compression over Tor (even if pushed).
+            "allow-compression no",
+            "pull-filter ignore \"compress\"",
+            "pull-filter ignore \"comp-lzo\"",
             "route-nopull",
             "persist-tun",
             "persist-key",
@@ -299,10 +299,13 @@ object OpenVpnConfigWriter {
     fun firstRemoteHost(profileText: String): String? = allRemoteHosts(profileText).firstOrNull()
 
     private fun forceRemoteProtoTcp(parts: MutableList<String>) {
-        if (parts.size >= 4 && UDP_PROTO.containsMatchIn(parts[3])) {
-            parts[3] = "tcp"
-        } else if (parts.size >= 4 && parts[3].equals("tcp4", true)) {
-            parts[3] = "tcp"
+        if (parts.size < 4) return
+        val p = parts[3].lowercase()
+        when {
+            UDP_PROTO.containsMatchIn(parts[3]) -> parts[3] = "tcp"
+            // Per-remote proto overrides global proto tcp4-client — force plain `tcp`.
+            p == "tcp4" || p == "tcp6" || p == "tcp-client" ||
+                p == "tcp4-client" || p == "tcp6-client" -> parts[3] = "tcp"
         }
     }
 
@@ -311,16 +314,15 @@ object OpenVpnConfigWriter {
         file.writeText(rewritten)
     }
 
-    /** `remote host port udp` → `remote host port tcp` (OpenVPN per-remote proto overrides global). */
+    /** `remote host port udp|tcp6` → `remote host port tcp` (per-remote overrides global). */
     private fun forceRemoteTcp(line: String): String {
         val t = line.trim()
         if (!t.startsWith("remote ", ignoreCase = true)) return line
         val parts = t.split(Regex("\\s+")).toMutableList()
-        if (parts.size >= 4 && UDP_PROTO.containsMatchIn(parts[3])) {
-            parts[3] = "tcp"
-            return parts.joinToString(" ")
-        }
-        return line
+        if (parts.size < 4) return line
+        val before = parts[3]
+        forceRemoteProtoTcp(parts)
+        return if (parts[3] != before) parts.joinToString(" ") else line
     }
 
     /** True when rewritten lines still include a CA (`<ca>` block, `ca `, or `capath`). */
@@ -418,6 +420,10 @@ object OpenVpnConfigWriter {
             lower.startsWith("resolv-retry") ||
             lower.startsWith("auth-retry") ||
             lower.startsWith("persist-remote-ip") ||
+            // Compression = VORACLE/CRIME oracle on nested TLS over Tor.
+            lower.startsWith("comp-lzo") ||
+            lower.startsWith("compress") ||
+            lower.startsWith("allow-compression") ||
             // UDP-only / Windows / conflict with Tor SOCKS path
             lower.startsWith("explicit-exit-notify") ||
             lower.startsWith("block-outside-dns") ||

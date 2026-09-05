@@ -4,6 +4,38 @@ All notable changes to OnionVPN are documented here.
 
 ## [Unreleased]
 
+## [0.3.75] — 2026-09-05
+
+### Firewall / OVPN plane stickiness
+- Automap/`.onion` never Via SoftEther (engine stickyIntent + TunDnsMux Tor divert).
+- Persist ALLOW_OVPN intent in decisionCache; flowCache stores live plane (no mid-TCP Tor↔OVPN flip).
+- Mid-flow sticky rule/decision and UID-miss fallback never invent SoftEther (`ALLOW_OVPN` → Tor).
+- Failed OVPN `offer` drops (no mid-flow Tor flip); unhealthy OVPN status is Starting not Up.
+- TEMPORARY: no sticky decisionCache; schedule forget flowKey+tupleKey at expiry (StateFlow never emits on wall-clock).
+- Rules collect skips dest-wipe for TEMPORARY; SESSION/PERMANENT stamp tupleKey for mid-flow UID-miss.
+- SOCKS/PAC prompts hide Via OVPN (`socksPlane`); answers force Tor.
+- Disable OpenVPN-over-Tor / clear missing profile demotes ALLOW_OVPN→ASK and clears Via OVPN rules.
+- answerPrompt Automap demotion uses matched request only (no queue-rotate race).
+- FirewallCacheKeys flow/tuple: mix IPv6 src/dst host strings (ints stay 0 → collisions).
+
+### OpenVPN-over-Tor
+- OvpnIpNat: separate TCP/UDP conntrack maps (XOR proto into IP bits collided across remotes).
+- Config rewrite: strip all `proto` → one `tcp4-client`; `tcp6`/`tcp-client` → `tcp`; strip compress + `allow-compression no` (VORACLE).
+- PROTECTFD cancel on protect fail; Auth `writeCmd` redacts; SNAT/DNAT logs length-only.
+
+### Tor ControlPort / TUN / PAC
+- Little-t: reconnect ControlSocket after reader death (`ensureClassicControlConnected` in health-lite, `requireClassic`, NEWNYM).
+- TunDnsMux: track PFD.dup owners and close on stop; IPv6 DNS snoop srcPort offset 40.
+- DnsCryptSocksBridge: refuse SOCKS CONNECT to IPv6 literals (DNSCrypt A-only).
+
+### OPSEC / sensitive leakage
+- ExitIpValidator / vpn.address.not.public details: counts only (no raw exit/ISP/link IPs).
+- TorControlEventFormatter truncates `$HEX40` fingerprints before TunnelLogBuffer.
+- ACTION_START Intent: bridges, Entry/Exit/Exclude, OVPN Auth never on extras (DataStore + process-local bridge handoff).
+- Firewall prompt notif: VISIBILITY_SECRET + no dest/DPI on shade.
+- SocksUidBridge / onionmasq connection logs: uid (+ hops/err) only — no dest host:port.
+- OpenVPN Tor-RESOLVE pin log: success only (no host/IP).
+
 ## [0.3.74] — 2026-09-04
 
 ### .onion on C Tor and Arti

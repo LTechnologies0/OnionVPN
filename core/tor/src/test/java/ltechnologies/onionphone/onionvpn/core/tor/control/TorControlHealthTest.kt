@@ -4,6 +4,7 @@ import ltechnologies.onionphone.onionvpn.core.model.ValidationStatus
 import ltechnologies.onionphone.onionvpn.core.tor.control.model.TorControlEvent
 import ltechnologies.onionphone.onionvpn.core.tor.control.model.TorControlStatus
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -79,5 +80,15 @@ class TorControlEventFormatterTest {
             TorControlEvent.Circuit("3", "BUILT", "a,b,c"),
         )
         assertEquals("CTRL CIRC BUILT 3 a,b,c", line)
+    }
+
+    @Test
+    fun formatsCircuit_redactsFingerprints() {
+        val fp = "ABCDEF0123456789ABCDEF0123456789ABCDEF01"
+        val line = TorControlEventFormatter.format(
+            TorControlEvent.Circuit("3", "BUILT", "\$$fp~nick"),
+        )
+        assertTrue(line, line.contains("\$ABCDEF01…"))
+        assertFalse(line, line.contains(fp))
     }
 }

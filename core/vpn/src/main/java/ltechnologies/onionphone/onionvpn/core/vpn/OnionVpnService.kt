@@ -191,7 +191,8 @@ class OnionVpnService : VpnService() {
                 }.getOrNull()
             }
             ?: ltechnologies.onionphone.onionvpn.core.model.TorEngine.LITTLE_T
-        val bridgeLines = intent.getStringExtra(EXTRA_BRIDGE_LINES)
+        val bridgeLines = takePendingBridgeLines()
+            ?: intent.getStringExtra(EXTRA_BRIDGE_LINES)?.takeIf { it.isNotBlank() }
         val exitCountry = intent.getStringExtra(EXTRA_EXIT_COUNTRY)
         val allowAdbClearnetLeak = preferences.allowAdbClearnetLeak
 
@@ -675,8 +676,21 @@ class OnionVpnService : VpnService() {
         const val EXTRA_REQUIRE_OS_LOCKDOWN = "require_os_lockdown"
         const val EXTRA_TUN_DATA_PLANE = "tun_data_plane"
         const val EXTRA_TOR_ENGINE = "tor_engine"
+        /** @deprecated OPSEC — use [offerBridgeLines] / [takePendingBridgeLines]; Intent dumpsys leak. */
         const val EXTRA_BRIDGE_LINES = "bridge_lines"
         const val EXTRA_EXIT_COUNTRY = "exit_country"
+
+        /**
+         * Process-local bridge handoff (same UID) — never put bridge lines on Intent extras.
+         */
+        private val pendingBridgeLines = java.util.concurrent.atomic.AtomicReference<String?>(null)
+
+        /** Publish bridges for the next Connected establish (consumed once). */
+        fun offerBridgeLines(lines: String?) {
+            pendingBridgeLines.set(lines?.takeIf { it.isNotBlank() })
+        }
+
+        fun takePendingBridgeLines(): String? = pendingBridgeLines.getAndSet(null)
 
         private val generationSeq = AtomicInteger(0)
 

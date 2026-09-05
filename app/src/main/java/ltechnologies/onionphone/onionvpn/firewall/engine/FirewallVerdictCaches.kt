@@ -26,6 +26,16 @@ internal class FirewallVerdictCaches {
         destFlowKeys.remove(needle)?.forEach { flowCache.remove(it) }
     }
 
+    /** Drop one flow sticky (and optional SYN tuple alias) without wiping sibling ports. */
+    fun forgetFlow(flowKey: Long, tupleKey: Long? = null) {
+        flowCache.remove(flowKey)
+        if (tupleKey != null) flowCache.remove(tupleKey)
+        destFlowKeys.values.forEach { set ->
+            set.remove(flowKey)
+            if (tupleKey != null) set.remove(tupleKey)
+        }
+    }
+
     fun rememberDecision(
         decisionKey: Long,
         flowKey: Long,

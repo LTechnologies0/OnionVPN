@@ -136,6 +136,11 @@ data class FirewallConnectionInfo(
      * Optional DPI detail for notifications (DNS QNAME, HTTP Host, TLS SNI, …).
      */
     val dpiDetail: String? = null,
+    /**
+     * True when the prompt originated from PAC/hev SOCKS (cannot carry Via OVPN).
+     * Hides SoftEther action and forces Tor on OVPN answers.
+     */
+    val socksPlane: Boolean = false,
     val timestampEpochMs: Long = System.currentTimeMillis(),
 ) {
     /** Prefer hostname for display; fall back to IP. */

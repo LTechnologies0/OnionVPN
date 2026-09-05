@@ -52,11 +52,96 @@ class OpenVpnConfigWriterTest {
         assertTrue(out.contains("pull-filter ignore \"redirect-gateway\""))
         assertTrue(out.contains("pull-filter ignore \"ping-restart\""))
         assertFalse(out.contains("pull-filter ignore \"ping\""))
+        assertTrue(out.contains("allow-compression no"))
+        assertTrue(out.contains("pull-filter ignore \"compress\""))
+        assertTrue(out.contains("pull-filter ignore \"comp-lzo\""))
         assertTrue(out.contains("route-nopull"))
         assertFalse(out.contains("explicit-exit-notify"))
         assertFalse(out.contains("fragment"))
         assertTrue(auth.readText().contains("uopenvpn"))
         assertTrue(auth.readText().contains("popenvpn"))
+        dir.deleteRecursively()
+    }
+
+    @Test
+    fun rewrite_forcesTcpClientRemoteToken() {
+        val dir = File.createTempFile("ovpn-tcpclient", null).apply {
+            delete()
+            mkdirs()
+        }
+        val out = OpenVpnConfigWriter.rewrite(
+            profileText = """
+                client
+                remote vpn.example.com 443 tcp-client
+            """.trimIndent(),
+            socksPort = 19050,
+            managementSockPath = File(dir, "mgmt.sock").absolutePath,
+        )
+        assertTrue(
+            out.lineSequence().any { it.trim() == "remote vpn.example.com 443 tcp" },
+        )
+        assertFalse(
+            out.lineSequence().any {
+                it.trim().startsWith("remote ") && it.contains("tcp-client")
+            },
+        )
+        dir.deleteRecursively()
+    }
+
+    @Test
+    fun rewrite_stripsAllProtoLines_lastWinsUdpGone() {
+        val dir = File.createTempFile("ovpn-multiproto", null).apply {
+            delete()
+            mkdirs()
+        }
+        val out = OpenVpnConfigWriter.rewrite(
+            profileText = """
+                client
+                proto tcp
+                remote vpn.example.com 443 tcp
+                proto udp
+            """.trimIndent(),
+            socksPort = 19050,
+            managementSockPath = File(dir, "mgmt.sock").absolutePath,
+        )
+        assertEquals(1, out.lineSequence().count { it.trimStart().startsWith("proto ") })
+        assertTrue(out.contains("proto tcp4-client"))
+        assertFalse(out.contains("proto udp"))
+        dir.deleteRecursively()
+    }
+
+    @Test
+    fun rewrite_forcesTcp6RemoteAndStripsCompression() {
+        val dir = File.createTempFile("ovpn-v6proto", null).apply {
+            delete()
+            mkdirs()
+        }
+        val out = OpenVpnConfigWriter.rewrite(
+            profileText = """
+                client
+                proto tcp6-client
+                remote vpn.example.com 443 tcp6
+                compress lz4-v2
+                comp-lzo yes
+            """.trimIndent(),
+            socksPort = 19050,
+            managementSockPath = File(dir, "mgmt.sock").absolutePath,
+        )
+        assertTrue(out.contains("proto tcp4-client"))
+        assertTrue(
+            out.lineSequence().any {
+                it.trim() == "remote vpn.example.com 443 tcp"
+            },
+        )
+        assertFalse(
+            out.lineSequence().any {
+                val t = it.trim()
+                t.startsWith("remote ") && t.contains("tcp6")
+            },
+        )
+        assertFalse(out.contains("compress lz4"))
+        assertFalse(out.contains("comp-lzo yes"))
+        assertTrue(out.contains("allow-compression no"))
         dir.deleteRecursively()
     }
 

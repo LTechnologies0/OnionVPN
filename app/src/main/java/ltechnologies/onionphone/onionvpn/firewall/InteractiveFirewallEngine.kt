@@ -171,8 +171,20 @@ class InteractiveFirewallEngine @Inject constructor(
             }
         }
         scope.launch {
+            var previousActive = emptyList<FirewallRule>()
             rulesStore.rules.collect { list ->
-                rules.set(list.filterNot { it.isExpired() })
+                val active = list.filterNot { it.isExpired() }
+                // Dropped SESSION/PERMANENT must clear sticky caches. TEMPORARY must not
+                // invalidateDestination (wipes sibling ports) — scheduled forgetFlow handles it.
+                for (old in previousActive) {
+                    if (active.none { it.id == old.id } &&
+                        old.scope != FirewallRuleScope.TEMPORARY
+                    ) {
+                        caches.invalidateDestination(old.destHost)
+                    }
+                }
+                previousActive = active
+                rules.set(active)
             }
         }
     }
@@ -242,7 +254,8 @@ class InteractiveFirewallEngine @Inject constructor(
 
         val tupleKey = FirewallCacheKeys.tupleFlowKey(info)
         if (info.isTcp && !info.isTcpSyn) {
-            caches.flowCache[tupleKey]?.let { return coerceLiveOvpn(it, prefs) }
+            // Live plane was stamped at SYN — never re-coerce (would OVPN↔Tor flip mid-TCP).
+            caches.flowCache[tupleKey]?.let { return it }
         }
 
         // Resolve UID before uid-scoped caches — 5-tuple-only keys poisoned UNKNOWN→real UID races.
@@ -276,7 +289,7 @@ class InteractiveFirewallEngine @Inject constructor(
         }
 
         val flowKey = FirewallCacheKeys.flowKey(uid, info)
-        caches.flowCache[flowKey]?.let { return coerceLiveOvpn(it, prefs) }
+        caches.flowCache[flowKey]?.let { return it }
 
         val matchDest = matchDestination(info)
         if (matchDest == null) {
@@ -286,41 +299,40 @@ class InteractiveFirewallEngine @Inject constructor(
         }
 
         // Mid-flow: never open ASK/DENY prompts. Prefer sticky decision / rules when the
-        // flow-cache entry was trimmed. Fall back via midFlowFallback (default-aware).
+        // flow-cache entry was trimmed. Never invent SoftEther mid-TCP (SNAT needs SYN).
         if (info.isTcp && !info.isTcpSyn) {
             val matching = findRule(uid, matchDest, info)
             if (matching != null) {
-                val v = coerceLiveOvpn(matching.verdict, prefs)
-                rememberPacketFlow(flowKey, v, matchDest, info)
-                return v
+                return demoteOvpnMidFlow(stickyIntent(matching.verdict, matchDest, info))
             }
             val rk = FirewallCacheKeys.decisionKey(uid, matchDest, info)
             caches.decisionCache[rk]?.let { cached ->
-                val v = coerceLiveOvpn(cached, prefs)
-                rememberPacketFlow(flowKey, v, matchDest, info)
-                return v
+                return demoteOvpnMidFlow(stickyIntent(cached, matchDest, info))
             }
             return when (prefs.firewallDefaultAction) {
                 FirewallDefaultAction.ALLOW,
                 FirewallDefaultAction.ASK,
                 -> midFlowFallback(prefs)
-                FirewallDefaultAction.ALLOW_OVPN -> defaultOvpnOrTor(prefs)
+                // Never invent SoftEther mid-flow after cache trim.
+                FirewallDefaultAction.ALLOW_OVPN -> FirewallVerdict.ALLOW_TOR
                 FirewallDefaultAction.DENY -> FirewallVerdict.DENY
             }
         }
 
         val matching = findRule(uid, matchDest, info)
         if (matching != null) {
-            val v = coerceLiveOvpn(matching.verdict, prefs)
-            rememberPacketFlow(flowKey, v, matchDest, info)
-            return v
+            val intent = stickyIntent(matching.verdict, matchDest, info)
+            val live = coerceLiveOvpn(intent, prefs)
+            rememberPacketFlow(flowKey, live, matchDest, info)
+            return live
         }
 
         val rk = FirewallCacheKeys.decisionKey(uid, matchDest, info)
         caches.decisionCache[rk]?.let { cached ->
-            val v = coerceLiveOvpn(cached, prefs)
-            rememberPacketFlow(flowKey, v, matchDest, info)
-            return v
+            val intent = stickyIntent(cached, matchDest, info)
+            val live = coerceLiveOvpn(intent, prefs)
+            rememberPacketFlow(flowKey, live, matchDest, info)
+            return live
         }
 
         val pendingKey = FirewallCacheKeys.ruleKey(uid, matchDest, info.dstPort, info.protocol)
@@ -342,15 +354,13 @@ class InteractiveFirewallEngine @Inject constructor(
                 FirewallVerdict.ALLOW_TOR
             }
             FirewallDefaultAction.ALLOW_OVPN -> {
-                val v = defaultOvpnOrTor(prefs)
-                caches.rememberDecision(
-                    rk,
-                    flowKey,
-                    v,
-                    matchDest,
-                    FirewallCacheKeys.tupleFlowKey(info),
-                )
-                v
+                // decisionCache keeps OVPN intent; flowCache stores live plane only.
+                val intent = stickyIntent(FirewallVerdict.ALLOW_OVPN, matchDest, info)
+                val live = coerceLiveOvpn(intent, prefs)
+                val tuple = FirewallCacheKeys.tupleFlowKey(info)
+                caches.rememberDecision(rk, flowKey, intent, matchDest, tuple)
+                caches.rememberFlow(flowKey, live, matchDest, tuple)
+                live
             }
             FirewallDefaultAction.DENY -> {
                 caches.rememberDecision(
@@ -524,6 +534,7 @@ class InteractiveFirewallEngine @Inject constructor(
             destHost = destHost,
             threatCategory = threat,
             dpiDetail = dpi.detail,
+            socksPlane = true,
         )
         val queued = QueuedPrompt(request, flowKey, app, ruleKey, decisionKey, matchDest)
         synchronized(queueLock) {
@@ -583,7 +594,15 @@ class InteractiveFirewallEngine @Inject constructor(
             threatCategory = threat,
             dpiDetail = dpi.detail,
         )
-        val queued = QueuedPrompt(request, flowKey, app, ruleKey, decisionKey, matchDest)
+        val queued = QueuedPrompt(
+            request,
+            flowKey,
+            app,
+            ruleKey,
+            decisionKey,
+            matchDest,
+            tupleKey = FirewallCacheKeys.tupleFlowKey(info),
+        )
         synchronized(queueLock) {
             if (pendingByKey.putIfAbsent(ruleKey, queued) != null) {
                 return FirewallVerdict.DENY
@@ -639,16 +658,6 @@ class InteractiveFirewallEngine @Inject constructor(
         ruleScope: FirewallRuleScope,
     ) {
         val prefs = preferences.get()
-        val effective = when {
-            verdict == FirewallVerdict.ALLOW_OVPN && !ovpnRouteAvailable(prefs) -> {
-                // Match TunDnsMux / coerceSocksVerdict: demote to Tor, never store DENY —
-                // otherwise a Via-OVPN answer while SNAT/AUTH is briefly down permanently
-                // blackholes that destination even after OVPN recovers / Tor could carry it.
-                Timber.w("ALLOW_OVPN unavailable at answer — storing ALLOW_TOR (demote)")
-                FirewallVerdict.ALLOW_TOR
-            }
-            else -> verdict
-        }
         val answered: QueuedPrompt
         synchronized(queueLock) {
             val current = active
@@ -661,6 +670,23 @@ class InteractiveFirewallEngine @Inject constructor(
             active = null
             _pendingPrompt.value = null
             publishQueueDepthLocked()
+        }
+        // Persist user intent after requestId match. SoftEther down → live coerce only.
+        // SOCKS/PAC and Automap/.onion never store ALLOW_OVPN.
+        val effective = when {
+            verdict == FirewallVerdict.ALLOW_OVPN && answered.request.socksPlane -> {
+                Timber.w("ALLOW_OVPN→Tor for SOCKS-plane answer (cannot encapsulate SoftEther)")
+                FirewallVerdict.ALLOW_TOR
+            }
+            verdict == FirewallVerdict.ALLOW_OVPN &&
+                (
+                    TunnelEndpoints.isOnionLikeHostname(answered.matchDest) ||
+                        TunnelEndpoints.isAutomapVirtual(answered.request.destIp)
+                    ) -> {
+                Timber.w("ALLOW_OVPN→Tor for Automap/.onion answer (SoftEther cannot SOCKS5A)")
+                FirewallVerdict.ALLOW_TOR
+            }
+            else -> verdict
         }
         // Cancel current notification before promoting the next head of queue.
         promptNotifier.cancel()
@@ -696,7 +722,40 @@ class InteractiveFirewallEngine @Inject constructor(
                     it.protocol == rule.protocol
             } + rule
         }
-        caches.rememberDecision(answered.decisionKey, answered.flowKey, effective, answered.matchDest)
+        // TEMPORARY must not sticky decisionCache: rules StateFlow only emits on upsert/remove,
+        // so wall-clock expiry never hits the collect invalidate — answers would outlive the rule.
+        // findRule still honors the TEMPORARY until expiresAt; flowCache covers this TCP only.
+        val live = coerceLiveOvpn(effective, prefs)
+        if (ruleScope == FirewallRuleScope.TEMPORARY) {
+            caches.rememberFlow(answered.flowKey, live, answered.matchDest, answered.tupleKey)
+            val flowKeyToDrop = answered.flowKey
+            val tupleKeyToDrop = answered.tupleKey
+            val delayMs = ((expires ?: 0L) - System.currentTimeMillis()).coerceAtLeast(0L)
+            mainHandler.postDelayed({
+                // Only this TCP flow (+ SYN tuple alias) — not whole dest.
+                caches.forgetFlow(flowKeyToDrop, tupleKeyToDrop)
+                rules.updateAndGet { list -> list.filterNot { it.isExpired() } }
+                scope.launch { rulesStore.removeWhere { it.isExpired() } }
+            }, delayMs)
+        } else {
+            caches.rememberDecision(
+                answered.decisionKey,
+                answered.flowKey,
+                effective,
+                answered.matchDest,
+                answered.tupleKey,
+            )
+            // flowCache must hold live plane so a Tor SYN while OVPN was down does not
+            // mid-TCP flip to SoftEther after SNAT recovers (decisionCache keeps intent).
+            if (live != effective) {
+                caches.rememberFlow(
+                    answered.flowKey,
+                    live,
+                    answered.matchDest,
+                    answered.tupleKey,
+                )
+            }
+        }
         val note = when (ruleScope) {
             FirewallRuleScope.TEMPORARY -> "temporary ${prefs.firewallTempMinutes}m"
             FirewallRuleScope.SESSION -> "until VPN stops"
@@ -942,6 +1001,8 @@ class InteractiveFirewallEngine @Inject constructor(
         val ruleKey: String,
         val decisionKey: Long,
         val matchDest: String,
+        /** TUN 5-tuple mid-flow sticky; null for PAC SOCKS. */
+        val tupleKey: Long? = null,
     )
 
 
@@ -954,6 +1015,26 @@ class InteractiveFirewallEngine @Inject constructor(
     private fun coerceSocksVerdict(v: FirewallVerdict): FirewallVerdict =
         if (v == FirewallVerdict.ALLOW_OVPN) FirewallVerdict.ALLOW_TOR else v
 
+    /**
+     * Demote ALLOW_OVPN → Tor for Automap/.onion (SoftEther cannot SOCKS5A).
+     * Clearnet OVPN intent is preserved for sticky cache/rules.
+     */
+    private fun stickyIntent(
+        v: FirewallVerdict,
+        matchDest: String,
+        info: IpPacketInfo,
+    ): FirewallVerdict =
+        if (v == FirewallVerdict.ALLOW_OVPN &&
+            (
+                TunnelEndpoints.isAutomapVirtual(info.dstIp) ||
+                    TunnelEndpoints.isOnionLikeHostname(matchDest)
+                )
+        ) {
+            FirewallVerdict.ALLOW_TOR
+        } else {
+            v
+        }
+
     /** Default ALLOW_OVPN when data plane is up; otherwise Tor (never a silent invent). */
     private fun defaultOvpnOrTor(prefs: TunnelPreferences): FirewallVerdict =
         if (ovpnRouteAvailable(prefs)) FirewallVerdict.ALLOW_OVPN else FirewallVerdict.ALLOW_TOR
@@ -961,6 +1042,7 @@ class InteractiveFirewallEngine @Inject constructor(
     /**
      * Sticky ALLOW_OVPN rules/cache must still honor live SNAT health — same demotion as
      * TunDnsMux when Via OVPN is down (never leave the packet on a dead OVPN sink).
+     * Does not rewrite stored intent — only the returned live verdict.
      */
     private fun coerceLiveOvpn(v: FirewallVerdict, prefs: TunnelPreferences): FirewallVerdict =
         if (v == FirewallVerdict.ALLOW_OVPN && !ovpnRouteAvailable(prefs)) {
@@ -969,6 +1051,10 @@ class InteractiveFirewallEngine @Inject constructor(
             v
         }
 
+    /** SoftEther needs a fresh SYN SNAT path — never invent Via OVPN mid-TCP. */
+    private fun demoteOvpnMidFlow(v: FirewallVerdict): FirewallVerdict =
+        if (v == FirewallVerdict.ALLOW_OVPN) FirewallVerdict.ALLOW_TOR else v
+
     /**
      * Mid-flow cache miss (UID lost / trim). Prefer the configured default over a blanket DENY.
      *
@@ -976,13 +1062,14 @@ class InteractiveFirewallEngine @Inject constructor(
      * (old behaviour) RST'd every Tor-routed TCP after [FirewallVerdictCaches] trimmed ALLOW
      * entries — browser saw net::ERR_CONNECTION_RESET for even example.com.
      *
-     * OVPN permanent/session rules and decisionCache still win above this fallback; we only
-     * avoid inventing Tor when the user explicitly defaulted to DENY.
+     * Never invent SoftEther mid-TCP (UID lost): SoftEther needs a fresh SYN SNAT path;
+     * flipping onto OVPN mid-stream breaks the flow. Permanent/session OVPN rules still
+     * win above this fallback via sticky caches.
      */
     private fun midFlowFallback(prefs: TunnelPreferences): FirewallVerdict =
         when (prefs.firewallDefaultAction) {
             FirewallDefaultAction.DENY -> FirewallVerdict.DENY
-            FirewallDefaultAction.ALLOW_OVPN -> defaultOvpnOrTor(prefs)
+            FirewallDefaultAction.ALLOW_OVPN,
             FirewallDefaultAction.ALLOW,
             FirewallDefaultAction.ASK,
             -> FirewallVerdict.ALLOW_TOR
@@ -1001,6 +1088,7 @@ class InteractiveFirewallEngine @Inject constructor(
     fun refreshActivePromptForOvpn() {
         if (!ovpnRouteAvailable()) return
         val shown = synchronized(queueLock) { active?.request } ?: return
+        if (shown.socksPlane) return
         mainHandler.post { promptNotifier.show(shown) }
         Timber.i("Firewall prompt refreshed — Via OVPN now available")
     }
