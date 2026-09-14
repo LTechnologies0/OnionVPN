@@ -19,9 +19,9 @@ object TorControlEventFormatter {
             is TorControlEvent.Stream ->
                 "CTRL STREAM ${event.status} ${event.target} circ=${event.circuitId}"
             is TorControlEvent.OrConn ->
-                "CTRL ORCONN ${event.status} ${event.target}"
+                "CTRL ORCONN ${event.status} [target redacted]"
             is TorControlEvent.AddrMap ->
-                "CTRL ADDRMAP ${event.address} → ${event.newAddress}"
+                "CTRL ADDRMAP [redacted]"
             is TorControlEvent.Bandwidth ->
                 "CTRL BW r=${event.read} w=${event.written}"
             is TorControlEvent.Notice ->

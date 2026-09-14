@@ -74,8 +74,8 @@ class MainViewModel @Inject constructor(
                 tunDataPlane = plane,
                 appLockEnabled = false,
                 autoStartOnAppLaunch = true,
-                allowAdbClearnetLeak = true,
                 killSwitchEnabled = true,
+                // Preserve allowAdbClearnetLeak — do not sticky-enable shell clearnet.
             )
         }
         return preferencesStore.preferences.first()

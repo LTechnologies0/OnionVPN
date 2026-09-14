@@ -4,6 +4,19 @@ All notable changes to OnionVPN are documented here.
 
 ## [Unreleased]
 
+## [0.3.76] — 2026-09-15
+
+### Clearnet / plane fail-closed
+- OpenVPN-over-Tor refuses start when `protectSocket` is unwired (never ack PROTECTFD as success).
+- Mid-flow after flow-cache trim: sticky OVPN stays OVPN while UP; OVPN-down → DENY (no Tor exit swap).
+- OVPN-default mid-flow miss → DENY (never invent Tor plane on SoftEther sessions).
+- Moat bridges: Tor SOCKS only — clearnet HTTPS path removed; Settings toggle locked on.
+- Debug tunnel start no longer sticky-enables `allowAdbClearnetLeak` (preserves user opt-out).
+
+### OPSEC
+- OpenVPN rewrite `verb 1`; stdout pump redacts IPs/hosts/auth (drops BYTECOUNT).
+- TorControlEventFormatter: ORCONN target + ADDRMAP fully redacted; sink skips those events.
+
 ## [0.3.75] — 2026-09-05
 
 ### Firewall / OVPN plane stickiness

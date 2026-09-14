@@ -277,7 +277,7 @@ class OpenVpnConfigWriterTest {
         )
         assertFalse(out.contains("up /tmp"))
         assertTrue(out.contains("script-security 0"))
-        assertTrue(out.contains("verb 3"))
+        assertTrue(out.contains("verb 1"))
         assertEquals(1, out.lineSequence().count { it.trimStart().startsWith("verb ") })
         dir.deleteRecursively()
     }

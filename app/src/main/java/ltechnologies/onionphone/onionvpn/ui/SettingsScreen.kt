@@ -1180,13 +1180,12 @@ fun SettingsScreen(
         }
         PrefSwitch(
             label = "Request bridges via Tor",
-            checked = local.moatRequestViaTor,
-            onChecked = { commit(local.copy(moatRequestViaTor = it), restart = false) },
+            checked = true,
+            onChecked = { /* Moat is Tor-only — clearnet path removed */ },
         )
         Text(
-            text = "On (default) = Moat through Tor SOCKS when the tunnel is up — " +
-                "avoids clearnet TLS MitM of bridges.torproject.org. " +
-                "Off = clearnet HTTPS (only if you accept local MitM risk).",
+            text = "Moat always uses Tor SOCKS when the tunnel is up — " +
+                "clearnet HTTPS to bridges.torproject.org is refused (ISP + local MitM).",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -1250,9 +1249,9 @@ fun SettingsScreen(
                                     scope.launch {
                                         runCatching {
                                             val socks = torSocksPort()
+                                                ?: error("Tor SOCKS not ready — start the tunnel first")
                                             val outcome = MoatCircumventionClient.fetchBridges(
                                                 transport = transport,
-                                                viaTor = local.moatRequestViaTor || socks != null,
                                                 socksPort = socks,
                                             )
                                             val normalized = TorBridgeConfig.parseLines(

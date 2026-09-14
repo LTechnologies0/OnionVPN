@@ -104,7 +104,8 @@ object OpenVpnConfigWriter {
             "dev $tunDevName",
             // No external scripts / plugins (deterministic, no clearnet hooks).
             "script-security 0",
-            "verb 3",
+            // verb 1: avoid remote IPs / reconnect detail in logcat (OPSEC).
+            "verb 1",
         )
         if (authUserPassFile != null) {
             lines += "auth-user-pass ${authUserPassFile.absolutePath}"

@@ -298,24 +298,30 @@ class InteractiveFirewallEngine @Inject constructor(
             return FirewallVerdict.DENY
         }
 
-        // Mid-flow: never open ASK/DENY prompts. Prefer sticky decision / rules when the
-        // flow-cache entry was trimmed. Never invent SoftEther mid-TCP (SNAT needs SYN).
+        // Mid-flow: never open ASK prompts. Prefer sticky decision / rules when the
+        // flow-cache entry was trimmed. Never Tor↔OVPN flip: OVPN sticky stays OVPN while
+        // SNAT is up (conntrack survives trim); OVPN-down → DENY (not Tor exit swap).
         if (info.isTcp && !info.isTcpSyn) {
             val matching = findRule(uid, matchDest, info)
             if (matching != null) {
-                return demoteOvpnMidFlow(stickyIntent(matching.verdict, matchDest, info))
+                val live = midFlowStickyLive(stickyIntent(matching.verdict, matchDest, info), prefs)
+                rememberPacketFlow(flowKey, live, matchDest, info)
+                return live
             }
             val rk = FirewallCacheKeys.decisionKey(uid, matchDest, info)
             caches.decisionCache[rk]?.let { cached ->
-                return demoteOvpnMidFlow(stickyIntent(cached, matchDest, info))
+                val live = midFlowStickyLive(stickyIntent(cached, matchDest, info), prefs)
+                rememberPacketFlow(flowKey, live, matchDest, info)
+                return live
             }
             return when (prefs.firewallDefaultAction) {
                 FirewallDefaultAction.ALLOW,
                 FirewallDefaultAction.ASK,
                 -> midFlowFallback(prefs)
-                // Never invent SoftEther mid-flow after cache trim.
-                FirewallDefaultAction.ALLOW_OVPN -> FirewallVerdict.ALLOW_TOR
-                FirewallDefaultAction.DENY -> FirewallVerdict.DENY
+                // Never invent SoftEther or swap to Tor after OVPN-default cache trim.
+                FirewallDefaultAction.ALLOW_OVPN,
+                FirewallDefaultAction.DENY,
+                -> FirewallVerdict.DENY
             }
         }
 
@@ -1051,28 +1057,32 @@ class InteractiveFirewallEngine @Inject constructor(
             v
         }
 
-    /** SoftEther needs a fresh SYN SNAT path — never invent Via OVPN mid-TCP. */
-    private fun demoteOvpnMidFlow(v: FirewallVerdict): FirewallVerdict =
-        if (v == FirewallVerdict.ALLOW_OVPN) FirewallVerdict.ALLOW_TOR else v
+    /**
+     * Mid-flow sticky plane after flow-cache trim. Keep OVPN iff data plane still up
+     * (SNAT conntrack can still map the 5-tuple). If OVPN is down → DENY — never swap
+     * the public exit onto Tor mid-TCP (correlation + broken SoftEther session).
+     * Never invent SoftEther for Tor/DENY sticky.
+     */
+    private fun midFlowStickyLive(v: FirewallVerdict, prefs: TunnelPreferences): FirewallVerdict =
+        when (v) {
+            FirewallVerdict.ALLOW_OVPN ->
+                if (ovpnRouteAvailable(prefs)) FirewallVerdict.ALLOW_OVPN else FirewallVerdict.DENY
+            else -> v
+        }
 
     /**
-     * Mid-flow cache miss (UID lost / trim). Prefer the configured default over a blanket DENY.
-     *
-     * Historical Tor-only builds fail-open to Tor. With OpenVPN-over-Tor, a blanket DENY here
-     * (old behaviour) RST'd every Tor-routed TCP after [FirewallVerdictCaches] trimmed ALLOW
-     * entries — browser saw net::ERR_CONNECTION_RESET for even example.com.
-     *
-     * Never invent SoftEther mid-TCP (UID lost): SoftEther needs a fresh SYN SNAT path;
-     * flipping onto OVPN mid-stream breaks the flow. Permanent/session OVPN rules still
-     * win above this fallback via sticky caches.
+     * Mid-flow cache miss (UID lost / trim) with no sticky rule/decision.
+     * Tor-default (ALLOW/ASK) fail-open to Tor so trim does not RST clearnet-via-Tor.
+     * OVPN-default / DENY → DENY (never invent SoftEther or a Tor exit swap).
      */
     private fun midFlowFallback(prefs: TunnelPreferences): FirewallVerdict =
         when (prefs.firewallDefaultAction) {
-            FirewallDefaultAction.DENY -> FirewallVerdict.DENY
-            FirewallDefaultAction.ALLOW_OVPN,
             FirewallDefaultAction.ALLOW,
             FirewallDefaultAction.ASK,
             -> FirewallVerdict.ALLOW_TOR
+            FirewallDefaultAction.ALLOW_OVPN,
+            FirewallDefaultAction.DENY,
+            -> FirewallVerdict.DENY
         }
 
     /** OVPN prompt option when feature enabled, profile present, and runtime up. */

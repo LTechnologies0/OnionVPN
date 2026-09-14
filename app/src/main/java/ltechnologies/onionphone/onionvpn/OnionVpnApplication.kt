@@ -125,6 +125,9 @@ class OnionVpnApplication : Application() {
                 if (!DiagnosticsGate.enabled()) return@collect
                 if (event is TorControlEvent.Bandwidth) return@collect
                 if (event is TorControlEvent.Stream) return@collect
+                // ORCONN / ADDRMAP carry guard addresses and DNS map pairs — skip buffer.
+                if (event is TorControlEvent.OrConn) return@collect
+                if (event is TorControlEvent.AddrMap) return@collect
                 controlEventCount++
                 if ((controlEventCount and 0x1F) != 0L &&
                     event !is TorControlEvent.Notice &&

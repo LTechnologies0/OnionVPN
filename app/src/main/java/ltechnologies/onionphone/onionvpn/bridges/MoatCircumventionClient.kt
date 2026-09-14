@@ -20,8 +20,8 @@ import timber.log.Timber
 /**
  * Tor Project Moat **circumvention settings** client (rdsys / BridgeDB).
  *
- * Default path: clearnet HTTPS to `bridges.torproject.org`.
- * Optional path: Tor SOCKS5h (same pattern as GeoIP / ExitIpValidator).
+ * Always via Tor SOCKS5h (same pattern as GeoIP / ExitIpValidator). Clearnet Moat
+ * would expose the ISP to bridges.torproject.org and allow local MitM of bridge lines.
  *
  * Empty `/settings` for a country means Moat has **no special circumvention map**
  * for that location (direct Tor often works). `/defaults` still returns generic
@@ -75,7 +75,7 @@ object MoatCircumventionClient {
     suspend fun fetchBridges(
         transport: String,
         country: String? = null,
-        viaTor: Boolean = false,
+        @Suppress("UNUSED_PARAMETER") viaTor: Boolean = true,
         socksPort: Int? = null,
     ): FetchOutcome {
         val want = transport.trim().lowercase()
@@ -84,7 +84,6 @@ object MoatCircumventionClient {
         val primary = fetchSettings(
             transports = listOf(want),
             country = country,
-            viaTor = viaTor,
             socksPort = socksPort,
         )
         val primaryLines = pickLines(primary, want)
@@ -104,7 +103,7 @@ object MoatCircumventionClient {
         }
 
         if (want == "obfs4" || want == "snowflake" || want == "webtunnel") {
-            val builtin = fetchBuiltin(listOf(want), viaTor, socksPort)
+            val builtin = fetchBuiltin(listOf(want), socksPort = socksPort)
             if (builtin.isNotEmpty()) {
                 return FetchOutcome(
                     lines = builtin,
@@ -122,19 +121,19 @@ object MoatCircumventionClient {
     /**
      * @param transports preferred PTs (obfs4 / snowflake / webtunnel)
      * @param country ISO-3166-1 alpha-2 override; null = server geolocation
-     * @param viaTor when true, [socksPort] must be a live Tor SocksPort
+     * @param socksPort live Tor SocksPort (required — Moat never dials clearnet)
      */
     suspend fun fetchSettings(
         transports: List<String> = listOf("obfs4", "snowflake", "webtunnel"),
         country: String? = null,
-        viaTor: Boolean = false,
+        @Suppress("UNUSED_PARAMETER") viaTor: Boolean = true,
         socksPort: Int? = null,
     ): Result = withContext(Dispatchers.IO) {
         val body = JSONObject().apply {
             put("transports", JSONArray(transports))
             if (!country.isNullOrBlank()) put("country", country.trim().lowercase())
         }.toString()
-        val client = httpClient(viaTor, socksPort)
+        val client = httpClient(socksPort)
         val primary = postJson(client, BASE + "settings", body)
         val parsed = parseResponse(primary)
         if (parsed.settings.isNotEmpty()) {
@@ -176,13 +175,13 @@ object MoatCircumventionClient {
 
     private const val MAX_BRIDGE_LINES = 6
 
-    /** GET `/moat/circumvention/builtin` — stable public TBA-style lines. */
+    /** GET `/moat/circumvention/builtin` — stable public TBA-style lines (Tor SOCKS only). */
     suspend fun fetchBuiltin(
         transports: List<String>,
-        viaTor: Boolean = false,
+        @Suppress("UNUSED_PARAMETER") viaTor: Boolean = true,
         socksPort: Int? = null,
     ): List<String> = withContext(Dispatchers.IO) {
-        val client = httpClient(viaTor, socksPort)
+        val client = httpClient(socksPort)
         val req = Request.Builder()
             .url(BASE + "builtin")
             .header("Accept", "application/json")
@@ -190,7 +189,6 @@ object MoatCircumventionClient {
             .get()
             .build()
         val raw = SocksJavaProxyAuth.withProbe {
-            // Clearnet Moat still fine — Authenticator unused without SOCKS challenge.
             client.newCall(req).execute().use { resp ->
                 val text = resp.body?.string().orEmpty()
                 if (!resp.isSuccessful) {
@@ -247,19 +245,17 @@ object MoatCircumventionClient {
         }
     }
 
-    private fun httpClient(viaTor: Boolean, socksPort: Int?): OkHttpClient {
-        val b = OkHttpClient.Builder()
+    /** Always Tor SOCKS — refuse clearnet Moat (ISP + local MitM of bridge lines). */
+    private fun httpClient(socksPort: Int?): OkHttpClient {
+        val port = socksPort?.takeIf { it > 0 }
+            ?: error("Tor SOCKS not ready — start the tunnel before requesting Moat bridges")
+        return OkHttpClient.Builder()
             .connectTimeout(30, TimeUnit.SECONDS)
             .readTimeout(60, TimeUnit.SECONDS)
             .applyTorClientHardening()
-        if (viaTor) {
-            val port = socksPort?.takeIf { it > 0 }
-                ?: error("Tor SOCKS not ready — connect the tunnel or disable “Request via Tor”")
-            b.proxy(Proxy(Proxy.Type.SOCKS, InetSocketAddress(TunnelEndpoints.LOOPBACK, port)))
-            b.dns(TorSocksDns)
-            // Built once per call; Authenticator scoped around each Moat HTTP exchange.
-        }
-        return b.build()
+            .proxy(Proxy(Proxy.Type.SOCKS, InetSocketAddress(TunnelEndpoints.LOOPBACK, port)))
+            .dns(TorSocksDns)
+            .build()
     }
 
     private fun postJson(client: OkHttpClient, url: String, json: String): String {

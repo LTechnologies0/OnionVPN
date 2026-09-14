@@ -64,7 +64,8 @@ class DebugTunnelStartReceiver : BroadcastReceiver() {
                         tunDataPlane = plane,
                         appLockEnabled = false,
                         autoStartOnAppLaunch = true,
-                        allowAdbClearnetLeak = true,
+                        // Do not force allowAdbClearnetLeak — debug default is already on;
+                        // forcing true would re-enable shell clearnet after the user opted out.
                     )
                 }
                 Timber.i(
