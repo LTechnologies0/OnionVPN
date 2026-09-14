@@ -56,6 +56,9 @@ jobs:
           add-job-summary: always
 
       - uses: android-actions/setup-android@v4
+        with:
+          # SDK package "tools" was removed upstream — do not request it.
+          packages: platform-tools
 
       - name: Create local.properties
         run: echo "sdk.dir=${ANDROID_SDK_ROOT}" >> local.properties
