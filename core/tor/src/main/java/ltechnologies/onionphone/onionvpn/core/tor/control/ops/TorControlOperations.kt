@@ -168,20 +168,20 @@ internal class TorControlOperations(
      */
     fun resolve(hostname: String, timeoutMs: Long = 15_000): Result<String> = runCatching {
         val host = TorControlWire.requireHostname(hostname)
-        Timber.d("control RESOLVE %s timeoutMs=%d", host, timeoutMs)
+        Timber.d("control RESOLVE host_len=%d timeoutMs=%d", host.length, timeoutMs)
         sendResolve(host).getOrThrow()
         val deadline = System.currentTimeMillis() + timeoutMs
         var sleepMs = 50L
         while (System.currentTimeMillis() < deadline) {
             pollResolveMapping(host)?.let {
-                Timber.d("control RESOLVE %s → %s", host, it)
+                Timber.d("control RESOLVE ok")
                 return@runCatching it
             }
             Thread.sleep(sleepMs)
             sleepMs = (sleepMs * 2).coerceAtMost(400L)
         }
-        throw IOException("RESOLVE timeout for $host")
-    }.onFailure { Timber.w(it, "control RESOLVE failed host=%s", hostname) }
+        throw IOException("RESOLVE timeout")
+    }.onFailure { Timber.w(it, "control RESOLVE failed host_len=%d", hostname.length) }
 
     fun extendNewCircuit(): Result<String> = runCatching {
         val lines = transport.command("EXTENDCIRCUIT 0")

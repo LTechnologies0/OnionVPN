@@ -66,15 +66,15 @@ object TorDnsResolve {
                 }
                 val ip = parseFirstA(buf, resp.length)
                 if (ip == null) {
-                    val err = "DNSPort returned no A for $host"
+                    val err = "DNSPort returned no A"
                     Timber.w(err)
                     OpTrace.warn("tor", err)
                     throw IllegalStateException(err)
                 }
-                Timber.d("DNSPort RESOLVE %s → %s", host, ip)
+                Timber.d("DNSPort RESOLVE ok")
                 return ip
             }
-            val err = "DNSPort timeout/no matching TXID for $host"
+            val err = "DNSPort timeout/no matching TXID"
             Timber.w(err)
             OpTrace.warn("tor", err)
             throw IllegalStateException(err)

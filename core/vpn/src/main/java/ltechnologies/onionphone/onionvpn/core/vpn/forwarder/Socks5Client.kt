@@ -74,14 +74,14 @@ class Socks5Client(
         if (TunnelEndpoints.parseIpv4Literal(hostname) != null || hostname.indexOf(':') >= 0) {
             return InetAddress.getByName(hostname)
         }
-        Timber.v("SOCKS5 RESOLVE via %s:%d host=%s", proxyHost, proxyPort, hostname)
+        Timber.v("SOCKS5 RESOLVE via socks host_len=%d", hostname.length)
         openAuthedSocket().use { socket ->
             val input = DataInputStream(socket.getInputStream())
             val output = DataOutputStream(socket.getOutputStream())
             try {
                 writeDestinationRequest(output, CMD_RESOLVE, hostname, destPort = 0)
                 val addr = readResolveReply(input)
-                Timber.d("SOCKS5 RESOLVE %s → %s", hostname, addr.hostAddress)
+                Timber.d("SOCKS5 RESOLVE ok")
                 return addr
             } catch (e: Exception) {
                 throw wrapHandshake(e)

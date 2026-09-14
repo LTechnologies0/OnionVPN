@@ -4,6 +4,14 @@ All notable changes to OnionVPN are documented here.
 
 ## [Unreleased]
 
+## [0.3.77] — 2026-09-15
+
+### SoftEther plane fail-closed
+- SYN/new-flow `coerceLiveOvpn` / OVPN-default: OVPN-down → DENY (align TunDnsMux drop; no SoftEther→Tor exit swap).
+
+### OPSEC
+- SOCKS5 / DNSPort / control RESOLVE logs: success-only (no host→IP).
+
 ## [0.3.76] — 2026-09-15
 
 ### Clearnet / plane fail-closed

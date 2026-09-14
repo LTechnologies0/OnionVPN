@@ -1041,18 +1041,18 @@ class InteractiveFirewallEngine @Inject constructor(
             v
         }
 
-    /** Default ALLOW_OVPN when data plane is up; otherwise Tor (never a silent invent). */
+    /** Default ALLOW_OVPN when data plane is up; otherwise DENY (never Tor exit swap). */
     private fun defaultOvpnOrTor(prefs: TunnelPreferences): FirewallVerdict =
-        if (ovpnRouteAvailable(prefs)) FirewallVerdict.ALLOW_OVPN else FirewallVerdict.ALLOW_TOR
+        if (ovpnRouteAvailable(prefs)) FirewallVerdict.ALLOW_OVPN else FirewallVerdict.DENY
 
     /**
-     * Sticky ALLOW_OVPN rules/cache must still honor live SNAT health — same demotion as
-     * TunDnsMux when Via OVPN is down (never leave the packet on a dead OVPN sink).
+     * Sticky ALLOW_OVPN rules/cache must still honor live SNAT health — align with
+     * TunDnsMux drop when Via OVPN is down (never SoftEther→Tor exit on new SYN).
      * Does not rewrite stored intent — only the returned live verdict.
      */
     private fun coerceLiveOvpn(v: FirewallVerdict, prefs: TunnelPreferences): FirewallVerdict =
         if (v == FirewallVerdict.ALLOW_OVPN && !ovpnRouteAvailable(prefs)) {
-            FirewallVerdict.ALLOW_TOR
+            FirewallVerdict.DENY
         } else {
             v
         }
