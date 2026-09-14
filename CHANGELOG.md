@@ -4,6 +4,11 @@ All notable changes to OnionVPN are documented here.
 
 ## [Unreleased]
 
+## [0.3.79] — 2026-09-15
+
+### SoftEther plane fail-closed
+- Mid-flow UID-miss with OpenVPN-over-Tor enabled → DENY (no Tor exit invent when tuple stamp missing).
+
 ## [0.3.78] — 2026-09-15
 
 ### SoftEther plane fail-closed

@@ -279,10 +279,14 @@ class InteractiveFirewallEngine @Inject constructor(
             }
         }
         // Mid-flow often loses owner UID on Android. Prefer sticky tuple cache (checked
-        // above). Without it: never invent ALLOW_TOR when OVPN-over-Tor is enabled —
-        // that would flip an OVPN flow onto a Tor exit after cache trim.
+        // above). Without it: if OpenVPN-over-Tor is enabled, DENY — inventing Tor would
+        // flip a SoftEther flow onto a Tor exit after an unlikely stamp miss.
         if (!ConnectionOwnerResolver.isValidUid(uid) && info.isTcp && !info.isTcpSyn) {
-            return midFlowFallback(prefs)
+            return if (prefs.openVpnOverTorEnabled) {
+                FirewallVerdict.DENY
+            } else {
+                midFlowFallback(prefs)
+            }
         }
         if (!ConnectionOwnerResolver.isValidUid(uid)) {
             return FirewallVerdict.DENY
