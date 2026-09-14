@@ -4,6 +4,13 @@ All notable changes to OnionVPN are documented here.
 
 ## [Unreleased]
 
+## [0.3.78] — 2026-09-15
+
+### SoftEther plane fail-closed
+- Mid-flow without live tuple/flow stamp: never invent ALLOW_OVPN from sticky rules (DENY).
+- Flow-cache trim never drops ALLOW_OVPN/DENY entries (Tor-only under pressure).
+- Socks5Client: refuse non-loopback dial when protect is unwired (fail-closed).
+
 ## [0.3.77] — 2026-09-15
 
 ### SoftEther plane fail-closed

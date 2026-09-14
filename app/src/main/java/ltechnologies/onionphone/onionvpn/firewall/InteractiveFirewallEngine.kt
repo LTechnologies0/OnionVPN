@@ -1058,15 +1058,14 @@ class InteractiveFirewallEngine @Inject constructor(
         }
 
     /**
-     * Mid-flow sticky plane after flow-cache trim. Keep OVPN iff data plane still up
-     * (SNAT conntrack can still map the 5-tuple). If OVPN is down → DENY — never swap
-     * the public exit onto Tor mid-TCP (correlation + broken SoftEther session).
-     * Never invent SoftEther for Tor/DENY sticky.
+     * Mid-flow sticky after flow-cache/tuple miss. Never invent SoftEther — a Tor TCP
+     * whose trim raced a permanent Via-OVPN rule would otherwise flip exits mid-stream.
+     * Live OVPN planes must already be stamped on tupleKey/flowCache (checked above).
+     * OVPN sticky without stamp → DENY (same as OVPN-down SYN).
      */
-    private fun midFlowStickyLive(v: FirewallVerdict, prefs: TunnelPreferences): FirewallVerdict =
+    private fun midFlowStickyLive(v: FirewallVerdict, @Suppress("UNUSED_PARAMETER") prefs: TunnelPreferences): FirewallVerdict =
         when (v) {
-            FirewallVerdict.ALLOW_OVPN ->
-                if (ovpnRouteAvailable(prefs)) FirewallVerdict.ALLOW_OVPN else FirewallVerdict.DENY
+            FirewallVerdict.ALLOW_OVPN -> FirewallVerdict.DENY
             else -> v
         }
 

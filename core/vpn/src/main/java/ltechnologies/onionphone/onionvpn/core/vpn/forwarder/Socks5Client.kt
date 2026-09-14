@@ -91,10 +91,15 @@ class Socks5Client(
 
     private fun openAuthedSocket(): Socket {
         val socket = Socket()
-        val protectedOk = protect?.invoke(socket) ?: true
+        val protectFn = protect
+        if (protectFn == null && !isLoopback(proxyHost)) {
+            runCatching { socket.close() }
+            throw IOException("VpnService.protect not wired for non-loopback SOCKS")
+        }
+        val protectedOk = protectFn?.invoke(socket) ?: true
         if (!protectedOk && !isLoopback(proxyHost)) {
             runCatching { socket.close() }
-            throw IOException("VpnService.protect failed for SOCKS $proxyHost:$proxyPort")
+            throw IOException("VpnService.protect failed for SOCKS")
         }
         socket.tcpNoDelay = true
         socket.connect(InetSocketAddress(proxyHost, proxyPort), connectTimeoutMs)

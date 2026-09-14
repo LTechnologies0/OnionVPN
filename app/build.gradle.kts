@@ -15,8 +15,8 @@ android {
         applicationId = "ltechnologies.onionphone.onionvpn"
         minSdk = libs.versions.minSdk.get().toInt()
         targetSdk = libs.versions.targetSdk.get().toInt()
-        versionCode = 84
-        versionName = "0.3.77"
+        versionCode = 85
+        versionName = "0.3.78"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 

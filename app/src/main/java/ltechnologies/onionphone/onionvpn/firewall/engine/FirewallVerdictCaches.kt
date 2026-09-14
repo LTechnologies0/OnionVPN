@@ -94,10 +94,15 @@ internal class FirewallVerdictCaches {
                 }
             }
             if (flowCache.size > MAX_FLOW_CACHE) {
-                val it3 = flowCache.keys.iterator()
+                // Never drop ALLOW_OVPN / DENY — mid-flow without stamp fail-closes to DENY
+                // and inventing SoftEther from rules is forbidden; keep live OVPN planes.
+                val it3 = flowCache.entries.iterator()
                 while (it3.hasNext() && n < FLOW_TRIM_BUDGET * 3) {
-                    val k = it3.next()
-                    removeFlowKey(k)
+                    val e = it3.next()
+                    if (e.value == FirewallVerdict.ALLOW_OVPN || e.value == FirewallVerdict.DENY) {
+                        continue
+                    }
+                    removeFlowKey(e.key)
                     it3.remove()
                     n++
                 }
