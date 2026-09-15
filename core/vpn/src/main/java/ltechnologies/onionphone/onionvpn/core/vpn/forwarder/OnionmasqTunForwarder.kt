@@ -156,8 +156,10 @@ class OnionmasqTunForwarder(
                 // Automap → hev → SocksUidBridge → sidecar SOCKS5A (hostname).
                 // Upstream Tor port starts at 0; TunnelForegroundService calls
                 // updateTorSocks(sidecar) after OnionMasq bootstrap.
+                val hevPass = HevSocks5TunForwarder.newBridgeSessionPassword()
                 val bridge = SocksUidBridge(
                     context = context,
+                    hevBridgePassword = hevPass,
                     protectSocket = protectSocket,
                     onFatal = onFatal,
                 )
@@ -174,6 +176,7 @@ class OnionmasqTunForwarder(
                         buildAutomapHevConfig(
                             TunnelEndpoints.LOOPBACK,
                             TunnelEndpoints.SOCKS_UID_BRIDGE_PORT,
+                            hevPass,
                         ),
                     )
                     Timber.i(
@@ -326,7 +329,11 @@ class OnionmasqTunForwarder(
 
     fun isRunning(): Boolean = running.get() && proxyOwned.get()
 
-    private fun buildAutomapHevConfig(socksHost: String, socksPort: Int): String = buildString {
+    private fun buildAutomapHevConfig(
+        socksHost: String,
+        socksPort: Int,
+        hevBridgePassword: String,
+    ): String = buildString {
         appendLine("tunnel:")
         appendLine("  mtu: ${TunnelEndpoints.VPN_MTU}")
         appendLine("  ipv4: ${TunnelEndpoints.VPN_CLIENT_ADDRESS}")
@@ -336,6 +343,8 @@ class OnionmasqTunForwarder(
         appendLine("  port: $socksPort")
         appendLine("  address: '$socksHost'")
         appendLine("  udp: 'tcp'")
+        appendLine("  username: '${TunnelEndpoints.SOCKS_HEV_BRIDGE_USER}'")
+        appendLine("  password: '$hevBridgePassword'")
         appendLine("misc:")
         appendLine("  log-level: warn")
         appendLine("  tcp-read-write-timeout: 300000")

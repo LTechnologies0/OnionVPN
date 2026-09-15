@@ -11,6 +11,7 @@ import java.net.ServerSocket
 import java.net.Socket
 import java.net.SocketException
 import java.nio.charset.StandardCharsets
+import java.security.MessageDigest
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.Semaphore
 import java.util.concurrent.ThreadPoolExecutor
@@ -32,11 +33,13 @@ import timber.log.Timber
 
 /**
  * Loopback SOCKS5 in front of Tor apps SocksPort:
- * hev (no per-stream auth) → this bridge → Tor with IsolateSOCKSAuth `u{uid}`/`p{uid}`.
+ * hev (session USER/PASS) → this bridge → Tor with IsolateSOCKSAuth `u{uid}`/`p{uid}`.
  *
  * UID comes from [TcpFlowUidIndex] (TunDnsMux SYN stamp). Automap virtual IPs are
  * remapped to `.onion`/`.exit` hostnames via [DnsHostnameCache] for SOCKS5A.
  * Clearnet CONNECT is pinned to a DNSCrypt A-record (never Tor exit DNS / SOCKS5A hostname).
+ * Loopback peer UID miss (Waydroid) is tolerated only after hev session auth succeeds —
+ * foreign apps without the session password cannot steal dest-only SYN stamps.
  *
  * Handshake workers return immediately after CONNECT succeeds; bidirectional pipes run
  * on a separate cached pool so Signal reconnect storms cannot pin all handshake threads
@@ -44,6 +47,8 @@ import timber.log.Timber
  */
 class SocksUidBridge(
     context: Context,
+    /** Session secret shared with hev yaml — required USER/PASS before CONNECT. */
+    private val hevBridgePassword: String,
     private val listenPort: Int = TunnelEndpoints.SOCKS_UID_BRIDGE_PORT,
     private val protectSocket: ((Socket) -> Boolean)? = null,
     private val onFatal: ((Throwable) -> Unit)? = null,
@@ -161,7 +166,7 @@ class SocksUidBridge(
             val input = DataInputStream(client.getInputStream())
             val output = DataOutputStream(client.getOutputStream())
             try {
-                negotiateNoAuth(input, output)
+                negotiateHevAuth(input, output)
                 val (host, port) = readConnect(input, output) ?: return
                 val uid = resolveUidForConnect(host, port)
                 if (!ConnectionOwnerResolver.isValidUid(uid)) {
@@ -283,23 +288,49 @@ class SocksUidBridge(
     }
 
     /**
-     * hev runs in-process — only our UID may dial the loopback bridge.
-     * Foreign apps forging CONNECT would otherwise steal SYN UID stamps (isolation MITM).
-     * Pre-Q: [ConnectionOwnerResolver.resolveAcceptedClientUid] is unavailable; rely on stamps.
-     * API ≥ Q + UID miss on **loopback**: Waydroid often fails owner lookup for hev→127.0.0.1
-     * even though the dialer is us — old fail-closed RST'd every HTTPS CONNECT (HTTP sometimes
-     * slipped through). Bind is loopback-only; firewall still gates CONNECT.
+     * hev runs in-process — prefer peer UID == ours. Loopback + UID miss (Waydroid) is
+     * OK only because [negotiateHevAuth] requires the session secret before CONNECT;
+     * dest-only [TcpFlowUidIndex] stamps are otherwise stealable by any local dialer.
      */
     private fun isTrustedBridgePeer(client: Socket): Boolean {
         val peer = ownerResolver.resolveAcceptedClientUid(client)
         if (ConnectionOwnerResolver.isValidUid(peer)) {
             return peer == Process.myUid()
         }
-        if (client.inetAddress?.isLoopbackAddress == true) {
-            VpnForwarderDebug.socksLog { "SocksUidBridge trust loopback peer UID miss (hev)" }
-            return true
+        return client.inetAddress?.isLoopbackAddress == true ||
+            Build.VERSION.SDK_INT < Build.VERSION_CODES.Q
+    }
+
+    /** RFC1929 USER/PASS — hev yaml username/password for this tunnel session. */
+    private fun negotiateHevAuth(input: DataInputStream, output: DataOutputStream) {
+        val ver = input.readUnsignedByte()
+        if (ver != 0x05) throw IOException("not SOCKS5")
+        val nMethods = input.readUnsignedByte()
+        var offersUserPass = false
+        repeat(nMethods) {
+            if (input.readUnsignedByte() == 0x02) offersUserPass = true
         }
-        return Build.VERSION.SDK_INT < Build.VERSION_CODES.Q
+        if (!offersUserPass) {
+            output.writeByte(0x05)
+            output.writeByte(0xFF)
+            output.flush()
+            throw IOException("SOCKS client offered no USER/PASS")
+        }
+        output.writeByte(0x05)
+        output.writeByte(0x02)
+        output.flush()
+        val authVer = input.readUnsignedByte()
+        if (authVer != 0x01) throw IOException("SOCKS auth ver=$authVer")
+        val uLen = input.readUnsignedByte()
+        val user = ByteArray(uLen).also { input.readFully(it) }
+        val pLen = input.readUnsignedByte()
+        val pass = ByteArray(pLen).also { input.readFully(it) }
+        val userOk = user.toString(StandardCharsets.UTF_8) == TunnelEndpoints.SOCKS_HEV_BRIDGE_USER
+        val passOk = MessageDigest.isEqual(pass, hevBridgePassword.toByteArray(StandardCharsets.UTF_8))
+        output.writeByte(0x01)
+        output.writeByte(if (userOk && passOk) 0x00 else 0x01)
+        output.flush()
+        if (!userOk || !passOk) throw IOException("SOCKS hev bridge auth rejected")
     }
 
     /**
@@ -432,16 +463,6 @@ class SocksUidBridge(
             }
             null
         }
-    }
-
-    private fun negotiateNoAuth(input: DataInputStream, output: DataOutputStream) {
-        val ver = input.readUnsignedByte()
-        if (ver != 0x05) throw IOException("not SOCKS5")
-        val nMethods = input.readUnsignedByte()
-        input.skipBytes(nMethods)
-        output.writeByte(0x05)
-        output.writeByte(0x00) // NO AUTH — hev has no per-stream credentials
-        output.flush()
     }
 
     private fun readConnect(

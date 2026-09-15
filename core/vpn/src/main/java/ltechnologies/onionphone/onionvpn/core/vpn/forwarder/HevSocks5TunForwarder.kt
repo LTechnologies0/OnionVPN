@@ -8,6 +8,7 @@ import android.system.OsConstants
 import java.io.File
 import java.io.FileDescriptor
 import java.net.Socket
+import java.security.SecureRandom
 import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -80,8 +81,10 @@ class HevSocks5TunForwarder(
         // Bridge before hev so the first SOCKS CONNECT never hits a closed port.
         // Any failure after bridge/socketpair must tear down via stop() to avoid FD leaks.
         try {
+            val hevPass = newHevBridgePassword()
             val bridge = SocksUidBridge(
                 context = context,
+                hevBridgePassword = hevPass,
                 protectSocket = protectSocket,
                 onFatal = onFatal,
             )
@@ -97,7 +100,9 @@ class HevSocks5TunForwarder(
             val bridgePort = TunnelEndpoints.SOCKS_UID_BRIDGE_PORT
             val job = scope.launch {
                 val configFile = File(context.filesDir, "hev-socks5-tunnel.yaml")
-                configFile.writeText(buildConfig(bridgeHost, bridgePort, useMapDns = useMapDns))
+                configFile.writeText(
+                    buildConfig(bridgeHost, bridgePort, hevPass, useMapDns = useMapDns),
+                )
                 Timber.i(
                     "Starting hev-socks5-tunnel (mux/dgram) on fd=${hevEnd.fd} " +
                         "bridge=$bridgeHost:$bridgePort torSocks=$torSocksPort " +
@@ -168,7 +173,12 @@ class HevSocks5TunForwarder(
         tunDup = null
     }
 
-    private fun buildConfig(socksHost: String, socksPort: Int, useMapDns: Boolean): String = buildString {
+    private fun buildConfig(
+        socksHost: String,
+        socksPort: Int,
+        hevBridgePassword: String,
+        useMapDns: Boolean,
+    ): String = buildString {
         appendLine("tunnel:")
         appendLine("  mtu: ${TunnelEndpoints.VPN_MTU}")
         appendLine("  ipv4: ${TunnelEndpoints.VPN_CLIENT_ADDRESS}")
@@ -178,7 +188,9 @@ class HevSocks5TunForwarder(
         appendLine("  port: $socksPort")
         appendLine("  address: '$socksHost'")
         appendLine("  udp: 'tcp'")
-        // No username — SocksUidBridge accepts NO AUTH and adds u{uid} toward Tor.
+        // Session USER/PASS — SocksUidBridge rejects foreign dialers stealing SYN stamps.
+        appendLine("  username: '${TunnelEndpoints.SOCKS_HEV_BRIDGE_USER}'")
+        appendLine("  password: '$hevBridgePassword'")
         // IPv6: hev accepts dual-stack client address; clearnet IPv6 TCP is blackholed by
         // LeakPacketFilter (DNSCrypt A-only). Automap ULA + UDP/53 v6 divert via TunDnsMux.
         // mapdns stays off (conflicts with DNSCrypt + TunDnsMux); udp:tcp forces TCP DNS path.
@@ -197,6 +209,15 @@ class HevSocks5TunForwarder(
     }
 
     companion object {
+        private fun newHevBridgePassword(): String {
+            val bytes = ByteArray(16)
+            SecureRandom().nextBytes(bytes)
+            return bytes.joinToString("") { b -> "%02x".format(b) }
+        }
+
+        /** Session password for hev → SocksUidBridge USER/PASS (also used by onionmasq automap hev). */
+        fun newBridgeSessionPassword(): String = newHevBridgePassword()
+
         /**
          * Packet-oriented mux↔hev link.
          *
