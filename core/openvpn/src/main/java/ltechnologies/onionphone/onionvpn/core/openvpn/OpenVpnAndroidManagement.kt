@@ -129,7 +129,7 @@ internal class OpenVpnAndroidManagement(
             line.startsWith(">NEED-OK:") -> handleNeedOk(sock, line.removePrefix(">NEED-OK:").trim())
             line.startsWith(">STATE:") -> handleState(line)
             line.startsWith(">PASSWORD:") -> handlePassword(sock, line)
-            line.startsWith(">FATAL:") -> onFatal(line)
+            line.startsWith(">FATAL:") -> onFatal("OpenVPN FATAL")
         }
     }
 

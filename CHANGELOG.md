@@ -4,6 +4,9 @@ All notable changes to OnionVPN are documented here.
 
 ## [Unreleased]
 
+### OPSEC
+- OVPN management `>FATAL:` → Status/Timber without raw SoftEther remote payload.
+
 ## [0.3.80] — 2026-09-15
 
 ### OPSEC / log & Status scrub
