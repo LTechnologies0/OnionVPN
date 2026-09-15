@@ -133,7 +133,7 @@ object VpnProfileBuilder {
             // IPv6 literals need prefix length 128; IPv4 /32.
             val prefix = if (resolver.contains(':')) 128 else 32
             runCatching { builder.addRoute(resolver, prefix) }
-                .onFailure { Timber.w(it, "Skip DNS pin route $resolver") }
+                .onFailure { Timber.w(it, "Skip DNS pin route") }
         }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {

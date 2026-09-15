@@ -42,15 +42,14 @@ class OnionmasqCircuitRepository {
     fun handleEvent(event: OnionmasqEvent) {
         when (event) {
             is NewConnectionEvent -> {
-                Timber.v("onionmasq NewConnection appId=%s dst=%s", event.appId, event.torDst)
+                Timber.v("onionmasq NewConnection uid=%s hops=%d", event.appId, event.circuit?.size ?: 0)
                 onNew(event)
             }
             is ClosedConnectionEvent -> onClosed(event.proxySrc, event.proxyDst)
             is FailedConnectionEvent -> {
                 Timber.d(
-                    "onionmasq FailedConnection src=%s dst=%s error=%s",
-                    event.proxySrc,
-                    event.proxyDst,
+                    "onionmasq FailedConnection uid=%s error=%s",
+                    event.appId,
                     event.error,
                 )
                 onClosed(event.proxySrc, event.proxyDst)

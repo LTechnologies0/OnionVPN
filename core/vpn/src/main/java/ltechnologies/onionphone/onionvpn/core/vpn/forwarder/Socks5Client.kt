@@ -36,7 +36,7 @@ class Socks5Client(
     private val protect: ((Socket) -> Boolean)? = null,
 ) {
     fun connect(destHost: String, destPort: Int): Socket {
-        Timber.v("SOCKS5 CONNECT via %s:%d → %s:%d", proxyHost, proxyPort, destHost, destPort)
+        Timber.v("SOCKS5 CONNECT via socks dest_len=%d port=%d", destHost.length, destPort)
         val socket = openAuthedSocket()
         val input = DataInputStream(socket.getInputStream())
         val output = DataOutputStream(socket.getOutputStream())
@@ -58,9 +58,9 @@ class Socks5Client(
      * reject IsolateSOCKSAuth credentials.
      */
     fun probeAuth() {
-        Timber.d("SOCKS5 auth probe %s:%d", proxyHost, proxyPort)
+        Timber.d("SOCKS5 auth probe")
         openAuthedSocket().use { /* auth handshake only */ }
-        OpTrace.debug("socks", "auth probe ok $proxyHost:$proxyPort")
+        OpTrace.debug("socks", "auth probe ok")
     }
 
     /**
@@ -246,14 +246,14 @@ class Socks5Client(
             val msg =
                 "SOCKS5 handshake timed out after ${handshakeTimeoutMs}ms " +
                     "(cold circuit / congested Tor)"
-            Timber.w(e, "%s proxy=%s:%d", msg, proxyHost, proxyPort)
+            Timber.w(e, "%s", msg)
             OpTrace.warn("socks", msg)
             return IOException(msg, e)
         }
-        Timber.w(e, "SOCKS5 handshake failed proxy=%s:%d", proxyHost, proxyPort)
-        OpTrace.warn("socks", "handshake failed: ${e.message}", e)
+        Timber.w("SOCKS5 handshake failed: %s", e.javaClass.simpleName)
+        OpTrace.warn("socks", "handshake failed: ${e.javaClass.simpleName}")
         if (e is IOException) return e
-        return IOException("SOCKS5 handshake failed: ${e.message}", e)
+        return IOException("SOCKS5 handshake failed: ${e.javaClass.simpleName}", e)
     }
 
     companion object {

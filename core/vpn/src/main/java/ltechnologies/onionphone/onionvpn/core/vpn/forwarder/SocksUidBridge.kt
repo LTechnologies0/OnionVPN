@@ -193,7 +193,7 @@ class SocksUidBridge(
                 val pass = TunnelEndpoints.socksPassForUid(uid)
                 if (!torConnectSlots.tryAcquire()) {
                     VpnForwarderDebug.socksLog {
-                        "SocksUidBridge CONNECT backlog full — reject $socksHost:$port"
+                        "SocksUidBridge CONNECT backlog full — reject"
                     }
                     reply(output, 0x01)
                     return
@@ -202,7 +202,7 @@ class SocksUidBridge(
                 // reply 0x00 to hev, then fail startPipe and RST mid-TLS (Speedtest SSL timeout).
                 if (!pipeSlots.tryAcquire(2)) {
                     torConnectSlots.release()
-                    VpnForwarderDebug.socksLog { "SocksUidBridge pipe pool full — reject $socksHost:$port" }
+                    VpnForwarderDebug.socksLog { "SocksUidBridge pipe pool full — reject" }
                     reply(output, 0x01)
                     return
                 }
@@ -340,7 +340,7 @@ class SocksUidBridge(
         )
         if (!allowed) {
             VpnForwarderDebug.socksLog {
-                "SocksUidBridge firewall DENY uid=$uid $socksHost:$port"
+                "SocksUidBridge firewall DENY uid=$uid"
             }
         }
         return allowed
@@ -390,7 +390,7 @@ class SocksUidBridge(
                 DnsHostnameCache.ipv4ForHostname(name)?.let { return it }
                 pinClearnetViaDnsCrypt(name)?.let { return it }
             }
-            VpnForwarderDebug.socksLog { "SocksUidBridge drop clearnet IPv6 without DNSCrypt A $host" }
+            VpnForwarderDebug.socksLog { "SocksUidBridge drop clearnet IPv6 without DNSCrypt A" }
             return null
         }
         if (TunnelEndpoints.isOnionLikeHostname(host)) return host
@@ -408,7 +408,7 @@ class SocksUidBridge(
         val dnsPort = dnsCryptPort.get()
         if (dnsPort <= 0) {
             VpnForwarderDebug.socksLog {
-                "SocksUidBridge DNSCrypt port unset — refuse clearnet hostname $hostname"
+                "SocksUidBridge DNSCrypt port unset — refuse clearnet hostname"
             }
             return null
         }
@@ -423,7 +423,7 @@ class SocksUidBridge(
             TunnelEndpoints.parseIpv4Literal(v4)?.let { ipInt ->
                 if (TorNetPolicy.mustBlackholeIpv4Destination(ipInt)) {
                     VpnForwarderDebug.socksLog {
-                        "SocksUidBridge DNSCrypt A blackholed $hostname → $v4"
+                        "SocksUidBridge DNSCrypt A blackholed (rebinding/LAN)"
                     }
                     return null
                 }
@@ -432,7 +432,7 @@ class SocksUidBridge(
             v4
         } catch (e: Exception) {
             VpnForwarderDebug.socksLog(e) {
-                "SocksUidBridge DNSCrypt resolve failed $hostname"
+                "SocksUidBridge DNSCrypt resolve failed"
             }
             null
         }

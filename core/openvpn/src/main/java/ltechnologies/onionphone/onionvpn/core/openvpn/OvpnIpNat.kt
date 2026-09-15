@@ -81,17 +81,13 @@ internal object OvpnIpNat {
         val first = extra.trim().split(Regex("\\s+")).firstOrNull().orEmpty()
         val ip = TunnelEndpoints.parseIpv4Literal(first)
         if (ip == null) {
-            Timber.w("OVPN IFCONFIG NAT skip — no IPv4 in %s", extra.take(64))
+            Timber.w("OVPN IFCONFIG NAT skip — no IPv4 in msg (len=%d)", extra.length)
             return
         }
         ovpnClientIp.set(ip)
         tcpFlows.clear()
         udpFlows.clear()
-        Timber.i(
-            "OVPN IP NAT VpnService %s ↔ OpenVPN %s",
-            TunnelEndpoints.VPN_CLIENT_ADDRESS,
-            first,
-        )
+        Timber.i("OVPN IP NAT ready (client IP set, maps cleared)")
     }
 
     fun isReady(): Boolean = ovpnClientIp.get() != 0

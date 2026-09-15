@@ -122,7 +122,8 @@ internal class OpenVpnAndroidManagement(
 
     private fun processLine(sock: LocalSocket, line: String) {
         if (line.isEmpty()) return
-        Timber.d("OVPN mgmt ← %s", line)
+        // Never log raw management lines (STATE embeds SoftEther remote IP:port).
+        Timber.d("OVPN mgmt ← %s", mgmtEventKind(line))
         when {
             line.startsWith(">HOLD:") -> writeCmd(sock, "hold release\n")
             line.startsWith(">NEED-OK:") -> handleNeedOk(sock, line.removePrefix(">NEED-OK:").trim())
@@ -130,6 +131,20 @@ internal class OpenVpnAndroidManagement(
             line.startsWith(">PASSWORD:") -> handlePassword(sock, line)
             line.startsWith(">FATAL:") -> onFatal(line)
         }
+    }
+
+    private fun mgmtEventKind(line: String): String = when {
+        line.startsWith(">HOLD:") -> "HOLD"
+        line.startsWith(">NEED-OK:") ->
+            "NEED-OK ${line.removePrefix(">NEED-OK:").trim().substringBefore(' ').take(32)}"
+        line.startsWith(">STATE:") -> {
+            val parts = line.split(',')
+            "STATE ${parts.getOrNull(1) ?: "?"}"
+        }
+        line.startsWith(">PASSWORD:") -> "PASSWORD"
+        line.startsWith(">FATAL:") -> "FATAL"
+        line.startsWith(">") -> line.substringBefore(':').removePrefix(">")
+        else -> "other"
     }
 
     private fun handleState(line: String) {
@@ -149,7 +164,10 @@ internal class OpenVpnAndroidManagement(
                     onFatal("OpenVPN exiting")
                 }
             }
-            CONTROL_NOT_READY.any { line.contains(it) } -> onControlNotReady(line)
+            CONTROL_NOT_READY.any { line.contains(it) } -> {
+                val kind = line.split(',').getOrNull(1) ?: "UNKNOWN"
+                onControlNotReady(kind)
+            }
         }
     }
 
@@ -161,7 +179,7 @@ internal class OpenVpnAndroidManagement(
             return
         }
         if (!line.contains("Auth", ignoreCase = true)) {
-            onFatal("OpenVPN password type unsupported: $line")
+            onFatal("OpenVPN password type unsupported")
             return
         }
         if (authUser.isEmpty() && authPassword.isEmpty()) {

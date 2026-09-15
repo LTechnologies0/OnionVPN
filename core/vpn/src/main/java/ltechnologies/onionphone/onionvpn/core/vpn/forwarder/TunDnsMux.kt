@@ -612,7 +612,7 @@ class TunDnsMux(
             val expectId = parsedQuery.queryId
             val route = TorNetPolicy.classifyDnsQuery(qname)
             if (route == TorNetPolicy.DnsRoute.Drop) {
-                Timber.d("DNS query dropped — invalid QNAME q=$qname")
+                Timber.d("DNS query dropped — invalid QNAME")
                 return
             }
             val useTorAutomap = route == TorNetPolicy.DnsRoute.TorAutomap
@@ -656,7 +656,7 @@ class TunDnsMux(
             }
 
             if (useTorAutomap && torDnsPort <= 0) {
-                Timber.d("Onion DNS dropped — Tor DNSPort not configured q=$qname")
+                Timber.d("Onion DNS dropped — Tor DNSPort not configured")
                 return
             }
             val upstreamHost = if (useTorAutomap) torDnsAddress else dnsCryptAddress
@@ -702,7 +702,7 @@ class TunDnsMux(
             }
             if (!matched) {
                 // One shorter retry on a fresh socket — total budget ≈ DNSCrypt timeout + slack.
-                Timber.d("DNS forward timeout/mismatch — retry once q=$qname")
+                Timber.d("DNS forward timeout/mismatch — retry once")
                 scratch.resetSocket()
                 val retrySock = scratch.socket()
                 retrySock.soTimeout = DNS_RETRY_TIMEOUT_MS
@@ -740,7 +740,7 @@ class TunDnsMux(
                 }
             }
             if (!matched) {
-                Timber.d("DNS forward timeout/mismatch — query dropped q=$qname")
+                Timber.d("DNS forward timeout/mismatch — query dropped")
                 return
             }
 

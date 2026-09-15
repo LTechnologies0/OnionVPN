@@ -4,6 +4,19 @@ All notable changes to OnionVPN are documented here.
 
 ## [Unreleased]
 
+## [0.3.80] — 2026-09-15
+
+### OPSEC / log & Status scrub
+- OVPN management: event/state kind only (no SoftEther remote in STATE / Auth fatals).
+- onionmasq circuit repo: uid/hops/err only (no dst/proxy).
+- Data-plane silent: Status says Via OVPN down (DENY), not “using Tor”.
+- RESOLVE/CONNECT/ASK/DNS/PAC/NAT/SOCKS/UID-bridge: lengths or success-only (no host/IP/QNAME/SNI).
+- Firewall answer/queue/remap/upsert: no dest host in Timber.
+- Private DNS kill path: hostname redacted in Timber + Status detail.
+- AndroidVpnInspector / SystemLeakInspector / TorPathValidator: ValidationCheck details counts-only / no onion hostname.
+- DomainReputation / GeoIP fetch: no mirror URLs; SOCKS session aborts class-name only.
+- PAC listen/upstream logs: no pacUrl; Socks5Client probe/handshake without proxy host.
+
 ## [0.3.79] — 2026-09-15
 
 ### SoftEther plane fail-closed

@@ -305,14 +305,14 @@ object TorPathValidator {
                 id = "tor.onion.socks5a",
                 label = "SOCKS5A .onion (native HS client)",
                 status = ValidationStatus.Pass,
-                detail = "Connected $onion:80 via SOCKS5A (probe auth)",
+                detail = "Connected .onion:80 via SOCKS5A (probe auth)",
             )
         } catch (error: Exception) {
             ValidationCheck(
                 id = "tor.onion.socks5a",
                 label = "SOCKS5A .onion (native HS client)",
                 status = ValidationStatus.Fail,
-                detail = error.message ?: "onion CONNECT failed",
+                detail = "onion CONNECT failed",
                 tripsKillSwitch = false,
             )
         }

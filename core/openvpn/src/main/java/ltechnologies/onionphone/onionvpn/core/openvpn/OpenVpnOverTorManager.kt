@@ -34,7 +34,8 @@ import timber.log.Timber
  * [FirewallBridge.ovpnPacketSink] / [FirewallBridge.injectToVpnTun].
  *
  * Via OVPN ([FirewallBridge.openVpnOverTorUp]) is true **iff** CONNECTED **and**
- * OPENTUN **and** [dataPlaneHealthy] (SNAT without DNAT silence demotes to Tor).
+ * OPENTUN **and** [dataPlaneHealthy] (SNAT without DNAT silence clears Via OVPN;
+ * firewall fail-closes OVPN sticky to DENY — no Tor exit invent).
  * Soft-restarts clear Via OVPN until CONNECTED returns; OPENTUN pump is kept (`persist-tun`).
  */
 class OpenVpnOverTorManager(
@@ -48,7 +49,7 @@ class OpenVpnOverTorManager(
     private val dataPlaneReady = AtomicBoolean(false)
     /**
      * False when the peer accepts SNAT outbound but never returns DNAT replies
-     * (data blackhole). Via OVPN demotes to Tor until replies resume.
+     * (data blackhole). Via OVPN clears until replies resume (firewall DENY, not Tor invent).
      */
     private val dataPlaneHealthy = AtomicBoolean(true)
     /** True after at least one CONNECTED this session — soft-reconnect AUTH_FAILED demotes. */
@@ -483,7 +484,7 @@ class OpenVpnOverTorManager(
 
     /**
      * Nested OpenVPN data plane can stay control-CONNECTED while the peer blackholes
-     * TCP. Demote Via OVPN so apps fall back to Tor; restore when DNAT resumes.
+     * TCP. Clear Via OVPN (firewall DENY sticky OVPN — not Tor invent); restore when DNAT resumes.
      */
     private fun startDataPlaneHealthMonitor(sid: Long) {
         thread(name = "onionvpn-ovpn-health", isDaemon = true) {
@@ -501,13 +502,13 @@ class OpenVpnOverTorManager(
                     silent && healthy -> {
                         dataPlaneHealthy.set(false)
                         Timber.w(
-                            "OpenVPN data plane silent (snat=%d dnat=%d) — demoting Via OVPN to Tor",
+                            "OpenVPN data plane silent (snat=%d dnat=%d) — demoting Via OVPN (fail-closed)",
                             OvpnIpNat.snatRewriteCount,
                             OvpnIpNat.dnatRewriteCount,
                         )
                         publishUpState(
                             "OpenVPN data silent (snat=${OvpnIpNat.snatRewriteCount} " +
-                                "dnat=${OvpnIpNat.dnatRewriteCount}) — using Tor",
+                                "dnat=${OvpnIpNat.dnatRewriteCount}) — Via OVPN down (DENY, not Tor)",
                         )
                     }
                     !silent && !healthy -> {

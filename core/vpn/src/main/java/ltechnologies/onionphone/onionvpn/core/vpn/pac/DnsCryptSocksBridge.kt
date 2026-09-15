@@ -157,14 +157,14 @@ class DnsCryptSocksBridge(
                 }
                 val (host, port) = dest
                 if (!TorNetPolicy.isValidSocksDestination(host) || !TorNetPolicy.isValidPort(port)) {
-                    Timber.v("PAC SOCKS reject invalid dest host=%s port=%d", host, port)
+                    Timber.v("PAC SOCKS reject invalid dest port=%d", port)
                     safeReply(output, REP_GENERAL_FAILURE)
                     return
                 }
                 // Literal private/LAN/CGNAT — never burn Tor circuits (parity with SocksUidBridge).
                 TunnelEndpoints.parseIpv4Literal(host)?.let { ipInt ->
                     if (TorNetPolicy.mustBlackholeIpv4Destination(ipInt)) {
-                        Timber.v("PAC SOCKS reject blackholed literal %s", host)
+                        Timber.v("PAC SOCKS reject blackholed literal")
                         safeReply(output, REP_NOT_ALLOWED)
                         return
                     }
@@ -227,7 +227,7 @@ class DnsCryptSocksBridge(
                     // Rebinding: DNSCrypt A may still be private after resolve.
                     TunnelEndpoints.parseIpv4Literal(resolvedIp)?.let { ipInt ->
                         if (TorNetPolicy.mustBlackholeIpv4Destination(ipInt)) {
-                            Timber.v("PAC SOCKS reject blackholed resolved %s", resolvedIp)
+                            Timber.v("PAC SOCKS reject blackholed resolved")
                             safeReply(output, REP_NOT_ALLOWED)
                             return
                         }
@@ -260,7 +260,7 @@ class DnsCryptSocksBridge(
                     Timber.v("PAC SOCKS session end: %s", e.javaClass.simpleName)
                 } else {
                     // Avoid "failed" wording — log export classifies that as ERROR.
-                    Timber.d(e, "PAC SOCKS bridge session abort")
+                    Timber.d("PAC SOCKS bridge session abort: %s", e.javaClass.simpleName)
                 }
                 safeReply(output, REP_GENERAL_FAILURE)
             }

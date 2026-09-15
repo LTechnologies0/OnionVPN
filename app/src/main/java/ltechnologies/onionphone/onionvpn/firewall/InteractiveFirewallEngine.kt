@@ -553,7 +553,7 @@ class InteractiveFirewallEngine @Inject constructor(
             }
             if (waitQueue.size >= MAX_QUEUE) {
                 pendingByKey.remove(ruleKey, queued)
-                Timber.w("Firewall prompt queue full (%d) — dropping PAC %s", MAX_QUEUE, ruleKey)
+                Timber.w("Firewall prompt queue full (%d) — dropping PAC", MAX_QUEUE)
                 appendJournal(
                     uid = uid,
                     app = app,
@@ -619,7 +619,7 @@ class InteractiveFirewallEngine @Inject constructor(
             }
             if (waitQueue.size >= MAX_QUEUE) {
                 pendingByKey.remove(ruleKey, queued)
-                Timber.w("Firewall prompt queue full (%d) — dropping %s", MAX_QUEUE, ruleKey)
+                Timber.w("Firewall prompt queue full (%d) — dropping", MAX_QUEUE)
                 appendJournal(
                     uid = uid,
                     app = app,
@@ -633,9 +633,9 @@ class InteractiveFirewallEngine @Inject constructor(
             }
             waitQueue.addLast(ruleKey)
             Timber.d(
-                "Firewall ASK enqueue app=%s dest=%s:%d dpi=%s queue=%d",
+                "Firewall ASK enqueue app=%s dest_len=%d port=%d dpi=%s queue=%d",
                 app.label,
-                matchDest,
+                matchDest.length,
                 info.dstPort,
                 dpi.label,
                 waitQueue.size,
@@ -772,9 +772,9 @@ class InteractiveFirewallEngine @Inject constructor(
             FirewallRuleScope.PERMANENT -> "permanent"
         }
         Timber.i(
-            "Firewall answer %s → %s:%d verdict=%s scope=%s",
+            "Firewall answer %s dest_len=%d port=%d verdict=%s scope=%s",
             answered.request.appLabel,
-            answered.matchDest,
+            answered.matchDest.length,
             answered.request.destPort,
             effective,
             note,
@@ -915,9 +915,8 @@ class InteractiveFirewallEngine @Inject constructor(
             }
             if (toDrop.isNotEmpty() || clearedActive) {
                 Timber.i(
-                    "Automap remap — cancelled %d ASK prompt(s) for %s",
+                    "Automap remap — cancelled %d ASK prompt(s)",
                     toDrop.size,
-                    targets.joinToString(","),
                 )
                 promoteLocked()
                 publishQueueDepthLocked()

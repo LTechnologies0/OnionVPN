@@ -1519,7 +1519,7 @@ class TorProcessManager(
                 }
                 true
             }.onFailure {
-                Timber.d(it, "GeoIP mirror failed %s", url)
+                Timber.d(it, "GeoIP mirror failed")
             }.getOrDefault(false)
         }
     }

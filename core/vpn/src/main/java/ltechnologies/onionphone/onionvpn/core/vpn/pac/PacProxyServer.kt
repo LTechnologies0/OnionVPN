@@ -38,11 +38,10 @@ class PacProxyServer(
         socksBridge.updateUpstream(torSocksPort, dnsCryptListenPort)
         bridgeUp.set(torSocksPort > 0 && dnsCryptListenPort > 0)
         Timber.i(
-            "PAC upstream torSocks=%d dnsCrypt=%d bridge=%s url=%s",
+            "PAC upstream torSocks=%d dnsCrypt=%d bridge_up=%s",
             torSocksPort,
             dnsCryptListenPort,
-            TunnelEndpoints.pacSocksBridge(),
-            pacUrl,
+            bridgeUp.get(),
         )
     }
 
@@ -63,7 +62,7 @@ class PacProxyServer(
         serverRef.set(server)
         val acceptServer = server
         acceptThread = Thread({
-            Timber.i("PAC server listening %s", pacUrl)
+            Timber.i("PAC server listening on loopback")
             while (!acceptServer.isClosed) {
                 try {
                     val client = acceptServer.accept()

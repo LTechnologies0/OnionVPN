@@ -27,7 +27,7 @@ object TorDnsResolve {
         val host = hostname.trim().trimEnd('.').lowercase()
         require(host.isNotEmpty()) { "empty hostname" }
         require(!host.contains(' ')) { "invalid hostname" }
-        Timber.v("DNSPort RESOLVE A %s via %s:%d", host, dnsHost, dnsPort)
+        Timber.v("DNSPort RESOLVE A host_len=%d", host.length)
         val id = ThreadLocalRandom.current().nextInt(0, 0xFFFF)
         val query = buildQuery(host, id)
         DatagramSocket(null).use { sock ->
@@ -59,7 +59,7 @@ object TorDnsResolve {
                 val flags = ((buf[2].toInt() and 0xff) shl 8) or (buf[3].toInt() and 0xff)
                 if (flags and 0x8000 == 0) continue // QR must be response
                 if (flags and 0x000f != 0) {
-                    val err = "DNSPort RCODE=${flags and 0x000f} for $host"
+                    val err = "DNSPort RCODE=${flags and 0x000f}"
                     Timber.w(err)
                     OpTrace.warn("tor", err)
                     throw IllegalStateException(err)

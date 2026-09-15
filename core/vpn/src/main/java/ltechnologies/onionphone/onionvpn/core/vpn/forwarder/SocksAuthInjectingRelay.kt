@@ -137,7 +137,7 @@ class SocksAuthInjectingRelay(
                 }
             }
         } catch (error: Exception) {
-            Timber.d(error, "SocksAuthInjectingRelay[$label] session end")
+            Timber.d("SocksAuthInjectingRelay[%s] session end: %s", label, error.javaClass.simpleName)
         } finally {
             runCatching { client.close() }
         }

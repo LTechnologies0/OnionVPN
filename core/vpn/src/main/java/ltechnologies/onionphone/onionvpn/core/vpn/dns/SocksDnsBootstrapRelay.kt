@@ -127,17 +127,15 @@ class SocksDnsBootstrapRelay(
         }
         Timber.i(
             "SocksDnsBootstrapRelay listen=:%d tcp=%s udp=%s socks=:%d " +
-                "socksResolve=%s nativeResolve=%s → DoH https://%s(%s):%d%s",
+                "socksResolve=%s nativeResolve=%s dohPort=%d path_len=%d",
             listenPort,
             tcpOk,
             udpOk,
             socksPort,
             useSocksResolve,
             hostnameResolver != null,
-            dohConnectHost,
-            dohSniHost,
             dohPort,
-            dohPath,
+            dohPath.length,
         )
     }
 
@@ -333,7 +331,7 @@ class SocksDnsBootstrapRelay(
                 }
             }.onFailure {
                 if (running.get()) {
-                    Timber.d(it, "SocksDnsBootstrapRelay SOCKS RESOLVE failed q=%s", qname)
+                    Timber.d(it, "SocksDnsBootstrapRelay SOCKS RESOLVE failed")
                 }
             }
         }
@@ -389,9 +387,8 @@ class SocksDnsBootstrapRelay(
                 ).execute().use { response ->
                     if (!response.isSuccessful) {
                         Timber.d(
-                            "SocksDnsBootstrapRelay DoH HTTP %s endpoint=%s",
+                            "SocksDnsBootstrapRelay DoH HTTP %s",
                             response.code,
-                            endpoint.sniHost,
                         )
                         return@withCredentials null
                     }
@@ -402,11 +399,7 @@ class SocksDnsBootstrapRelay(
             }
         } catch (error: Exception) {
             if (running.get()) {
-                Timber.d(
-                    error,
-                    "SocksDnsBootstrapRelay DoH OkHttp failed endpoint=%s",
-                    endpoint.sniHost,
-                )
+                Timber.d(error, "SocksDnsBootstrapRelay DoH OkHttp failed")
             }
             null
         }
@@ -445,9 +438,7 @@ class SocksDnsBootstrapRelay(
                     ssl.startHandshake()
                     val hv = HttpsURLConnection.getDefaultHostnameVerifier()
                     if (!hv.verify(endpoint.sniHost, ssl.session)) {
-                        throw SSLPeerUnverifiedException(
-                            "DoH hostname mismatch sni=${endpoint.sniHost}",
-                        )
+                        throw SSLPeerUnverifiedException("DoH hostname mismatch")
                     }
                     val out = BufferedOutputStream(ssl.getOutputStream())
                     val inp = BufferedInputStream(ssl.getInputStream())
@@ -470,12 +461,7 @@ class SocksDnsBootstrapRelay(
                 }
             } catch (error: Exception) {
                 if (running.get()) {
-                    Timber.d(
-                        error,
-                        "SocksDnsBootstrapRelay DoH raw SSL failed connect=%s sni=%s",
-                        connectHost,
-                        endpoint.sniHost,
-                    )
+                    Timber.d(error, "SocksDnsBootstrapRelay DoH raw SSL failed")
                 }
             }
         }
@@ -532,7 +518,7 @@ class SocksDnsBootstrapRelay(
         val rn = r.qname?.lowercase()?.trimEnd('.')
         if (!qn.isNullOrEmpty()) {
             if (rn.isNullOrEmpty() || rn != qn) {
-                Timber.d("SocksDnsBootstrapRelay DoH QNAME mismatch q=%s r=%s", qn, rn)
+                Timber.d("SocksDnsBootstrapRelay DoH QNAME mismatch")
                 return null
             }
         }

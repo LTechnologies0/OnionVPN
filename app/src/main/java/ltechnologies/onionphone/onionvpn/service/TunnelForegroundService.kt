@@ -287,7 +287,7 @@ class TunnelForegroundService : Service() {
         repeat(attempts) { attempt ->
             val ip = org.torproject.arti.ArtiControlNative.resolveHostname("example.com")
             if (!ip.isNullOrBlank()) {
-                Timber.i("Arti native resolve ready example.com=%s attempt=%d", ip, attempt + 1)
+                Timber.i("Arti native resolve ready attempt=%d", attempt + 1)
                 return true
             }
             Timber.d("Arti native resolve miss attempt=%d/%d", attempt + 1, attempts)
@@ -499,8 +499,8 @@ class TunnelForegroundService : Service() {
                     // Tor sample: enforced Private DNS (hostname) → stop VPN.
                     if (event.hasEnforcedPrivateDNS) {
                         Timber.e(
-                            "Private DNS enforced hostname=%s — fail-closed teardown",
-                            event.privateDNSHostname,
+                            "Private DNS enforced (hostname_len=%d) — fail-closed teardown",
+                            event.privateDNSHostname?.length ?: 0,
                         )
                         scope.launch {
                             handleFailure(
@@ -511,7 +511,7 @@ class TunnelForegroundService : Service() {
                                         id = "android.dns.private",
                                         label = "Android Private DNS (DoT) off",
                                         status = ValidationStatus.Fail,
-                                        detail = "DNSConnectivityEvent hostname=${event.privateDNSHostname}",
+                                        detail = "DNSConnectivityEvent: Private DNS enforced (hostname redacted)",
                                         tripsKillSwitch = true,
                                     ),
                                 ),
