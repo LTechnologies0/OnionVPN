@@ -4,6 +4,10 @@ All notable changes to OnionVPN are documented here.
 
 ## [Unreleased]
 
+### SoftEther / SOCKS plane fail-closed
+- No-UID SYN: stamp live plane on 5-tuple (prevents mid-flow Tor sticky SoftEther→Tor flip).
+- HEV UID miss on CONNECT → refuse (parity with PAC; no shared `uunknown` IsolateSOCKSAuth).
+
 ## [0.3.81] — 2026-09-15
 
 ### OPSEC

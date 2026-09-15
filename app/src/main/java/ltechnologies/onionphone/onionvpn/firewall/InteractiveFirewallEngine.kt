@@ -267,16 +267,21 @@ class InteractiveFirewallEngine @Inject constructor(
         if (uid == ownUid) return FirewallVerdict.ALLOW_TOR
 
         // SYN without owner: Waydroid/WebView often miss getConnectionOwnerUid on first
-        // packets. Fail-open to the configured default (never invent OVPN when down) so
-        // hev can dial; SocksUidBridge uses uunknown IsolateSOCKSAuth when stamp missing.
+        // packets. Fail-open to the configured default (never invent OVPN when down).
+        // Stamp the 5-tuple so mid-flow cannot pick a Tor sticky rule and SoftEther→Tor flip.
+        // HEV CONNECT still refuses without a UID stamp (parity with PAC — no uunknown merge).
         if (info.isTcpSyn && !ConnectionOwnerResolver.isValidUid(uid)) {
-            return when (prefs.firewallDefaultAction) {
+            val live = when (prefs.firewallDefaultAction) {
                 FirewallDefaultAction.DENY -> FirewallVerdict.DENY
-                FirewallDefaultAction.ALLOW_OVPN -> defaultOvpnOrTor(prefs)
+                FirewallDefaultAction.ALLOW_OVPN -> coerceLiveOvpn(defaultOvpnOrTor(prefs), prefs)
                 FirewallDefaultAction.ALLOW,
                 FirewallDefaultAction.ASK,
                 -> FirewallVerdict.ALLOW_TOR
             }
+            if (live != FirewallVerdict.DENY) {
+                caches.rememberFlow(tupleKey, live)
+            }
+            return live
         }
         // Mid-flow often loses owner UID on Android. Prefer sticky tuple cache (checked
         // above). Without it: if OpenVPN-over-Tor is enabled, DENY — inventing Tor would
@@ -413,25 +418,10 @@ class InteractiveFirewallEngine @Inject constructor(
             return FirewallVerdict.ALLOW_TOR
         }
         if (uid == ownUid) return FirewallVerdict.ALLOW_TOR
-        // Unknown UID: PAC stays fail-closed on ASK/DENY (sole gate). HEV already passed TUN
-        // SYN — Waydroid/WebView often loses owner UID before CONNECT; refuse → RST mid-TLS.
+        // Unknown UID: never merge apps onto a shared IsolateSOCKSAuth token (PAC + HEV).
+        // Bridges refuse CONNECT before dial; this is defense-in-depth if they call through.
         if (!ConnectionOwnerResolver.isValidUid(uid)) {
-            return when (plane) {
-                SocksConnectPlane.HEV_UID_BRIDGE ->
-                    if (prefs.firewallDefaultAction == FirewallDefaultAction.DENY) {
-                        FirewallVerdict.DENY
-                    } else {
-                        FirewallVerdict.ALLOW_TOR
-                    }
-                SocksConnectPlane.PAC_DNSCRYPT_BRIDGE ->
-                    if (prefs.firewallDefaultAction == FirewallDefaultAction.ALLOW ||
-                        prefs.firewallDefaultAction == FirewallDefaultAction.ALLOW_OVPN
-                    ) {
-                        FirewallVerdict.ALLOW_TOR
-                    } else {
-                        FirewallVerdict.DENY
-                    }
-            }
+            return FirewallVerdict.DENY
         }
 
         val host = destHost.trim()

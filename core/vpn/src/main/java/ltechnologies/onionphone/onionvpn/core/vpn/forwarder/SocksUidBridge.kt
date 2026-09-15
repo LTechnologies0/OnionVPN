@@ -152,9 +152,7 @@ class SocksUidBridge(
         var handedOff = false
         try {
             if (!isTrustedBridgePeer(client)) {
-                VpnForwarderDebug.socksLog {
-                    "SocksUidBridge reject non-local peer ${client.remoteSocketAddress}"
-                }
+                VpnForwarderDebug.socksLog { "SocksUidBridge reject non-local peer" }
                 runCatching { client.close() }
                 return
             }
@@ -165,12 +163,12 @@ class SocksUidBridge(
             try {
                 negotiateNoAuth(input, output)
                 val (host, port) = readConnect(input, output) ?: return
-                var uid = resolveUidForConnect(host, port)
+                val uid = resolveUidForConnect(host, port)
                 if (!ConnectionOwnerResolver.isValidUid(uid)) {
-                    // Waydroid + Chromium isolated WebView: owner UID often never appears in
-                    // getConnectionOwnerUid / proc. Prefer shared IsolateSOCKSAuth over RST.
-                    Timber.w("SocksUidBridge UID miss — IsolateSOCKSAuth uunknown")
-                    uid = -1
+                    // Fail-closed: shared uunknown would merge distinct apps (parity with PAC).
+                    Timber.w("SocksUidBridge UID miss — refuse CONNECT")
+                    reply(output, 0x02)
+                    return
                 }
                 val torPort = torSocksPort.get()
                 if (torPort <= 0) {
@@ -298,9 +296,7 @@ class SocksUidBridge(
             return peer == Process.myUid()
         }
         if (client.inetAddress?.isLoopbackAddress == true) {
-            VpnForwarderDebug.socksLog {
-                "SocksUidBridge trust loopback peer UID miss (hev) ${client.remoteSocketAddress}"
-            }
+            VpnForwarderDebug.socksLog { "SocksUidBridge trust loopback peer UID miss (hev)" }
             return true
         }
         return Build.VERSION.SDK_INT < Build.VERSION_CODES.Q
