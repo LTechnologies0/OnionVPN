@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# CI / local: every jniLibs .so must only NEEDED Bionic (+ liblog).
-# Allowlist: libc, libm, libdl, liblog.
+# CI / local: every jniLibs .so must only NEEDED Bionic (+ liblog)
+# or another .so shipped in the same ABI directory.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -22,12 +22,17 @@ count=0
 while IFS= read -r -d '' so; do
   count=$((count + 1))
   mapfile -t needed < <("$READELF" -d "$so" 2>/dev/null | grep NEEDED | sed -n 's/.*\[\(.*\)\].*/\1/p')
+  abi_dir="$(dirname "$so")"
   bad=()
   for lib in "${needed[@]}"; do
     [[ -z "$lib" ]] && continue
-    if ! [[ "$lib" =~ $ALLOW ]]; then
-      bad+=("$lib")
+    if [[ "$lib" =~ $ALLOW ]]; then
+      continue
     fi
+    if [[ -f "$abi_dir/$lib" ]]; then
+      continue
+    fi
+    bad+=("$lib")
   done
   rel="${so#"$ROOT/"}"
   if [[ ${#bad[@]} -gt 0 ]]; then
