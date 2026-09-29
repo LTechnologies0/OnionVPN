@@ -215,7 +215,7 @@ object SystemLeakInspector {
                 id = "android.http_proxy",
                 label = "No global HTTP proxy",
                 status = ValidationStatus.Fail,
-                detail = "Global HTTP proxy='$host' — clear it (local MITM risk)",
+                detail = "Global HTTP proxy set (host redacted) — clear it (local MITM risk)",
                 tripsKillSwitch = true,
             )
         }

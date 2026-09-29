@@ -215,11 +215,8 @@ object AndroidVpnInspector {
                 id = "android.vpn.route.default",
                 label = "VPN carries default IPv4 route",
                 status = if (hasDefaultRoute) ValidationStatus.Pass else ValidationStatus.Fail,
-                detail = "iface=${link.interfaceName}; " +
-                    link.routes.joinToString { route ->
-                        "${route.destination?.address?.hostAddress}/${route.destination?.prefixLength} " +
-                            "dev ${route.`interface`}"
-                    },
+                detail = "iface=${link.interfaceName}; routes=${link.routes.size} " +
+                    "default4=${hasDefaultRoute}",
                 tripsKillSwitch = !hasDefaultRoute,
             ),
             ValidationCheck(
@@ -227,25 +224,30 @@ object AndroidVpnInspector {
                 label = "VPN captures default IPv6 route (::/0)",
                 status = if (hasIpv6Default) ValidationStatus.Pass else ValidationStatus.Fail,
                 detail = "Orbot/InviZible pattern — without ::/0, IPv6 can leak clearnet. " +
-                    "routes=" + link.routes.filter {
-                        it.destination?.address?.hostAddress?.contains(':') == true
-                    }.joinToString { r ->
-                        "${r.destination?.address?.hostAddress}/${r.destination?.prefixLength}"
-                    },
+                    "ipv6_routes=${link.routes.count { it.destination?.address?.hostAddress?.contains(':') == true }} " +
+                    "default6=${hasIpv6Default}",
                 tripsKillSwitch = !hasIpv6Default,
             ),
             ValidationCheck(
                 id = "android.vpn.dns.servers",
                 label = "VPN DNS locked to tunnel resolver",
                 status = if (dnsOk) ValidationStatus.Pass else ValidationStatus.Fail,
-                detail = "expected ${TunnelEndpoints.VPN_DNS_ADDRESS}, got: ${dnsServers.joinToString()}",
+                detail = if (dnsOk) {
+                    "VPN DNS matches ${TunnelEndpoints.VPN_DNS_ADDRESS}"
+                } else {
+                    "expected ${TunnelEndpoints.VPN_DNS_ADDRESS}, got ${dnsServers.size} server(s)"
+                },
             ),
             ValidationCheck(
                 id = "android.vpn.address",
                 label = "VPN tunnel address is OnionVPN",
                 status = if (addressOk) ValidationStatus.Pass else ValidationStatus.Fail,
-                detail = "expected ${TunnelEndpoints.VPN_CLIENT_ADDRESS}, " +
-                    "got=${link.linkAddresses.joinToString { it.address.hostAddress ?: "?" }}",
+                detail = if (addressOk) {
+                    "VPN client ${TunnelEndpoints.VPN_CLIENT_ADDRESS}"
+                } else {
+                    "expected ${TunnelEndpoints.VPN_CLIENT_ADDRESS}, " +
+                        "got ${link.linkAddresses.size} address(es)"
+                },
             ),
             ValidationCheck(
                 id = "android.vpn.interface",

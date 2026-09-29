@@ -110,13 +110,7 @@ object DnsCryptResolver {
                     ((addr[2].toInt() and 0xff) shl 8) or
                     (addr[3].toInt() and 0xff)
                 if (TorNetPolicy.mustBlackholeIpv4Destination(ipInt)) {
-                    Timber.d(
-                        "DNSCrypt A blackholed %d.%d.%d.%d — skip (rebinding/LAN)",
-                        addr[0].toInt() and 0xff,
-                        addr[1].toInt() and 0xff,
-                        addr[2].toInt() and 0xff,
-                        addr[3].toInt() and 0xff,
-                    )
+                    Timber.d("DNSCrypt A blackholed — skip (rebinding/LAN)")
                 } else {
                     return InetAddress.getByAddress(addr)
                 }

@@ -122,14 +122,29 @@ internal class OpenVpnAndroidManagement(
 
     private fun processLine(sock: LocalSocket, line: String) {
         if (line.isEmpty()) return
-        Timber.d("OVPN mgmt ← %s", line)
+        // Never log raw management lines (STATE embeds SoftEther remote IP:port).
+        Timber.d("OVPN mgmt ← %s", mgmtEventKind(line))
         when {
             line.startsWith(">HOLD:") -> writeCmd(sock, "hold release\n")
             line.startsWith(">NEED-OK:") -> handleNeedOk(sock, line.removePrefix(">NEED-OK:").trim())
             line.startsWith(">STATE:") -> handleState(line)
             line.startsWith(">PASSWORD:") -> handlePassword(sock, line)
-            line.startsWith(">FATAL:") -> onFatal(line)
+            line.startsWith(">FATAL:") -> onFatal("OpenVPN FATAL")
         }
+    }
+
+    private fun mgmtEventKind(line: String): String = when {
+        line.startsWith(">HOLD:") -> "HOLD"
+        line.startsWith(">NEED-OK:") ->
+            "NEED-OK ${line.removePrefix(">NEED-OK:").trim().substringBefore(' ').take(32)}"
+        line.startsWith(">STATE:") -> {
+            val parts = line.split(',')
+            "STATE ${parts.getOrNull(1) ?: "?"}"
+        }
+        line.startsWith(">PASSWORD:") -> "PASSWORD"
+        line.startsWith(">FATAL:") -> "FATAL"
+        line.startsWith(">") -> line.substringBefore(':').removePrefix(">")
+        else -> "other"
     }
 
     private fun handleState(line: String) {
@@ -149,7 +164,10 @@ internal class OpenVpnAndroidManagement(
                     onFatal("OpenVPN exiting")
                 }
             }
-            CONTROL_NOT_READY.any { line.contains(it) } -> onControlNotReady(line)
+            CONTROL_NOT_READY.any { line.contains(it) } -> {
+                val kind = line.split(',').getOrNull(1) ?: "UNKNOWN"
+                onControlNotReady(kind)
+            }
         }
     }
 
@@ -161,7 +179,7 @@ internal class OpenVpnAndroidManagement(
             return
         }
         if (!line.contains("Auth", ignoreCase = true)) {
-            onFatal("OpenVPN password type unsupported: $line")
+            onFatal("OpenVPN password type unsupported")
             return
         }
         if (authUser.isEmpty() && authPassword.isEmpty()) {
@@ -185,16 +203,24 @@ internal class OpenVpnAndroidManagement(
         when (needed) {
             "PROTECTFD" -> {
                 val fd = pendingProtectFds.poll()
-                if (fd != null) {
+                val ok = if (fd != null) {
                     val fdInt = reflectGetInt(fd)
                     if (fdInt >= 0) {
-                        val ok = protectSocket(fdInt)
-                        Timber.i("OVPN PROTECTFD fd=%d ok=%s", fdInt, ok)
+                        protectSocket(fdInt).also { protected ->
+                            Timber.i("OVPN PROTECTFD fd=%d ok=%s", fdInt, protected)
+                        }
+                    } else {
+                        Timber.w("OVPN PROTECTFD invalid ancillary fd")
+                        false
                     }
                 } else {
                     Timber.w("OVPN PROTECTFD with no ancillary fd")
+                    false
                 }
-                writeCmd(sock, "needok 'PROTECTFD' ok\n")
+                writeCmd(
+                    sock,
+                    if (ok) "needok 'PROTECTFD' ok\n" else "needok 'PROTECTFD' cancel\n",
+                )
             }
             "OPENTUN" -> {
                 if (!extra.contains("tun")) {
@@ -260,7 +286,15 @@ internal class OpenVpnAndroidManagement(
 
     private fun writeCmd(sock: LocalSocket, cmd: String) {
         try {
-            Timber.d("OVPN mgmt → %s", cmd.trim())
+            // OPSEC: never log Auth username/password management lines (credentials).
+            val trimmed = cmd.trim()
+            val logSafe = when {
+                trimmed.startsWith("username ", ignoreCase = true) ||
+                    trimmed.startsWith("password ", ignoreCase = true) ->
+                    trimmed.substringBefore(' ') + " \"…\" (redacted)"
+                else -> trimmed
+            }
+            Timber.d("OVPN mgmt → %s", logSafe)
             sock.outputStream.write(cmd.toByteArray())
             sock.outputStream.flush()
         } catch (e: Exception) {
@@ -403,13 +437,8 @@ internal class OpenVpnTunPump(
                     if (n <= 0) break
                     if (!OvpnIpNat.dnatInbound(buf, n)) continue
                     if (inboundLogBudget.getAndDecrement() > 0) {
-                        val src = if (n >= 20) {
-                            "${buf[12].toInt() and 0xff}.${buf[13].toInt() and 0xff}." +
-                                "${buf[14].toInt() and 0xff}.${buf[15].toInt() and 0xff}"
-                        } else {
-                            "?"
-                        }
-                        Timber.i("OVPN DNAT inject len=%d src=%s", n, src)
+                        // OPSEC: never log packet src IPs from SNAT/DNAT frames.
+                        Timber.i("OVPN DNAT inject len=%d", n)
                     }
                     onInbound(buf, n)
                 }
@@ -434,13 +463,8 @@ internal class OpenVpnTunPump(
                 out.flush()
             }
             if (outboundLogBudget.getAndDecrement() > 0) {
-                val dst = if (length >= 20) {
-                    "${frame[16].toInt() and 0xff}.${frame[17].toInt() and 0xff}." +
-                        "${frame[18].toInt() and 0xff}.${frame[19].toInt() and 0xff}"
-                } else {
-                    "?"
-                }
-                Timber.i("OVPN SNAT write len=%d dst=%s", length, dst)
+                // OPSEC: never log packet dst IPs from SNAT frames.
+                Timber.i("OVPN SNAT write len=%d", length)
             }
             true
         } catch (e: Exception) {

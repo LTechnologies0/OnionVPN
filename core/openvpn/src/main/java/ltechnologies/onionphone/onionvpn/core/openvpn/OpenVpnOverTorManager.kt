@@ -33,7 +33,9 @@ import timber.log.Timber
  * **Data plane:** ics-openvpn unix management + OPENTUN socketpair ↔ VpnService TUN via
  * [FirewallBridge.ovpnPacketSink] / [FirewallBridge.injectToVpnTun].
  *
- * Via OVPN ([FirewallBridge.openVpnOverTorUp]) is true **iff** CONNECTED **and** OPENTUN.
+ * Via OVPN ([FirewallBridge.openVpnOverTorUp]) is true **iff** CONNECTED **and**
+ * OPENTUN **and** [dataPlaneHealthy] (SNAT without DNAT silence clears Via OVPN;
+ * firewall fail-closes OVPN sticky to DENY — no Tor exit invent).
  * Soft-restarts clear Via OVPN until CONNECTED returns; OPENTUN pump is kept (`persist-tun`).
  */
 class OpenVpnOverTorManager(
@@ -47,7 +49,7 @@ class OpenVpnOverTorManager(
     private val dataPlaneReady = AtomicBoolean(false)
     /**
      * False when the peer accepts SNAT outbound but never returns DNAT replies
-     * (data blackhole). Via OVPN demotes to Tor until replies resume.
+     * (data blackhole). Via OVPN clears until replies resume (firewall DENY, not Tor invent).
      */
     private val dataPlaneHealthy = AtomicBoolean(true)
     /** True after at least one CONNECTED this session — soft-reconnect AUTH_FAILED demotes. */
@@ -178,10 +180,11 @@ class OpenVpnOverTorManager(
                     "reinstall APK / run native/openvpn/fetch-ics-openvpn-libs.sh",
             )
 
-        val protect = protectSocket ?: { _ ->
-            Timber.w("OpenVPN protectSocket not wired — PROTECTFD may fail for non-loopback")
-            true
-        }
+        // Fail-closed: never ack PROTECTFD without a real VpnService.protect wiring.
+        // A null callback that returns true would let OpenVPN keep non-loopback sockets
+        // inside the TUN → clearnet/gateway leak or blackhole loops.
+        val protect = protectSocket
+            ?: return fail("OpenVPN protectSocket not wired — refuse start (PROTECTFD fail-closed)")
 
         val rawProfile = profileFile.readText()
         if (!OpenVpnConfigWriter.hasServerTrustMaterial(rawProfile)) {
@@ -381,13 +384,13 @@ class OpenVpnOverTorManager(
                 }
                 val addr: InetAddress = client.resolve(host)
                 val ipv4 = addr.hostAddress
-                    ?: return Result.failure(IllegalStateException("resolve returned no address for $host"))
+                    ?: return Result.failure(IllegalStateException("resolve returned no address"))
                 if (addr !is java.net.Inet4Address) {
                     return Result.failure(
-                        IllegalStateException("Tor resolved $host to non-IPv4 ($ipv4)"),
+                        IllegalStateException("Tor resolved remote to non-IPv4"),
                     )
                 }
-                Timber.i("OpenVPN remote %s → %s (via Tor RESOLVE)", host, ipv4)
+                Timber.i("OpenVPN remote pinned via Tor RESOLVE")
                 text = OpenVpnConfigWriter.pinRemoteHostToIpv4(text, host, ipv4)
             }
             Result.success(text)
@@ -481,7 +484,7 @@ class OpenVpnOverTorManager(
 
     /**
      * Nested OpenVPN data plane can stay control-CONNECTED while the peer blackholes
-     * TCP. Demote Via OVPN so apps fall back to Tor; restore when DNAT resumes.
+     * TCP. Clear Via OVPN (firewall DENY sticky OVPN — not Tor invent); restore when DNAT resumes.
      */
     private fun startDataPlaneHealthMonitor(sid: Long) {
         thread(name = "onionvpn-ovpn-health", isDaemon = true) {
@@ -499,13 +502,13 @@ class OpenVpnOverTorManager(
                     silent && healthy -> {
                         dataPlaneHealthy.set(false)
                         Timber.w(
-                            "OpenVPN data plane silent (snat=%d dnat=%d) — demoting Via OVPN to Tor",
+                            "OpenVPN data plane silent (snat=%d dnat=%d) — demoting Via OVPN (fail-closed)",
                             OvpnIpNat.snatRewriteCount,
                             OvpnIpNat.dnatRewriteCount,
                         )
                         publishUpState(
                             "OpenVPN data silent (snat=${OvpnIpNat.snatRewriteCount} " +
-                                "dnat=${OvpnIpNat.dnatRewriteCount}) — using Tor",
+                                "dnat=${OvpnIpNat.dnatRewriteCount}) — Via OVPN down (DENY, not Tor)",
                         )
                     }
                     !silent && !healthy -> {
@@ -527,8 +530,8 @@ class OpenVpnOverTorManager(
         _status.value = when {
             up -> OpenVpnStatus(OpenVpnPhase.Up, detail)
             control && data && !healthy -> OpenVpnStatus(
-                OpenVpnPhase.Up,
-                detail,
+                OpenVpnPhase.Starting,
+                "$detail — data plane unhealthy (Via OVPN paused)",
             )
             control && !data -> OpenVpnStatus(
                 OpenVpnPhase.Starting,
@@ -562,7 +565,11 @@ class OpenVpnOverTorManager(
                 proc.inputStream.bufferedReader().useLines { lines ->
                     lines.forEach { line ->
                         if (!isCurrentSession(sid)) return@useLines
-                        Timber.i("openvpn: %s", line)
+                        // Never log raw OpenVPN lines (remotes, SOCKS peers, auth hints).
+                        val redacted = redactOpenVpnLogLine(line)
+                        if (redacted != null) {
+                            Timber.d("openvpn: %s", redacted)
+                        }
                         when {
                             line.contains("socks_username_password_auth: server refused") -> {
                                 socksAuthRefusals++
@@ -711,6 +718,30 @@ class OpenVpnOverTorManager(
         setUpFlag(false)
         FirewallBridge.ovpnPacketSink = null
         return Result.failure(cause ?: IllegalStateException(msg))
+    }
+
+    /**
+     * Keep only coarse OpenVPN status tokens for Timber — strip IPv4/IPv6 / host:port
+     * so remotes and SOCKS peers never hit logcat / TunnelLogBuffer.
+     * @return null to drop the line entirely (noise / high-risk).
+     */
+    private fun redactOpenVpnLogLine(line: String): String? {
+        val t = line.trim()
+        if (t.isEmpty()) return null
+        // Drop high-volume / high-PII classes entirely.
+        if (t.contains("BYTECOUNT", ignoreCase = true)) return null
+        if (t.startsWith(">", ignoreCase = false) && t.contains("BYTECOUNT")) return null
+        var out = t
+            .replace(Regex("""\b\d{1,3}(?:\.\d{1,3}){3}(?::\d+)?\b"""), "[ip]")
+            .replace(Regex("""\[[0-9a-fA-F:]+\](?::\d+)?"""), "[ip6]")
+            .replace(Regex("""(?i)\b(?:[a-z0-9-]+\.)+[a-z]{2,}(?::\d+)?\b"""), "[host]")
+        if (out.contains("password", ignoreCase = true) ||
+            out.contains("username", ignoreCase = true) ||
+            out.contains("auth-user-pass", ignoreCase = true)
+        ) {
+            out = "[auth redacted]"
+        }
+        return out.take(160)
     }
 
     companion object {

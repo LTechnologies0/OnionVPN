@@ -25,8 +25,9 @@ internal object OvpnIpNat {
     /** OpenVPN client IPv4 from IFCONFIG (host order), 0 = unset. */
     private val ovpnClientIp = AtomicInteger(0)
 
-    /** remoteIp:remotePort:localPort:proto → lastSeenMs */
-    private val flows = ConcurrentHashMap<Long, Long>(256)
+    /** remoteIp:remotePort:localPort → lastSeenMs (TCP and UDP maps are separate). */
+    private val tcpFlows = ConcurrentHashMap<Long, Long>(256)
+    private val udpFlows = ConcurrentHashMap<Long, Long>(256)
 
     @Volatile
     var snatRewriteCount: Long = 0
@@ -48,7 +49,8 @@ internal object OvpnIpNat {
 
     fun clear() {
         ovpnClientIp.set(0)
-        flows.clear()
+        tcpFlows.clear()
+        udpFlows.clear()
         snatRewriteCount = 0
         dnatRewriteCount = 0
         lastSnatWallMs = 0
@@ -79,16 +81,13 @@ internal object OvpnIpNat {
         val first = extra.trim().split(Regex("\\s+")).firstOrNull().orEmpty()
         val ip = TunnelEndpoints.parseIpv4Literal(first)
         if (ip == null) {
-            Timber.w("OVPN IFCONFIG NAT skip — no IPv4 in %s", extra.take(64))
+            Timber.w("OVPN IFCONFIG NAT skip — no IPv4 in msg (len=%d)", extra.length)
             return
         }
         ovpnClientIp.set(ip)
-        flows.clear()
-        Timber.i(
-            "OVPN IP NAT VpnService %s ↔ OpenVPN %s",
-            TunnelEndpoints.VPN_CLIENT_ADDRESS,
-            first,
-        )
+        tcpFlows.clear()
+        udpFlows.clear()
+        Timber.i("OVPN IP NAT ready (client IP set, maps cleared)")
     }
 
     fun isReady(): Boolean = ovpnClientIp.get() != 0
@@ -147,43 +146,50 @@ internal object OvpnIpNat {
 
     private fun rememberOutboundFlow(packet: ByteArray, length: Int, ihl: Int) {
         val proto = packet[9].toInt() and 0xff
-        if (proto != 6 && proto != 17) return
+        val map = flowMap(proto) ?: return
         if (length < ihl + 4) return
         val remoteIp = readIpv4(packet, 16)
         val localPort = readPort(packet, ihl)
         val remotePort = readPort(packet, ihl + 2)
-        flows[flowKey(remoteIp, remotePort, localPort, proto)] = System.currentTimeMillis()
-        if (flows.size > 2_000) trimFlows()
+        map[flowKey(remoteIp, remotePort, localPort)] = System.currentTimeMillis()
+        if (map.size > 2_000) trimFlows(map)
     }
 
     private fun hasInboundFlow(packet: ByteArray, length: Int, ihl: Int): Boolean {
         val proto = packet[9].toInt() and 0xff
-        if (proto != 6 && proto != 17) {
-            // ICMP / other peer chatter — drop (do not inject).
-            return false
-        }
+        val map = flowMap(proto) ?: return false
         if (length < ihl + 4) return false
         val remoteIp = readIpv4(packet, 12)
         val remotePort = readPort(packet, ihl)
         val localPort = readPort(packet, ihl + 2)
-        val key = flowKey(remoteIp, remotePort, localPort, proto)
-        val last = flows[key] ?: return false
-        flows[key] = System.currentTimeMillis()
+        val key = flowKey(remoteIp, remotePort, localPort)
+        val last = map[key] ?: return false
+        map[key] = System.currentTimeMillis()
         return System.currentTimeMillis() - last < FLOW_TTL_MS
     }
 
-    private fun trimFlows() {
+    private fun flowMap(proto: Int): ConcurrentHashMap<Long, Long>? = when (proto) {
+        6 -> tcpFlows
+        17 -> udpFlows
+        else -> null
+    }
+
+    private fun trimFlows(map: ConcurrentHashMap<Long, Long>) {
         val now = System.currentTimeMillis()
-        val it = flows.entries.iterator()
+        val it = map.entries.iterator()
         while (it.hasNext()) {
             if (now - it.next().value > FLOW_TTL_MS) it.remove()
         }
     }
 
-    private fun flowKey(remoteIp: Int, remotePort: Int, localPort: Int, proto: Int): Long =
+    /**
+     * Pack remoteIp|remotePort|localPort only. Proto lives in separate maps —
+     * XOR into IP bits collided (e.g. 10.0.0.5/TCP vs 10.23.0.5/UDP).
+     */
+    private fun flowKey(remoteIp: Int, remotePort: Int, localPort: Int): Long =
         ((remoteIp.toLong() and 0xffffffffL) shl 32) or
             (((remotePort and 0xffff).toLong()) shl 16) or
-            (((localPort and 0xffff).toLong()) shl 0) xor (proto.toLong() shl 48)
+            ((localPort and 0xffff).toLong())
 
     private fun readPort(packet: ByteArray, offset: Int): Int =
         ((packet[offset].toInt() and 0xff) shl 8) or (packet[offset + 1].toInt() and 0xff)

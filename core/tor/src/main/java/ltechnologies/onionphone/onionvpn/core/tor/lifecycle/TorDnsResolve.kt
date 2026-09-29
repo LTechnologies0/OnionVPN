@@ -27,7 +27,7 @@ object TorDnsResolve {
         val host = hostname.trim().trimEnd('.').lowercase()
         require(host.isNotEmpty()) { "empty hostname" }
         require(!host.contains(' ')) { "invalid hostname" }
-        Timber.v("DNSPort RESOLVE A %s via %s:%d", host, dnsHost, dnsPort)
+        Timber.v("DNSPort RESOLVE A host_len=%d", host.length)
         val id = ThreadLocalRandom.current().nextInt(0, 0xFFFF)
         val query = buildQuery(host, id)
         DatagramSocket(null).use { sock ->
@@ -59,22 +59,22 @@ object TorDnsResolve {
                 val flags = ((buf[2].toInt() and 0xff) shl 8) or (buf[3].toInt() and 0xff)
                 if (flags and 0x8000 == 0) continue // QR must be response
                 if (flags and 0x000f != 0) {
-                    val err = "DNSPort RCODE=${flags and 0x000f} for $host"
+                    val err = "DNSPort RCODE=${flags and 0x000f}"
                     Timber.w(err)
                     OpTrace.warn("tor", err)
                     throw IllegalStateException(err)
                 }
                 val ip = parseFirstA(buf, resp.length)
                 if (ip == null) {
-                    val err = "DNSPort returned no A for $host"
+                    val err = "DNSPort returned no A"
                     Timber.w(err)
                     OpTrace.warn("tor", err)
                     throw IllegalStateException(err)
                 }
-                Timber.d("DNSPort RESOLVE %s → %s", host, ip)
+                Timber.d("DNSPort RESOLVE ok")
                 return ip
             }
-            val err = "DNSPort timeout/no matching TXID for $host"
+            val err = "DNSPort timeout/no matching TXID"
             Timber.w(err)
             OpTrace.warn("tor", err)
             throw IllegalStateException(err)

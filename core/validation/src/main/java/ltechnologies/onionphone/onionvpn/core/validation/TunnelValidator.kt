@@ -241,7 +241,7 @@ object TunnelValidator {
             "tor.config.missing",
             -> true
             // UID SOCKS / forwarder wiring broken → TUN packets won't reach Tor.
-            "uid.forwarder.wiring", "hev.config.missing", "hev.forwarder.wiring" -> true
+            "uid.forwarder.wiring" -> true
             // onionmasq data plane not ready / sidecar missing.
             "onionmasq.plane.wiring" -> true
             // DNSCrypt not actually over Tor → clearnet DNS from VPN-excluded process.
@@ -289,17 +289,21 @@ object TunnelValidator {
         val alive = OnionVpnService.tunForwarderAlive.value
         val sidecar = OnionmasqSocksSidecar.socksPortOrZero()
         val dnsOk = OnionVpnService.hevDnsCryptPort.value == ports.dnsCryptListenPort
+        val upstream = OnionVpnService.hevSocksPort.value
         val sidecarOk = sidecar > 0 &&
             sidecar == ports.torDnsCryptSocksPort &&
             sidecar == ports.torProbeSocksPort
-        val ok = ready && alive && dnsOk && sidecarOk
+        // Automap divert → SocksUidBridge upstream must be the live sidecar (not 0 /
+        // stale pre-bootstrap port) or .onion SOCKS5A never leaves the UID bridge.
+        val automapUpstreamOk = upstream > 0 && upstream == sidecar
+        val ok = ready && alive && dnsOk && sidecarOk && automapUpstreamOk
         return ValidationCheck(
             id = "onionmasq.plane.wiring",
-            label = "onionmasq TUN ↔ SOCKS sidecar (single TorClient)",
+            label = "onionmasq TUN ↔ SOCKS sidecar (single TorClient + Automap divert)",
             status = if (ok) ValidationStatus.Pass else ValidationStatus.Fail,
-            detail = "ready=$ready alive=$alive sidecar=$sidecar " +
+            detail = "ready=$ready alive=$alive sidecar=$sidecar automapUpstream=$upstream " +
                 "dnsCryptSocks=${ports.torDnsCryptSocksPort} probe=${ports.torProbeSocksPort} " +
-                "dnsListenOk=$dnsOk",
+                "dnsListenOk=$dnsOk automapUpstreamOk=$automapUpstreamOk",
             tripsKillSwitch = true,
         )
     }

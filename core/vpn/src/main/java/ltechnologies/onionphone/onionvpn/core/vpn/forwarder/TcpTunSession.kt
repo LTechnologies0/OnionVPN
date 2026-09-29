@@ -100,7 +100,7 @@ internal class TcpTunSession(
                 established = true
                 startReader(sock.getInputStream())
             } catch (e: Exception) {
-                Timber.d(e, "SOCKS connect failed uid=$uid $remoteHost:$remotePort")
+                Timber.d(e, "SOCKS connect failed uid=%d", uid)
                 close(sendRst = true)
             } finally {
                 connecting.set(false)

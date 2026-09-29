@@ -6,7 +6,7 @@ index 63797e4..83c832d 100644
  
  [dependencies]
  anyhow = "1.0"
-+arti-client = { version = "0.44.0", default-features = false, features = ["tokio", "rustls"] }
++arti-client = { version = "0.45.0", default-features = false, features = ["tokio", "rustls", "onion-service-client"] }
  backtrace = "0.3.71"
  lazy_static = "1.4.0"
  onion-tunnel = { path = "../onion-tunnel", version = "0.0.0", features = ["udp-tunnel", "pcap"] }
@@ -16,7 +16,7 @@ index 63797e4..83c832d 100644
 +tokio = { version = "1.37.0", features = ["macros", "rt", "rt-multi-thread", "net", "io-util", "sync"] }
  tokio-stream = "0.1"
 +tokio-util = { version = "0.7.10", features = ["compat"] }
-+tor-rtcompat = { version = "0.44.0" }
++tor-rtcompat = { version = "0.45.0" }
  tracing = "0.1.40"
  # the java native interface
  jni = { version = "0.21", default-features = false }
@@ -375,7 +375,7 @@ index 0000000..7712330
 +//! - `CONNECT` (`0x01`) — TCP stream via Tor
 +//! - `RESOLVE` (`0xF0`) — remote DNS via `TorClient::resolve_with_prefs` (no clearnet DoH)
 +
-+use arti_client::{IntoTorAddr, IsolationToken, StreamPrefs, TorClient};
++use arti_client::{config::BoolOrAuto, IntoTorAddr, IsolationToken, StreamPrefs, TorClient};
 +use dashmap::DashMap;
 +use std::net::{IpAddr, SocketAddr};
 +use std::sync::atomic::{AtomicU16, Ordering};
@@ -538,6 +538,9 @@ index 0000000..7712330
 +
 +    let mut prefs = StreamPrefs::new();
 +    prefs.set_isolation(isolation);
++    // Match onion-tunnel::proxy — without Explicit(true), Arti rejects .onion with
++    // OnionAddressDisabled ("allow_onion_addrs disabled in stream preferences").
++    prefs.connect_to_onion_services(BoolOrAuto::Explicit(true));
 +
 +    match cmd {
 +        // CONNECT — RFC 1928

@@ -168,20 +168,20 @@ internal class TorControlOperations(
      */
     fun resolve(hostname: String, timeoutMs: Long = 15_000): Result<String> = runCatching {
         val host = TorControlWire.requireHostname(hostname)
-        Timber.d("control RESOLVE %s timeoutMs=%d", host, timeoutMs)
+        Timber.d("control RESOLVE host_len=%d timeoutMs=%d", host.length, timeoutMs)
         sendResolve(host).getOrThrow()
         val deadline = System.currentTimeMillis() + timeoutMs
         var sleepMs = 50L
         while (System.currentTimeMillis() < deadline) {
             pollResolveMapping(host)?.let {
-                Timber.d("control RESOLVE %s → %s", host, it)
+                Timber.d("control RESOLVE ok")
                 return@runCatching it
             }
             Thread.sleep(sleepMs)
             sleepMs = (sleepMs * 2).coerceAtMost(400L)
         }
-        throw IOException("RESOLVE timeout for $host")
-    }.onFailure { Timber.w(it, "control RESOLVE failed host=%s", hostname) }
+        throw IOException("RESOLVE timeout")
+    }.onFailure { Timber.w(it, "control RESOLVE failed host_len=%d", hostname.length) }
 
     fun extendNewCircuit(): Result<String> = runCatching {
         val lines = transport.command("EXTENDCIRCUIT 0")
@@ -194,7 +194,16 @@ internal class TorControlOperations(
         Timber.v("CLOSECIRCUIT %s ifUnused=%s", circId, ifUnused)
         transport.command("CLOSECIRCUIT $circId$flags")
         Unit
-    }.onFailure { Timber.w(it, "CLOSECIRCUIT %s failed", id) }
+    }.onFailure { err ->
+        // Tor often races: circuit already closed → 552 Unknown circuit.
+        // Avoid the word "failed" (TunnelLogTree escalates it to Error).
+        val msg = err.message.orEmpty()
+        if (msg.contains("Unknown circuit", ignoreCase = true) || msg.contains("552")) {
+            Timber.d(err, "CLOSECIRCUIT %s skipped (already gone)", id)
+        } else {
+            Timber.w(err, "CLOSECIRCUIT %s error", id)
+        }
+    }
 
     fun closeStream(
         id: String,

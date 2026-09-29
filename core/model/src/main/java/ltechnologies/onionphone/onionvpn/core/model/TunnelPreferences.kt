@@ -116,8 +116,9 @@ data class TunnelPreferences(
      */
     val allowAdbClearnetLeak: Boolean = false,
     /**
-     * TUN forwarder stack. [TunDataPlane.ONIONMASQ] is forced when
-     * [TorEngine.ARTI] and native onionmasq are present; otherwise HEV.
+     * TUN forwarder stack. Arti defaults to [TunDataPlane.ONIONMASQ] when the native
+     * library is present (Settings); [TunDataPlane.HEV_SOCKS] remains selectable for
+     * Arti+arti-mobile. C Tor always uses HEV.
      */
     val tunDataPlane: TunDataPlane = TunDataPlane.HEV_SOCKS,
     /**

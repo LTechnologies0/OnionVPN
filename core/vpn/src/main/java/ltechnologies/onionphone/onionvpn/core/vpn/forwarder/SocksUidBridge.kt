@@ -11,6 +11,7 @@ import java.net.ServerSocket
 import java.net.Socket
 import java.net.SocketException
 import java.nio.charset.StandardCharsets
+import java.security.MessageDigest
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.Semaphore
 import java.util.concurrent.ThreadPoolExecutor
@@ -32,11 +33,13 @@ import timber.log.Timber
 
 /**
  * Loopback SOCKS5 in front of Tor apps SocksPort:
- * hev (no per-stream auth) → this bridge → Tor with IsolateSOCKSAuth `u{uid}`/`p{uid}`.
+ * hev (session USER/PASS) → this bridge → Tor with IsolateSOCKSAuth `u{uid}`/`p{uid}`.
  *
  * UID comes from [TcpFlowUidIndex] (TunDnsMux SYN stamp). Automap virtual IPs are
  * remapped to `.onion`/`.exit` hostnames via [DnsHostnameCache] for SOCKS5A.
  * Clearnet CONNECT is pinned to a DNSCrypt A-record (never Tor exit DNS / SOCKS5A hostname).
+ * Loopback peer UID miss (Waydroid) is tolerated only after hev session auth succeeds —
+ * foreign apps without the session password cannot steal dest-only SYN stamps.
  *
  * Handshake workers return immediately after CONNECT succeeds; bidirectional pipes run
  * on a separate cached pool so Signal reconnect storms cannot pin all handshake threads
@@ -44,6 +47,8 @@ import timber.log.Timber
  */
 class SocksUidBridge(
     context: Context,
+    /** Session secret shared with hev yaml — required USER/PASS before CONNECT. */
+    private val hevBridgePassword: String,
     private val listenPort: Int = TunnelEndpoints.SOCKS_UID_BRIDGE_PORT,
     private val protectSocket: ((Socket) -> Boolean)? = null,
     private val onFatal: ((Throwable) -> Unit)? = null,
@@ -152,9 +157,7 @@ class SocksUidBridge(
         var handedOff = false
         try {
             if (!isTrustedBridgePeer(client)) {
-                VpnForwarderDebug.socksLog {
-                    "SocksUidBridge reject non-local peer ${client.remoteSocketAddress}"
-                }
+                VpnForwarderDebug.socksLog { "SocksUidBridge reject non-local peer" }
                 runCatching { client.close() }
                 return
             }
@@ -163,14 +166,14 @@ class SocksUidBridge(
             val input = DataInputStream(client.getInputStream())
             val output = DataOutputStream(client.getOutputStream())
             try {
-                negotiateNoAuth(input, output)
+                negotiateHevAuth(input, output)
                 val (host, port) = readConnect(input, output) ?: return
-                var uid = resolveUidForConnect(host, port)
+                val uid = resolveUidForConnect(host, port)
                 if (!ConnectionOwnerResolver.isValidUid(uid)) {
-                    // Waydroid + Chromium isolated WebView: owner UID often never appears in
-                    // getConnectionOwnerUid / proc. Prefer shared IsolateSOCKSAuth over RST.
-                    Timber.w("SocksUidBridge UID miss $host:$port — IsolateSOCKSAuth uunknown")
-                    uid = -1
+                    // Fail-closed: shared uunknown would merge distinct apps (parity with PAC).
+                    Timber.w("SocksUidBridge UID miss — refuse CONNECT")
+                    reply(output, 0x02)
+                    return
                 }
                 val torPort = torSocksPort.get()
                 if (torPort <= 0) {
@@ -179,7 +182,7 @@ class SocksUidBridge(
                     return
                 }
                 val socksHost = rewriteAutomapHost(host) ?: run {
-                    VpnForwarderDebug.socksLog { "SocksUidBridge drop Automap IP without hostname $host" }
+                    VpnForwarderDebug.socksLog { "SocksUidBridge drop Automap IP without hostname" }
                     reply(output, 0x04)
                     return
                 }
@@ -193,7 +196,7 @@ class SocksUidBridge(
                 val pass = TunnelEndpoints.socksPassForUid(uid)
                 if (!torConnectSlots.tryAcquire()) {
                     VpnForwarderDebug.socksLog {
-                        "SocksUidBridge CONNECT backlog full — reject $socksHost:$port"
+                        "SocksUidBridge CONNECT backlog full — reject"
                     }
                     reply(output, 0x01)
                     return
@@ -202,7 +205,7 @@ class SocksUidBridge(
                 // reply 0x00 to hev, then fail startPipe and RST mid-TLS (Speedtest SSL timeout).
                 if (!pipeSlots.tryAcquire(2)) {
                     torConnectSlots.release()
-                    VpnForwarderDebug.socksLog { "SocksUidBridge pipe pool full — reject $socksHost:$port" }
+                    VpnForwarderDebug.socksLog { "SocksUidBridge pipe pool full — reject" }
                     reply(output, 0x01)
                     return
                 }
@@ -231,7 +234,8 @@ class SocksUidBridge(
                 // client.getOutputStream() — otherwise Tor→client bytes race the reply
                 // and hev treats TLS as a broken SOCKS header (Speedtest read/SSL timeouts).
                 reply(output, 0x00)
-                Timber.i("SocksUidBridge uid=%d %s → %s:%d", uid, user, socksHost, port)
+                // OPSEC: uid only — IsolateSOCKSAuth user + dest fingerprint circuits/activity.
+                Timber.i("SocksUidBridge uid=%d ok", uid)
                 if (!startPipe(client, upstream, slotsAcquired = true)) {
                     runCatching { upstream.close() }
                     return
@@ -284,25 +288,49 @@ class SocksUidBridge(
     }
 
     /**
-     * hev runs in-process — only our UID may dial the loopback bridge.
-     * Foreign apps forging CONNECT would otherwise steal SYN UID stamps (isolation MITM).
-     * Pre-Q: [ConnectionOwnerResolver.resolveAcceptedClientUid] is unavailable; rely on stamps.
-     * API ≥ Q + UID miss on **loopback**: Waydroid often fails owner lookup for hev→127.0.0.1
-     * even though the dialer is us — old fail-closed RST'd every HTTPS CONNECT (HTTP sometimes
-     * slipped through). Bind is loopback-only; firewall still gates CONNECT.
+     * hev runs in-process — prefer peer UID == ours. Loopback + UID miss (Waydroid) is
+     * OK only because [negotiateHevAuth] requires the session secret before CONNECT;
+     * dest-only [TcpFlowUidIndex] stamps are otherwise stealable by any local dialer.
      */
     private fun isTrustedBridgePeer(client: Socket): Boolean {
         val peer = ownerResolver.resolveAcceptedClientUid(client)
         if (ConnectionOwnerResolver.isValidUid(peer)) {
             return peer == Process.myUid()
         }
-        if (client.inetAddress?.isLoopbackAddress == true) {
-            VpnForwarderDebug.socksLog {
-                "SocksUidBridge trust loopback peer UID miss (hev) ${client.remoteSocketAddress}"
-            }
-            return true
+        return client.inetAddress?.isLoopbackAddress == true ||
+            Build.VERSION.SDK_INT < Build.VERSION_CODES.Q
+    }
+
+    /** RFC1929 USER/PASS — hev yaml username/password for this tunnel session. */
+    private fun negotiateHevAuth(input: DataInputStream, output: DataOutputStream) {
+        val ver = input.readUnsignedByte()
+        if (ver != 0x05) throw IOException("not SOCKS5")
+        val nMethods = input.readUnsignedByte()
+        var offersUserPass = false
+        repeat(nMethods) {
+            if (input.readUnsignedByte() == 0x02) offersUserPass = true
         }
-        return Build.VERSION.SDK_INT < Build.VERSION_CODES.Q
+        if (!offersUserPass) {
+            output.writeByte(0x05)
+            output.writeByte(0xFF)
+            output.flush()
+            throw IOException("SOCKS client offered no USER/PASS")
+        }
+        output.writeByte(0x05)
+        output.writeByte(0x02)
+        output.flush()
+        val authVer = input.readUnsignedByte()
+        if (authVer != 0x01) throw IOException("SOCKS auth ver=$authVer")
+        val uLen = input.readUnsignedByte()
+        val user = ByteArray(uLen).also { input.readFully(it) }
+        val pLen = input.readUnsignedByte()
+        val pass = ByteArray(pLen).also { input.readFully(it) }
+        val userOk = user.toString(StandardCharsets.UTF_8) == TunnelEndpoints.SOCKS_HEV_BRIDGE_USER
+        val passOk = MessageDigest.isEqual(pass, hevBridgePassword.toByteArray(StandardCharsets.UTF_8))
+        output.writeByte(0x01)
+        output.writeByte(if (userOk && passOk) 0x00 else 0x01)
+        output.flush()
+        if (!userOk || !passOk) throw IOException("SOCKS hev bridge auth rejected")
     }
 
     /**
@@ -339,7 +367,7 @@ class SocksUidBridge(
         )
         if (!allowed) {
             VpnForwarderDebug.socksLog {
-                "SocksUidBridge firewall DENY uid=$uid $socksHost:$port"
+                "SocksUidBridge firewall DENY uid=$uid"
             }
         }
         return allowed
@@ -389,7 +417,7 @@ class SocksUidBridge(
                 DnsHostnameCache.ipv4ForHostname(name)?.let { return it }
                 pinClearnetViaDnsCrypt(name)?.let { return it }
             }
-            VpnForwarderDebug.socksLog { "SocksUidBridge drop clearnet IPv6 without DNSCrypt A $host" }
+            VpnForwarderDebug.socksLog { "SocksUidBridge drop clearnet IPv6 without DNSCrypt A" }
             return null
         }
         if (TunnelEndpoints.isOnionLikeHostname(host)) return host
@@ -407,7 +435,7 @@ class SocksUidBridge(
         val dnsPort = dnsCryptPort.get()
         if (dnsPort <= 0) {
             VpnForwarderDebug.socksLog {
-                "SocksUidBridge DNSCrypt port unset — refuse clearnet hostname $hostname"
+                "SocksUidBridge DNSCrypt port unset — refuse clearnet hostname"
             }
             return null
         }
@@ -422,7 +450,7 @@ class SocksUidBridge(
             TunnelEndpoints.parseIpv4Literal(v4)?.let { ipInt ->
                 if (TorNetPolicy.mustBlackholeIpv4Destination(ipInt)) {
                     VpnForwarderDebug.socksLog {
-                        "SocksUidBridge DNSCrypt A blackholed $hostname → $v4"
+                        "SocksUidBridge DNSCrypt A blackholed (rebinding/LAN)"
                     }
                     return null
                 }
@@ -431,20 +459,10 @@ class SocksUidBridge(
             v4
         } catch (e: Exception) {
             VpnForwarderDebug.socksLog(e) {
-                "SocksUidBridge DNSCrypt resolve failed $hostname"
+                "SocksUidBridge DNSCrypt resolve failed"
             }
             null
         }
-    }
-
-    private fun negotiateNoAuth(input: DataInputStream, output: DataOutputStream) {
-        val ver = input.readUnsignedByte()
-        if (ver != 0x05) throw IOException("not SOCKS5")
-        val nMethods = input.readUnsignedByte()
-        input.skipBytes(nMethods)
-        output.writeByte(0x05)
-        output.writeByte(0x00) // NO AUTH — hev has no per-stream credentials
-        output.flush()
     }
 
     private fun readConnect(

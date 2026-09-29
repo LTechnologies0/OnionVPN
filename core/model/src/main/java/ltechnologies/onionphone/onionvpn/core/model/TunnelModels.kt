@@ -315,8 +315,10 @@ object TunnelEndpoints {
     /**
      * Local SOCKS5 in front of Tor apps SocksPort: hev → [SocksUidBridge] → Tor `u{uid}`.
      * Fixed port so hev yaml stays simple across sessions.
+     * Session USER/PASS (random password) blocks foreign apps from stealing SYN stamps.
      */
     const val SOCKS_UID_BRIDGE_PORT = 18_203
+    const val SOCKS_HEV_BRIDGE_USER = "uhev"
 
     fun pacUrl(): String = "http://$LOOPBACK:$PAC_LISTEN_PORT$PAC_PATH"
 

@@ -35,6 +35,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 import ltechnologies.onionphone.onionvpn.BuildConfig
 import ltechnologies.onionphone.onionvpn.core.dnscrypt.DnsCryptProcessManager
 import ltechnologies.onionphone.onionvpn.core.model.DnsResolverMode
+import ltechnologies.onionphone.onionvpn.core.model.FirewallDefaultAction
 import ltechnologies.onionphone.onionvpn.core.model.TorEngine
 import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
 import ltechnologies.onionphone.onionvpn.core.model.TunnelFailure
@@ -85,7 +86,7 @@ import java.net.Socket
  * 1. Blocking TUN first when kill-switch is on (Mullvad: never clearnet during bootstrap)
  * 2. Tor bootstrap (SOCKS + DNSPort on loopback)
  * 3. DNSCrypt (upstream via Tor SOCKS, bootstrap via Tor DNSPort)
- * 4. VPN TUN Connected (hev-socks5 → Tor SOCKS; DNS via TunDnsMux or FakeDNS)
+ * 4. VPN TUN Connected (hev-socks5 / onionmasq → Tor SOCKS; DNS via TunDnsMux → DNSCrypt)
  * 5. Validation (Android APIs + runtime probes)
  */
 @AndroidEntryPoint
@@ -153,6 +154,57 @@ class TunnelForegroundService : Service() {
 
     private fun isDataPlaneTorLive(): Boolean =
         if (isOnionmasqPlane()) isOnionmasqLive() else tor.isRunning()
+
+    /**
+     * After Connected rebind, onionmasq tears down TorClient + SOCKS sidecar.
+     * Re-await bootstrap, wire Automap upstream, remap runtime ports, restart
+     * DNS bootstrap relay / DNSCrypt / PAC. Returns false → caller kill-switches.
+     */
+    private suspend fun rewireOnionmasqAfterConnectedRebind(ports: TunnelRuntimePorts): Boolean {
+        val ready = OnionVpnService.onionmasqReady.value ||
+            withTimeoutOrNull(ONIONMASQ_BOOTSTRAP_TIMEOUT_MS) {
+                OnionVpnService.onionmasqReady.first { it }
+            } == true
+        if (!ready) {
+            Timber.e("onionmasq rebind: bootstrap not ready")
+            return false
+        }
+        val sidecar = ltechnologies.onionphone.onionvpn.core.vpn.onionmasq
+            .OnionmasqSocksSidecar.awaitPort(30_000L)
+        if (sidecar <= 0) {
+            Timber.e("onionmasq rebind: SOCKS sidecar not listening")
+            return false
+        }
+        OnionVpnService.setTorSocksUpstream(sidecar)
+        ensureSocksDnsBootstrapRelay(
+            listenPort = ports.torDnsPort,
+            socksPort = sidecar,
+            bindUdp = true,
+            useSocksResolve = true,
+        )
+        val remapped = ports.copy(
+            torDnsCryptSocksPort = sidecar,
+            torProbeSocksPort = sidecar,
+            torSocksPort = sidecar,
+        )
+        runtimePorts = remapped
+        tor.attachExternalRuntimePorts(remapped)
+        artiSocksRoleMux.start(remapped, applicationContext)
+        val dns = dnsCrypt.start(
+            preferences.dnsCryptServerName,
+            remapped,
+            preferences,
+            socksPortOverride = sidecar,
+            socksUserOverride = TunnelEndpoints.dnsCryptSocksUser(),
+        )
+        if (dns.isFailure) {
+            Timber.e(dns.exceptionOrNull(), "onionmasq rebind: DNSCrypt restart failed")
+            return false
+        }
+        pacServer.updateUpstream(sidecar, remapped.dnsCryptListenPort)
+        Timber.i("onionmasq rebind rewired sidecar=%d", sidecar)
+        return true
+    }
 
     /**
      * Start/replace loopback DNS bootstrap for DNSCrypt (`force_tcp` → TCP DNS).
@@ -235,7 +287,7 @@ class TunnelForegroundService : Service() {
         repeat(attempts) { attempt ->
             val ip = org.torproject.arti.ArtiControlNative.resolveHostname("example.com")
             if (!ip.isNullOrBlank()) {
-                Timber.i("Arti native resolve ready example.com=%s attempt=%d", ip, attempt + 1)
+                Timber.i("Arti native resolve ready attempt=%d", attempt + 1)
                 return true
             }
             Timber.d("Arti native resolve miss attempt=%d/%d", attempt + 1, attempts)
@@ -377,10 +429,11 @@ class TunnelForegroundService : Service() {
                 pacServer.updateUpstream(0, ports?.dnsCryptListenPort ?: 0)
             } else {
                 val socks = if (isOnionmasqPlane()) {
+                    // Never fall back to remapped stale torSocksPort — Automap upstream
+                    // must be the live sidecar only (or stay paused fail-closed).
                     ltechnologies.onionphone.onionvpn.core.vpn.onionmasq
                         .OnionmasqSocksSidecar.socksPortOrZero()
                         .takeIf { it > 0 }
-                        ?: ports?.torSocksPort
                         ?: 0
                 } else {
                     ports?.torSocksPort ?: 0
@@ -405,31 +458,19 @@ class TunnelForegroundService : Service() {
                     val hops = event.circuit?.joinToString(">") { r ->
                         r.country_code ?: "?"
                     }.orEmpty()
-                    Timber.i(
-                        "onionmasq conn uid=%d %s→%s tor=%s hops=%s",
-                        event.appId,
-                        event.proxySrc,
-                        event.proxyDst,
-                        event.torDst,
-                        hops,
-                    )
+                    // OPSEC: uid + country hops only — never proxy/tor destinations.
+                    Timber.i("onionmasq conn uid=%d hops=%s", event.appId, hops)
                     ltechnologies.onionphone.onionvpn.logging.TunnelLogBuffer.append(
                         ltechnologies.onionphone.onionvpn.logging.LogSource.TOR,
-                        "onionmasq: uid=${event.appId} ${event.torDst} [$hops]",
+                        "onionmasq: uid=${event.appId} [$hops]",
                         isError = false,
                     )
                 }
                 is org.torproject.onionmasq.events.FailedConnectionEvent -> {
-                    Timber.w(
-                        "onionmasq fail uid=%d %s→%s err=%s",
-                        event.appId,
-                        event.proxySrc,
-                        event.proxyDst,
-                        event.error,
-                    )
+                    Timber.w("onionmasq fail uid=%d err=%s", event.appId, event.error)
                     ltechnologies.onionphone.onionvpn.logging.TunnelLogBuffer.append(
                         ltechnologies.onionphone.onionvpn.logging.LogSource.TOR,
-                        "onionmasq fail uid=${event.appId} ${event.torDst}: ${event.error}",
+                        "onionmasq fail uid=${event.appId}: ${event.error}",
                         isError = true,
                     )
                 }
@@ -458,8 +499,8 @@ class TunnelForegroundService : Service() {
                     // Tor sample: enforced Private DNS (hostname) → stop VPN.
                     if (event.hasEnforcedPrivateDNS) {
                         Timber.e(
-                            "Private DNS enforced hostname=%s — fail-closed teardown",
-                            event.privateDNSHostname,
+                            "Private DNS enforced (hostname_len=%d) — fail-closed teardown",
+                            event.privateDNSHostname?.length ?: 0,
                         )
                         scope.launch {
                             handleFailure(
@@ -470,7 +511,7 @@ class TunnelForegroundService : Service() {
                                         id = "android.dns.private",
                                         label = "Android Private DNS (DoT) off",
                                         status = ValidationStatus.Fail,
-                                        detail = "DNSConnectivityEvent hostname=${event.privateDNSHostname}",
+                                        detail = "DNSConnectivityEvent: Private DNS enforced (hostname redacted)",
                                         tripsKillSwitch = true,
                                     ),
                                 ),
@@ -1233,6 +1274,8 @@ class TunnelForegroundService : Service() {
                 )
                 return
             }
+            // Automap hev→SocksUidBridge needs the live sidecar port (was 0 at TUN start).
+            OnionVpnService.setTorSocksUpstream(sidecar)
             // DNSCrypt force_tcp → TCP DNS on :torDnsPort → sidecar SOCKS RESOLVE
             // (Tor socks-extensions 0xF0 via Arti TorClient::resolve) + DoH fallback.
             OpTrace.step("tunnel", "socks_dns_bootstrap_relay") {
@@ -1295,12 +1338,16 @@ class TunnelForegroundService : Service() {
         val hevSocks = OnionVpnService.hevSocksPort.value
         val hevDns = OnionVpnService.hevDnsCryptPort.value
         val dnsPortExpected = if (useDnsCrypt) activePorts.dnsCryptListenPort else hevDns
-        // ONIONMASQ publishes allocated socks from the Connected intent (pre-sidecar);
-        // match on DNSCrypt listen only for that plane.
+        // ONIONMASQ: after sidecar wire, socks must equal remapped torSocksPort.
+        // HEV: socks+dns match allocated ports AND forwarder still alive.
         val portsOk = if (effectivePlane == TunDataPlane.ONIONMASQ) {
-            OnionVpnService.tunForwarderAlive.value && hevDns == activePorts.dnsCryptListenPort
+            OnionVpnService.tunForwarderAlive.value &&
+                hevDns == activePorts.dnsCryptListenPort &&
+                hevSocks > 0 &&
+                hevSocks == activePorts.torSocksPort
         } else {
-            vpnBridge.hevPortsMatch(activePorts, useDnsCrypt)
+            OnionVpnService.tunForwarderAlive.value &&
+                vpnBridge.hevPortsMatch(activePorts, useDnsCrypt)
         }
         if (!portsOk) {
             failDuringStart(
@@ -1353,13 +1400,25 @@ class TunnelForegroundService : Service() {
             val hasOnDisk = openVpnOverTor.hasProfile()
             if (!hasOnDisk) {
                 Timber.w("OpenVPN-over-Tor enabled but profile file missing — skip")
+                val nextDefault =
+                    if (preferences.firewallDefaultAction == FirewallDefaultAction.ALLOW_OVPN) {
+                        FirewallDefaultAction.ASK
+                    } else {
+                        preferences.firewallDefaultAction
+                    }
                 preferencesStore.update {
-                    it.copy(openVpnProfileConfigured = false, openVpnOverTorEnabled = false)
+                    it.copy(
+                        openVpnProfileConfigured = false,
+                        openVpnOverTorEnabled = false,
+                        firewallDefaultAction = nextDefault,
+                    )
                 }
                 preferences = preferences.copy(
                     openVpnProfileConfigured = false,
                     openVpnOverTorEnabled = false,
+                    firewallDefaultAction = nextDefault,
                 )
+                firewallEngine.clearAllOvpnRules()
                 openVpnOverTor.onUpChanged = null
                 openVpnOverTor.stop()
             } else {
@@ -1413,8 +1472,8 @@ class TunnelForegroundService : Service() {
                 preferences.torNewCircuitPeriodSec,
             )
         }
-        // Classic ControlPort circuit poll — not used on onionmasq (event repository).
-        if (preferences.torEngine.capabilities.circuitInspection && !isOnionmasqPlane()) {
+        // Classic ControlPort circuit poll — Arti has no CIRC events (onionmasq uses event repo).
+        if (preferences.torEngine.capabilities.classicControlPlane) {
             circuitLifecycle.start()
         } else {
             circuitLifecycle.stop()
@@ -1571,7 +1630,7 @@ class TunnelForegroundService : Service() {
     /**
      * Kill-switch: Blocking TUN blackholes **app** packets that cannot be Tor-routed.
      * Tor/DNSCrypt stay alive when [stopTorProcesses] is false so correctly-working
-     * circuits / bidouilles (self-exclusion, dual SocksPorts, FakeDNS) are not torn down.
+     * circuits / bidouilles (self-exclusion, dual SocksPorts, TunDnsMux) are not torn down.
      */
     private suspend fun enterBlockingMode(
         message: String,
@@ -1792,9 +1851,12 @@ class TunnelForegroundService : Service() {
                             val gen = OnionVpnService.nextGeneration()
                             vpnBridge.startConnected(preferences, ports!!, gen)
                             if (vpnBridge.waitForConnected(gen, ports)) {
-                                OnionVpnService.markForwarderAlive()
-                                Timber.i("TUN forwarder rebound after forwarder death")
-                                return@withLock
+                                if (isOnionmasqPlane() && !rewireOnionmasqAfterConnectedRebind(ports)) {
+                                    Timber.e("onionmasq rebind missing sidecar wire — kill-switch")
+                                } else {
+                                    Timber.i("TUN forwarder rebound after forwarder death")
+                                    return@withLock
+                                }
                             }
                         }
                         if (tor.isInMaintenance) {
@@ -1818,10 +1880,10 @@ class TunnelForegroundService : Service() {
     }
 
     /**
-     * hev / all planes: [addDisallowedApplication] is apply-once at establish.
-     * When a Tor-native package is installed/updated/removed, rebind Connected so
-     * BYPASS (and INCLUDE allow-list) stay honest. onionmasq also refreshes
-     * [setExcludedUids] in its own receiver.
+     * hev: [addDisallowedApplication] is apply-once at establish — package install/update
+     * of Tor-native BYPASS apps requires Connected rebind.
+     * onionmasq: [OnionmasqTunForwarder] refreshes [setExcludedUids] in its own receiver;
+     * do not rebind here (would tear Automap bridge / lose sidecar upstream wiring).
      */
     private fun registerTorNativePackageReceiver() {
         unregisterTorNativePackageReceiver()
@@ -1872,6 +1934,10 @@ class TunnelForegroundService : Service() {
     }
 
     private fun scheduleTorNativePackageRebind() {
+        if (isOnionmasqPlane()) {
+            Timber.d("Tor-native package change on onionmasq — UID refresh owns BYPASS (no rebind)")
+            return
+        }
         torNativePackageRebindJob?.cancel()
         torNativePackageRebindJob = scope.launch {
             delay(TOR_NATIVE_PACKAGE_REBIND_DEBOUNCE_MS)
@@ -1882,15 +1948,15 @@ class TunnelForegroundService : Service() {
             }
             lifecycleMutex.withLock {
                 if (_snapshot.value.phase != TunnelPhase.Connected) return@withLock
+                if (isOnionmasqPlane()) return@withLock
                 if (tor.isInMaintenance || OnionVpnService.vpnRebinding.value) return@withLock
                 val ports = runtimePorts ?: return@withLock
-                val socksUp = isSocksReachable(ports.torSocksPort) || isOnionmasqLive()
-                if (!socksUp && !isOnionmasqLive() && !tor.isRunning()) return@withLock
+                val socksUp = isSocksReachable(ports.torSocksPort)
+                if (!socksUp && !tor.isRunning()) return@withLock
                 Timber.i("Rebinding Connected VPN after Tor-native package change")
                 val gen = OnionVpnService.nextGeneration()
                 vpnBridge.startConnected(preferences, ports, gen)
                 if (vpnBridge.waitForConnected(gen, ports)) {
-                    OnionVpnService.markForwarderAlive()
                     Timber.i("Connected VPN rebound for Tor-native BYPASS update")
                 } else {
                     Timber.w("Tor-native package rebind failed — keeping previous plane")
@@ -2019,9 +2085,8 @@ class TunnelForegroundService : Service() {
                     }
                 }
                 if (ticks % LITE_CONTROL_REFRESH_TICKS == 0 || phase == TunnelPhase.StartingTor) {
-                    if (preferences.torEngine.capabilities.classicControlPlane &&
-                        tor.control.isConnected
-                    ) {
+                    if (preferences.torEngine.capabilities.classicControlPlane) {
+                        // Also runs when disconnected — heals ControlPort after reader EOF.
                         tor.refreshControlHealthLite()
                     }
                 }
@@ -2055,8 +2120,13 @@ class TunnelForegroundService : Service() {
                                 val gen = OnionVpnService.nextGeneration()
                                 vpnBridge.startConnected(preferences, ports!!, gen)
                                 if (vpnBridge.waitForConnected(gen, ports)) {
-                                    OnionVpnService.markForwarderAlive()
-                                    return@withLock
+                                    if (isOnionmasqPlane() &&
+                                        !rewireOnionmasqAfterConnectedRebind(ports)
+                                    ) {
+                                        Timber.e("onionmasq deferred rebind missing sidecar — kill-switch")
+                                    } else {
+                                        return@withLock
+                                    }
                                 }
                             }
                             handleFailure(
@@ -2327,10 +2397,12 @@ class TunnelForegroundService : Service() {
                 ?.let { runCatching { DnsResolverMode.valueOf(it) }.getOrNull() }
                 ?: DnsResolverMode.DNSCRYPT_MUX,
             torEngine = TorEngine.fromPreference(intent.getStringExtra(EXTRA_TOR_ENGINE)),
-            torBridges = intent.getStringExtra(EXTRA_TOR_BRIDGES).orEmpty(),
-            torEntryNodes = intent.getStringExtra(EXTRA_TOR_ENTRY).orEmpty(),
-            torExitNodes = intent.getStringExtra(EXTRA_TOR_EXIT).orEmpty(),
-            torExcludeNodes = intent.getStringExtra(EXTRA_TOR_EXCLUDE).orEmpty(),
+            // OPSEC: bridges / Entry/Exit/Exclude / OVPN Auth never ride Intent extras —
+            // startTunnel() reloads them from DataStore (source of truth).
+            torBridges = "",
+            torEntryNodes = "",
+            torExitNodes = "",
+            torExcludeNodes = "",
             torNewCircuitPeriodSec = intent.getIntExtra(EXTRA_TOR_NEW_CIRCUIT, 30),
             torMaxCircuitDirtinessSec = intent.getIntExtra(EXTRA_TOR_MAX_DIRTINESS, 600),
             dnsCryptRequireNoLog = intent.getBooleanExtra(EXTRA_DNS_NOLOG, true),
@@ -2356,8 +2428,8 @@ class TunnelForegroundService : Service() {
             tunDataPlane = TunDataPlane.fromPreference(intent.getStringExtra(EXTRA_TUN_DATA_PLANE)),
             openVpnOverTorEnabled = intent.getBooleanExtra(EXTRA_OPENVPN_OVER_TOR, false),
             openVpnProfileConfigured = intent.getBooleanExtra(EXTRA_OPENVPN_PROFILE, false),
-            openVpnAuthUser = intent.getStringExtra(EXTRA_OPENVPN_AUTH_USER).orEmpty(),
-            openVpnAuthPassword = intent.getStringExtra(EXTRA_OPENVPN_AUTH_PASSWORD).orEmpty(),
+            openVpnAuthUser = "",
+            openVpnAuthPassword = "",
         )
     }
 

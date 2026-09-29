@@ -102,8 +102,8 @@ object ExitIpValidator {
                     isTor = if (json.has("IsTor")) json.getBoolean("IsTor") else null,
                 )
             } catch (error: Exception) {
-                Timber.w(error, "Tor exit IP check failed")
-                TorCheckResult(null, null, error.message ?: "fetch failed")
+                Timber.w(error, "Tor exit IP check soft-miss")
+                TorCheckResult(null, null, error.message ?: "check.torproject.org unreachable")
             }
         }
     }
@@ -113,11 +113,12 @@ object ExitIpValidator {
         underlying: Set<String>,
     ): ValidationCheck {
         val ip = egress.ip
-        if (ip == null) {
+                if (ip == null) {
             return ValidationCheck(
                 id = "tor.exit.ip",
                 label = "Egress IP is Tor exit (not ISP/LAN)",
                 status = ValidationStatus.Fail,
+                // Soft flake (SOCKS RST / check.torproject timeout) — not a leak signal.
                 detail = egress.error ?: "No IP from check.torproject.org via SOCKS",
                 tripsKillSwitch = false,
             )
@@ -127,7 +128,8 @@ object ExitIpValidator {
                 id = "tor.exit.ip",
                 label = "Egress IP is Tor exit (not ISP/LAN)",
                 status = ValidationStatus.Fail,
-                detail = "Egress $ip is private/local — clearnet leak or misroute",
+                // OPSEC: never embed raw egress/ISP IPs in UI detail / logs.
+                detail = "Egress is private/local — clearnet leak or misroute",
                 tripsKillSwitch = true,
             )
         }
@@ -136,7 +138,7 @@ object ExitIpValidator {
                 id = "tor.exit.ip",
                 label = "Egress IP is Tor exit (not ISP/LAN)",
                 status = ValidationStatus.Fail,
-                detail = "Egress $ip equals device non-VPN address — ISP IP leak",
+                detail = "Egress equals device non-VPN address — ISP IP leak",
                 tripsKillSwitch = true,
             )
         }
@@ -145,7 +147,11 @@ object ExitIpValidator {
             id = "tor.exit.ip",
             label = "Egress IP is Tor exit (not ISP/LAN)",
             status = ValidationStatus.Pass,
-            detail = "exit=$ip; deviceNonVpn=${underlyingPublic.ifEmpty { listOf("none-public") }}",
+            detail = if (underlyingPublic.isEmpty()) {
+                "exit≠ISP (no public non-VPN address seen)"
+            } else {
+                "exit≠ISP (${underlyingPublic.size} public non-VPN address(es))"
+            },
             tripsKillSwitch = true,
         )
     }
@@ -156,14 +162,14 @@ object ExitIpValidator {
                 id = "tor.exit.istor",
                 label = "check.torproject.org IsTor=true",
                 status = ValidationStatus.Pass,
-                detail = "API confirms Tor exit IP=${egress.ip}",
+                detail = "API confirms Tor exit",
                 tripsKillSwitch = true,
             )
             false -> ValidationCheck(
                 id = "tor.exit.istor",
                 label = "check.torproject.org IsTor=true",
                 status = ValidationStatus.Fail,
-                detail = "IsTor=false IP=${egress.ip} — Soft warn (API/unlisted exit); " +
+                detail = "IsTor=false — Soft warn (API/unlisted exit); " +
                     "Hard only if egress equals ISP (tor.exit.ip)",
                 tripsKillSwitch = false,
             )
@@ -222,10 +228,11 @@ object ExitIpValidator {
                 id = "vpn.address.not.public",
                 label = "VPN addresses are virtual (not ISP)",
                 status = ValidationStatus.Pass,
+                // OPSEC: never embed raw VPN / link addresses in Status UI detail.
                 detail = buildString {
-                    append("vpnAddrs=$vpnAddrs")
+                    append("vpnAddrs=${vpnAddrs.size} (all private/virtual)")
                     if (unexpectedPrivate.isNotEmpty()) {
-                        append(" notePrivate=$unexpectedPrivate")
+                        append("; unexpectedPrivate=${unexpectedPrivate.size}")
                     }
                 },
                 tripsKillSwitch = true,
@@ -235,7 +242,7 @@ object ExitIpValidator {
                 id = "vpn.address.not.public",
                 label = "VPN addresses are virtual (not ISP)",
                 status = ValidationStatus.Fail,
-                detail = "publicOnVpn=$publicOnVpn vpnAddrs=$vpnAddrs",
+                detail = "publicOnVpn=${publicOnVpn.size} of vpnAddrs=${vpnAddrs.size} — ISP/public on VPN iface",
                 tripsKillSwitch = true,
             )
         }

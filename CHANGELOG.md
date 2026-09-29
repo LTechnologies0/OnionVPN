@@ -4,6 +4,124 @@ All notable changes to OnionVPN are documented here.
 
 ## [Unreleased]
 
+## [0.3.82] — 2026-09-15
+
+### SoftEther / SOCKS plane fail-closed
+- No-UID SYN: stamp live plane on 5-tuple (prevents mid-flow Tor sticky SoftEther→Tor flip).
+- HEV UID miss on CONNECT → refuse (parity with PAC; no shared `uunknown` IsolateSOCKSAuth).
+- HEV↔bridge session USER/PASS (random per start) — blocks local stamp theft without Waydroid peer-UID breakage.
+
+## [0.3.81] — 2026-09-15
+
+### OPSEC
+- OVPN management `>FATAL:` → Status/Timber without raw SoftEther remote payload.
+
+## [0.3.80] — 2026-09-15
+
+### OPSEC / log & Status scrub
+- OVPN management: event/state kind only (no SoftEther remote in STATE / Auth fatals).
+- onionmasq circuit repo: uid/hops/err only (no dst/proxy).
+- Data-plane silent: Status says Via OVPN down (DENY), not “using Tor”.
+- RESOLVE/CONNECT/ASK/DNS/PAC/NAT/SOCKS/UID-bridge: lengths or success-only (no host/IP/QNAME/SNI).
+- Firewall answer/queue/remap/upsert: no dest host in Timber.
+- Private DNS kill path: hostname redacted in Timber + Status detail.
+- AndroidVpnInspector / SystemLeakInspector / TorPathValidator: ValidationCheck details counts-only / no onion hostname.
+- DomainReputation / GeoIP fetch: no mirror URLs; SOCKS session aborts class-name only.
+- PAC listen/upstream logs: no pacUrl; Socks5Client probe/handshake without proxy host.
+
+## [0.3.79] — 2026-09-15
+
+### SoftEther plane fail-closed
+- Mid-flow UID-miss with OpenVPN-over-Tor enabled → DENY (no Tor exit invent when tuple stamp missing).
+
+## [0.3.78] — 2026-09-15
+
+### SoftEther plane fail-closed
+- Mid-flow without live tuple/flow stamp: never invent ALLOW_OVPN from sticky rules (DENY).
+- Flow-cache trim never drops ALLOW_OVPN/DENY entries (Tor-only under pressure).
+- Socks5Client: refuse non-loopback dial when protect is unwired (fail-closed).
+
+## [0.3.77] — 2026-09-15
+
+### SoftEther plane fail-closed
+- SYN/new-flow `coerceLiveOvpn` / OVPN-default: OVPN-down → DENY (align TunDnsMux drop; no SoftEther→Tor exit swap).
+
+### OPSEC
+- SOCKS5 / DNSPort / control RESOLVE logs: success-only (no host→IP).
+
+## [0.3.76] — 2026-09-15
+
+### Clearnet / plane fail-closed
+- OpenVPN-over-Tor refuses start when `protectSocket` is unwired (never ack PROTECTFD as success).
+- Mid-flow after flow-cache trim: sticky OVPN stays OVPN while UP; OVPN-down → DENY (no Tor exit swap).
+- OVPN-default mid-flow miss → DENY (never invent Tor plane on SoftEther sessions).
+- Moat bridges: Tor SOCKS only — clearnet HTTPS path removed; Settings toggle locked on.
+- Debug tunnel start no longer sticky-enables `allowAdbClearnetLeak` (preserves user opt-out).
+
+### OPSEC
+- OpenVPN rewrite `verb 1`; stdout pump redacts IPs/hosts/auth (drops BYTECOUNT).
+- TorControlEventFormatter: ORCONN target + ADDRMAP fully redacted; sink skips those events.
+
+## [0.3.75] — 2026-09-05
+
+### Firewall / OVPN plane stickiness
+- Automap/`.onion` never Via SoftEther (engine stickyIntent + TunDnsMux Tor divert).
+- Persist ALLOW_OVPN intent in decisionCache; flowCache stores live plane (no mid-TCP Tor↔OVPN flip).
+- Mid-flow sticky rule/decision and UID-miss fallback never invent SoftEther (`ALLOW_OVPN` → Tor).
+- Failed OVPN `offer` drops (no mid-flow Tor flip); unhealthy OVPN status is Starting not Up.
+- TEMPORARY: no sticky decisionCache; schedule forget flowKey+tupleKey at expiry (StateFlow never emits on wall-clock).
+- Rules collect skips dest-wipe for TEMPORARY; SESSION/PERMANENT stamp tupleKey for mid-flow UID-miss.
+- SOCKS/PAC prompts hide Via OVPN (`socksPlane`); answers force Tor.
+- Disable OpenVPN-over-Tor / clear missing profile demotes ALLOW_OVPN→ASK and clears Via OVPN rules.
+- answerPrompt Automap demotion uses matched request only (no queue-rotate race).
+- FirewallCacheKeys flow/tuple: mix IPv6 src/dst host strings (ints stay 0 → collisions).
+
+### OpenVPN-over-Tor
+- OvpnIpNat: separate TCP/UDP conntrack maps (XOR proto into IP bits collided across remotes).
+- Config rewrite: strip all `proto` → one `tcp4-client`; `tcp6`/`tcp-client` → `tcp`; strip compress + `allow-compression no` (VORACLE).
+- PROTECTFD cancel on protect fail; Auth `writeCmd` redacts; SNAT/DNAT logs length-only.
+
+### Tor ControlPort / TUN / PAC
+- Little-t: reconnect ControlSocket after reader death (`ensureClassicControlConnected` in health-lite, `requireClassic`, NEWNYM).
+- TunDnsMux: track PFD.dup owners and close on stop; IPv6 DNS snoop srcPort offset 40.
+- DnsCryptSocksBridge: refuse SOCKS CONNECT to IPv6 literals (DNSCrypt A-only).
+
+### OPSEC / sensitive leakage
+- ExitIpValidator / vpn.address.not.public details: counts only (no raw exit/ISP/link IPs).
+- TorControlEventFormatter truncates `$HEX40` fingerprints before TunnelLogBuffer.
+- ACTION_START Intent: bridges, Entry/Exit/Exclude, OVPN Auth never on extras (DataStore + process-local bridge handoff).
+- Firewall prompt notif: VISIBILITY_SECRET + no dest/DPI on shade.
+- SocksUidBridge / onionmasq connection logs: uid (+ hops/err) only — no dest host:port.
+- OpenVPN Tor-RESOLVE pin log: success only (no host/IP).
+
+## [0.3.74] — 2026-09-04
+
+### .onion on C Tor and Arti
+- Automap TCP divert on onionmasq → SocksUidBridge → sidecar SOCKS5A; rebuild
+  `libonionmasq_mobile.so` with `connect_to_onion_services` + `allow_onion_addrs`.
+- Arti + hev selectable (arti-mobile); onionmasq validation requires Automap upstream == sidecar.
+
+### Consistency (firewall / planes / ports)
+- Blocking establish clears SOCKS publish gate (`stopForwarder`) — no stale hevSocksPort on blackhole TUN.
+- SOCKS decision keys namespaced (`PACL`) — PAC/hev ALLOW_TOR no longer poisons TUN Via OVPN.
+- CircuitLifecycle gated on `classicControlPlane` (not Arti `circuitInspection`).
+- ArtiSocksRoleMux hot-swaps upstream on sidecar rebind (OpenVPN listen FD kept).
+- Arti Settings copy: “role-mux SocksPorts” (not native SessionGroup).
+- Via OVPN ASK when OVPN down stores ALLOW_TOR (was DENY blackhole).
+- Sticky ALLOW_OVPN rules/cache demote to Tor when SNAT/health is down (`coerceLiveOvpn`).
+- `setTorSocksUpstream(0)` clears published `hevSocksPort` to -1; positive publish only when bridge updater exists.
+- onionmasq Connected wait is DNSCrypt-listen-aware; socks stay -1 until sidecar wired.
+- startForwarder failure / onFatal clear ports → -1 (fail-closed).
+- `waitForConnected` / `hevPortsMatch` / `planePortsMatch` require `tunForwarderAlive`.
+- onionmasq forwarder rebind rewires sidecar (Automap + DNSCrypt + PAC); Tor-native package rebind is HEV-only.
+- Downtime restore on onionmasq uses live sidecar only (no stale remapped port).
+- Automap: firewall DENY when hostname unknown; SYN brief cache retry; remap cancels ASK.
+- SOCKS flow-cache entries go through `coerceSocksVerdict` (OVPN demotion).
+- Hard-kill IDs: `uid.forwarder.wiring`, `onionmasq.plane.wiring` (drop unused hev.* aliases).
+- Debug tunnel start resolves plane via `TunDataPlaneFactory` (no onionmasq without `.so`).
+- Arti chip defaults to onionmasq when native present; hev remains explicit opt-in.
+- Hide dead FakeDNS Settings mode; CLOSECIRCUIT 552 → debug (no Error spam).
+
 ## [0.3.73] — 2026-08-27
 
 ### MITM hardening (in-scope)

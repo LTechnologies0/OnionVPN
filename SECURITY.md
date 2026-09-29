@@ -8,7 +8,7 @@ Report vulnerabilities privately via GitHub **Security → Advisories → New dr
 
 - Traffic leak outside Tor while Connected
 - Kill-switch bypass in Blocking state
-- DNS bypass of DNSCrypt / FakeDNS path
+- DNS bypass of DNSCrypt / TunDnsMux path
 - Credential or keystore exposure in CI or repo
 
 ## CVE tracking

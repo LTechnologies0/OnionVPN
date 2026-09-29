@@ -60,7 +60,9 @@ import ltechnologies.onionphone.onionvpn.core.model.TunnelPreferences
 import ltechnologies.onionphone.onionvpn.core.model.VpnAppRoutingMode
 import ltechnologies.onionphone.onionvpn.core.tor.config.TorBridgeConfig
 import ltechnologies.onionphone.onionvpn.core.vpn.OnionVpnService
+import ltechnologies.onionphone.onionvpn.core.vpn.firewall.FirewallBridge
 import ltechnologies.onionphone.onionvpn.core.vpn.forwarder.TunDataPlaneFactory
+import ltechnologies.onionphone.onionvpn.firewall.InteractiveFirewallEngine
 import ltechnologies.onionphone.onionvpn.threat.repo.DomainReputationRepository
 import ltechnologies.onionphone.onionvpn.ui.components.SectionHeader
 import ltechnologies.onionphone.onionvpn.ui.components.TonalSection
@@ -434,12 +436,13 @@ fun SettingsScreen(
                             ".onion / .exit: app Automap synth → virtual IP in " +
                                 "${TunnelEndpoints.VIRTUAL_ADDR_NETWORK}/" +
                                 "${TunnelEndpoints.VIRTUAL_ADDR_PREFIX_LEN}, " +
-                                "then SOCKS5A with the real hostname (no native DNSPort Automap).\n",
+                                "then SOCKS5A with the real hostname " +
+                                "(hev path, or onionmasq Automap divert → SOCKS sidecar).\n",
                         )
                     else ->
                         append(".onion / .exit: engine-specific Automap path.\n")
                 }
-                append("FakeDNS option is legacy — both modes divert UDP/53 through TunDnsMux.")
+                append("UDP/53 always diverts through TunDnsMux → DNSCrypt (mapdns off).")
             },
         )
         Row(
@@ -447,15 +450,14 @@ fun SettingsScreen(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             FilterChip(
-                selected = local.dnsResolverMode == DnsResolverMode.DNSCRYPT_MUX,
+                selected = local.dnsResolverMode == DnsResolverMode.DNSCRYPT_MUX ||
+                    local.dnsResolverMode == DnsResolverMode.FAKE_IP_SOCKS5A,
                 onClick = { commit(local.copy(dnsResolverMode = DnsResolverMode.DNSCRYPT_MUX)) },
                 label = { Text("DNSCrypt over Tor") },
             )
-            FilterChip(
-                selected = local.dnsResolverMode == DnsResolverMode.FAKE_IP_SOCKS5A,
-                onClick = { commit(local.copy(dnsResolverMode = DnsResolverMode.FAKE_IP_SOCKS5A)) },
-                label = { Text("Legacy FakeDNS→DNSCrypt") },
-            )
+            // Legacy FakeDNS→SOCKS5A is no longer offered: HevSocks5TunForwarder always
+            // diverts UDP/53 to DNSCrypt (mapdns off). Stale FAKE_IP prefs still select
+            // this chip and commit to DNSCRYPT_MUX on tap / next Settings save.
         }
 
         Surface(
@@ -543,11 +545,21 @@ fun SettingsScreen(
         PrefSwitch(
             label = "Enable firewall",
             checked = local.firewallEnabled,
-            onChecked = { commit(local.copy(firewallEnabled = it)) },
+            onChecked = {
+                if (!it && local.openVpnOverTorEnabled) {
+                    // Prefs coerce firewall on when OVPN is enabled — match UI to that.
+                    return@PrefSwitch
+                }
+                commit(local.copy(firewallEnabled = it))
+            },
         )
         Text(
-            text = "Prompts offer Via Tor / Via OVPN (when OpenVPN-over-Tor is up) / Deny. " +
-                "Release default On; debug Off.",
+            text = if (local.openVpnOverTorEnabled) {
+                "Required while OpenVPN-over-Tor is on (Via OVPN needs interactive routing)."
+            } else {
+                "Prompts offer Via Tor / Via OVPN (when OpenVPN-over-Tor is up) / Deny. " +
+                    "Release default On; debug Off."
+            },
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -607,14 +619,33 @@ fun SettingsScreen(
             subtitle = "Optional TCP OpenVPN client reaches the VPN server via Tor SOCKS so " +
                 "websites see the VPN egress IP (not a Tor exit). Device DNS stays DNSCrypt-over-Tor. " +
                 "Needs a TCP .ovpn + libovpnexec.so (ics-openvpn). UDP-only profiles are rejected. " +
-                "Works with C Tor and Arti. Via OVPN appears only after CONNECTED+OPENTUN. " +
+                "Works with C Tor and Arti. Via OVPN appears only after CONNECTED+OPENTUN " +
+                "and a healthy data plane (no SNAT blackhole). " +
                 "Changing this restarts the tunnel.",
         )
         PrefSwitch(
             label = "Enable OpenVPN over Tor",
             checked = local.openVpnOverTorEnabled,
             onChecked = {
-                commit(local.copy(openVpnOverTorEnabled = it), restart = true)
+                if (!it) {
+                    // Leave Via OVPN default / sticky rules would blackhole or lie.
+                    val nextDefault =
+                        if (local.firewallDefaultAction == FirewallDefaultAction.ALLOW_OVPN) {
+                            FirewallDefaultAction.ASK
+                        } else {
+                            local.firewallDefaultAction
+                        }
+                    (FirewallBridge.engine as? InteractiveFirewallEngine)?.clearAllOvpnRules()
+                    commit(
+                        local.copy(
+                            openVpnOverTorEnabled = false,
+                            firewallDefaultAction = nextDefault,
+                        ),
+                        restart = true,
+                    )
+                } else {
+                    commit(local.copy(openVpnOverTorEnabled = true), restart = true)
+                }
             },
         )
         Text(
@@ -681,10 +712,19 @@ fun SettingsScreen(
                                     .clearProfile()
                             }
                             ovpnImportError = null
+                            // Same cleanup as PrefSwitch off — else ALLOW_OVPN default + sticky Via OVPN linger.
+                            val nextDefault =
+                                if (local.firewallDefaultAction == FirewallDefaultAction.ALLOW_OVPN) {
+                                    FirewallDefaultAction.ASK
+                                } else {
+                                    local.firewallDefaultAction
+                                }
+                            (FirewallBridge.engine as? InteractiveFirewallEngine)?.clearAllOvpnRules()
                             commit(
                                 local.copy(
                                     openVpnProfileConfigured = false,
                                     openVpnOverTorEnabled = false,
+                                    firewallDefaultAction = nextDefault,
                                     openVpnAuthUser = "",
                                     openVpnAuthPassword = "",
                                 ),
@@ -836,10 +876,15 @@ fun SettingsScreen(
                     commit(
                         local.copy(
                             torEngine = TorEngine.ARTI,
-                            tunDataPlane = if (TunDataPlaneFactory.isOnionmasqNativePresent(context)) {
-                                TunDataPlane.ONIONMASQ
-                            } else {
-                                TunDataPlane.HEV_SOCKS
+                            // Default onionmasq when native is present; keep explicit HEV
+                            // if the user already selected hev on Arti.
+                            tunDataPlane = when {
+                                local.torEngine == TorEngine.ARTI &&
+                                    local.tunDataPlane == TunDataPlane.HEV_SOCKS ->
+                                    TunDataPlane.HEV_SOCKS
+                                TunDataPlaneFactory.isOnionmasqNativePresent(context) ->
+                                    TunDataPlane.ONIONMASQ
+                                else -> TunDataPlane.HEV_SOCKS
                             },
                         ),
                         restart = true,
@@ -851,11 +896,11 @@ fun SettingsScreen(
         }
         SectionHeader(
             title = "TUN data plane",
-            subtitle = "Arti always uses onionmasq when libonionmasq_mobile.so is present " +
-                "(single TorClient). C Tor always uses hev→SOCKS. HEV+Arti only if the " +
-                "native library is missing.",
+            subtitle = "C Tor always uses hev→SOCKS (native Automap). Selecting Arti defaults " +
+                "to onionmasq when libonionmasq_mobile.so is present; hev SOCKS (Arti) stays " +
+                "available for Automap→SOCKS5A via arti-mobile.",
         )
-        val artiForcesOnionmasq =
+        val artiWithOnionmasq =
             local.torEngine == TorEngine.ARTI && onionmasqNative
         Row(
             modifier = Modifier
@@ -864,21 +909,28 @@ fun SettingsScreen(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             FilterChip(
-                selected = local.tunDataPlane == TunDataPlane.HEV_SOCKS && !artiForcesOnionmasq,
+                selected = local.tunDataPlane == TunDataPlane.HEV_SOCKS,
                 onClick = {
                     commit(
                         local.copy(
                             tunDataPlane = TunDataPlane.HEV_SOCKS,
-                            torEngine = TorEngine.LITTLE_T,
+                            // Keep current engine — Arti+hev is a valid .onion path.
                         ),
                         restart = true,
                     )
                 },
                 enabled = controlsEnabled,
-                label = { Text("hev SOCKS (C Tor)") },
+                label = {
+                    Text(
+                        when (local.torEngine) {
+                            TorEngine.ARTI -> "hev SOCKS (Arti)"
+                            else -> "hev SOCKS (C Tor)"
+                        },
+                    )
+                },
             )
             FilterChip(
-                selected = local.tunDataPlane == TunDataPlane.ONIONMASQ || artiForcesOnionmasq,
+                selected = local.tunDataPlane == TunDataPlane.ONIONMASQ,
                 onClick = {
                     commit(
                         local.copy(
@@ -893,16 +945,25 @@ fun SettingsScreen(
                     Text(
                         when {
                             !onionmasqNative -> "onionmasq (lib missing)"
-                            artiForcesOnionmasq -> "onionmasq (Arti)"
-                            else -> "onionmasq"
+                            else -> "onionmasq (Arti)"
                         },
                     )
                 },
             )
         }
-        if (artiForcesOnionmasq) {
+        if (artiWithOnionmasq && local.tunDataPlane == TunDataPlane.ONIONMASQ) {
             Text(
-                text = "Arti is locked to onionmasq on this build — hev is not used.",
+                text = ".onion uses Automap divert → SOCKS sidecar (needs patched " +
+                    "libonionmasq_mobile.so with connect_to_onion_services). " +
+                    "If .onion fails, switch to hev SOCKS (Arti).",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        if (local.torEngine == TorEngine.ARTI && local.tunDataPlane == TunDataPlane.HEV_SOCKS) {
+            Text(
+                text = "Arti + hev uses arti-mobile SOCKS with allow_onion_addrs " +
+                    "(Automap synth → SOCKS5A). Parallel TorClient vs onionmasq.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -1119,13 +1180,12 @@ fun SettingsScreen(
         }
         PrefSwitch(
             label = "Request bridges via Tor",
-            checked = local.moatRequestViaTor,
-            onChecked = { commit(local.copy(moatRequestViaTor = it), restart = false) },
+            checked = true,
+            onChecked = { /* Moat is Tor-only — clearnet path removed */ },
         )
         Text(
-            text = "On (default) = Moat through Tor SOCKS when the tunnel is up — " +
-                "avoids clearnet TLS MitM of bridges.torproject.org. " +
-                "Off = clearnet HTTPS (only if you accept local MitM risk).",
+            text = "Moat always uses Tor SOCKS when the tunnel is up — " +
+                "clearnet HTTPS to bridges.torproject.org is refused (ISP + local MitM).",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -1189,9 +1249,9 @@ fun SettingsScreen(
                                     scope.launch {
                                         runCatching {
                                             val socks = torSocksPort()
+                                                ?: error("Tor SOCKS not ready — start the tunnel first")
                                             val outcome = MoatCircumventionClient.fetchBridges(
                                                 transport = transport,
-                                                viaTor = local.moatRequestViaTor || socks != null,
                                                 socksPort = socks,
                                             )
                                             val normalized = TorBridgeConfig.parseLines(

@@ -52,10 +52,13 @@ enum class TorEngine {
             }
             if (c.socksAuthIsolation) {
                 append(
-                    if (c.multiSocksSessionGroups) {
-                        "Per-UID SOCKS-auth + distinct SessionGroup SocksPorts. "
-                    } else {
-                        "Per-UID SOCKS-auth on a shared SocksPort (no SessionGroups). "
+                    when {
+                        c.multiSocksSessionGroups && c.classicControlPlane ->
+                            "Per-UID SOCKS-auth + distinct SessionGroup SocksPorts. "
+                        c.multiSocksSessionGroups ->
+                            "Per-UID SOCKS-auth + distinct role-mux SocksPorts. "
+                        else ->
+                            "Per-UID SOCKS-auth on a shared SocksPort (no SessionGroups). "
                     },
                 )
             }

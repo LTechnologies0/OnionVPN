@@ -38,6 +38,7 @@ class AntiLeakHardKillSwitchIdsTest(private val id: String) {
             "dnscrypt.config.missing",
             "dns.mode.mapdns",
             "uid.forwarder.wiring",
+            "onionmasq.plane.wiring",
             "tor.socks",
             "vpn.not.established",
             "android.dns.private",

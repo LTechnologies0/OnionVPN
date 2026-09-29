@@ -13,8 +13,7 @@ internal object FirewallCacheKeys {
 
     fun tupleFlowKey(info: IpPacketInfo): Long {
         var h = 0L
-        h = h * MIX + (info.srcIpInt.toLong() and 0xffffffffL)
-        h = h * MIX + (info.dstIpInt.toLong() and 0xffffffffL)
+        h = mixAddrs(h, info)
         h = h * MIX + info.srcPort
         h = h * MIX + info.dstPort
         h = h * MIX + info.protocol
@@ -23,16 +22,34 @@ internal object FirewallCacheKeys {
 
     fun flowKey(uid: Int, info: IpPacketInfo): Long {
         var h = uid.toLong()
-        h = h * MIX + (info.srcIpInt.toLong() and 0xffffffffL)
-        h = h * MIX + (info.dstIpInt.toLong() and 0xffffffffL)
+        h = mixAddrs(h, info)
         h = h * MIX + info.srcPort
         h = h * MIX + info.dstPort
         h = h * MIX + info.protocol
         return h
     }
 
-    fun decisionKey(uid: Int, matchDest: String, info: IpPacketInfo): Long =
-        socksDecisionKey(uid, matchDest, info.dstPort, info.protocol)
+    /** IPv4 ints on hot path; IPv6 must mix host strings (srcIpInt/dstIpInt stay 0). */
+    private fun mixAddrs(h0: Long, info: IpPacketInfo): Long {
+        var h = h0
+        if (info.isIpv6) {
+            h = h * MIX + info.srcIp.hashCode().toLong()
+            h = h * MIX + info.dstIp.hashCode().toLong()
+            h = h * MIX + 6L
+        } else {
+            h = h * MIX + (info.srcIpInt.toLong() and 0xffffffffL)
+            h = h * MIX + (info.dstIpInt.toLong() and 0xffffffffL)
+        }
+        return h
+    }
+
+    fun decisionKey(uid: Int, matchDest: String, info: IpPacketInfo): Long {
+        var h = uid.toLong()
+        h = h * MIX + matchDest.lowercase().hashCode().toLong()
+        h = h * MIX + info.dstPort
+        h = h * MIX + info.protocol
+        return h
+    }
 
     fun socksFlowKey(uid: Int, matchDest: String, destPort: Int): Long {
         var h = uid.toLong()
@@ -43,11 +60,13 @@ internal object FirewallCacheKeys {
         return h
     }
 
+    /** Namespaced separately from TUN [decisionKey] — SOCKS ALLOW_TOR must not poison Via OVPN. */
     fun socksDecisionKey(uid: Int, matchDest: String, destPort: Int, protocol: Int): Long {
         var h = uid.toLong()
         h = h * MIX + matchDest.lowercase().hashCode().toLong()
         h = h * MIX + destPort
         h = h * MIX + protocol
+        h = h * MIX + PACL
         return h
     }
 

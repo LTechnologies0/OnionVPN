@@ -140,7 +140,7 @@ internal object DnsCryptReadiness {
         if (error is SocketTimeoutException) {
             Timber.v("DNSCrypt probe %s:%d → %s", kind, port, label)
         } else {
-            Timber.d("DNSCrypt probe %s:%d → %s (%s)", kind, port, label, error.message)
+            Timber.d("DNSCrypt probe %s:%d → %s", kind, port, label)
         }
     }
 

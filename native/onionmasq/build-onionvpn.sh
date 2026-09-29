@@ -20,7 +20,7 @@ cd "$OM_SRC"
 
 # OnionVPN patches (idempotent via git apply --check when already applied).
 PATCH_DIR="$ROOT/native/onionmasq"
-for patch in socks-sidecar.patch safe-uninit-jni.patch; do
+for patch in socks-sidecar.patch safe-uninit-jni.patch allow-onion-addrs.patch; do
   if [[ -f "$PATCH_DIR/$patch" ]]; then
     if git apply --check "$PATCH_DIR/$patch" 2>/dev/null; then
       git apply "$PATCH_DIR/$patch"

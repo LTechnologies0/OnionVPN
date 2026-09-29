@@ -2,7 +2,6 @@ package ltechnologies.onionphone.onionvpn.core.vpn.forwarder
 
 import android.content.Context
 import android.os.ParcelFileDescriptor
-import android.system.Os
 import java.io.FileDescriptor
 import java.io.FileInputStream
 import java.io.FileOutputStream
@@ -38,6 +37,8 @@ import timber.log.Timber
  * - Non-DNS UDP / ICMP / multicast → blackhole (force apps onto TCP; Tor has no UDP)
  * - IPv4+IPv6 TCP → hev → Tor SOCKS (clearnet IPv6 TCP blackholed except Automap ULA)
  * - IPv4 TCP → firewall check → hev engine (UID stamped into [TcpFlowUidIndex] for SocksUidBridge)
+ * - Optional [automapHevFd]: Automap TCP only → secondary hev→[SocksUidBridge]→SOCKS5A
+ *   (onionmasq plane: smoltcp never sees the synth IP — needs hostname rewrite)
  *
  * DoS / ARM notes:
  * - DNS work uses a **bounded** pool + queue (never unbounded LinkedBlockingQueue).
@@ -63,6 +64,11 @@ class TunDnsMux(
      * instead of querying Tor DNSPort (Arti DNS proxy has no AutomapHostsOnResolve).
      */
     private val synthesizeOnionAutomap: Boolean = false,
+    /**
+     * When set (onionmasq + Automap synth), TCP to VirtualAddrNetwork goes here instead of
+     * [hevFd], so [SocksUidBridge] can SOCKS5A-rewrite to the real `.onion` hostname.
+     */
+    private val automapHevFd: ParcelFileDescriptor? = null,
     private val onFatal: ((Throwable) -> Unit)? = null,
 ) {
     private val ownerResolver = ConnectionOwnerResolver(context)
@@ -70,13 +76,25 @@ class TunDnsMux(
     private val generation = AtomicLong(0)
     private var tunToHev: Thread? = null
     private var hevToTun: Thread? = null
+    private var automapHevToTun: Thread? = null
     private val tunWriteLock = Any()
     private val hevWriteLock = Any()
+    private val automapWriteLock = Any()
 
     private var tunIn: FileInputStream? = null
     private var tunOut: FileOutputStream? = null
     private var hevIn: FileInputStream? = null
     private var hevOut: FileOutputStream? = null
+    private var automapHevIn: FileInputStream? = null
+    private var automapHevOut: FileOutputStream? = null
+    /** Os.dup / PFD.dup owners — FIS/FOS(FileDescriptor) do not close the underlying fd. */
+    private val ownedDups = java.util.concurrent.CopyOnWriteArrayList<ParcelFileDescriptor>()
+
+    private fun dupOwned(src: ParcelFileDescriptor): FileDescriptor {
+        val copy = src.dup()
+        ownedDups.add(copy)
+        return copy.fileDescriptor
+    }
 
     private val dnsCryptAddress: InetAddress = InetAddress.getByName(dnsCryptHost)
     private val torDnsAddress: InetAddress = InetAddress.getByName(torDnsHost)
@@ -104,10 +122,12 @@ class TunDnsMux(
         val vpnDns = InetAddress.getByName(vpnDnsAddress).address
         // Dup FDs so each stream owns a distinct OS fd — FIS+FOS on the same
         // FileDescriptor close the same underlying fd twice (UAF / wrong-fd reuse).
-        val localTunOut = FileOutputStream(dupOwned(tunFd.fileDescriptor))
-        val localHevOut = FileOutputStream(dupOwned(hevFd.fileDescriptor))
+        val localTunOut = FileOutputStream(dupOwned(tunFd))
+        val localHevOut = FileOutputStream(dupOwned(hevFd))
+        val localAutomapOut = automapHevFd?.let { FileOutputStream(dupOwned(it)) }
         tunOut = localTunOut
         hevOut = localHevOut
+        automapHevOut = localAutomapOut
         FirewallBridge.injectToVpnTun = { packet, length ->
             synchronized(tunWriteLock) {
                 if (running.get() && generation.get() == gen) {
@@ -117,7 +137,7 @@ class TunDnsMux(
         }
 
         tunToHev = Thread({
-            val localTunIn = FileInputStream(dupOwned(tunFd.fileDescriptor))
+            val localTunIn = FileInputStream(dupOwned(tunFd))
             tunIn = localTunIn
             val buf = ByteArray(MTU)
             try {
@@ -189,20 +209,29 @@ class TunDnsMux(
                                         // Drop
                                     }
                                     FirewallVerdict.ALLOW_OVPN -> {
-                                        val sink = FirewallBridge.ovpnPacketSink
-                                        if (sink != null && FirewallBridge.openVpnOverTorUp &&
-                                            sink.offer(buf, n)
-                                        ) {
-                                            // OK
-                                        } else {
-                                            Timber.w("ALLOW_OVPN demoted to Tor — OVPN data plane unavailable")
+                                        // SoftEther cannot SOCKS5A Automap/.onion — always Tor path.
+                                        if (isAutomapDestination(buf, n)) {
+                                            Timber.w("ALLOW_OVPN→Tor — Automap dest cannot use SoftEther")
                                             stampTcpUid(buf, n)
-                                            writeHev(localHevOut, buf, n)
+                                            writeTorTcp(localHevOut, localAutomapOut, buf, n)
+                                        } else {
+                                            val sink = FirewallBridge.ovpnPacketSink
+                                            if (sink != null && FirewallBridge.openVpnOverTorUp &&
+                                                sink.offer(buf, n)
+                                            ) {
+                                                // OK
+                                            } else {
+                                                // Do not mid-flow flip to Tor — same 5-tuple would
+                                                // SYN→Tor then later OVPN after NAT recovers.
+                                                Timber.w(
+                                                    "ALLOW_OVPN drop — OVPN data plane unavailable",
+                                                )
+                                            }
                                         }
                                     }
                                     FirewallVerdict.ALLOW_TOR -> {
                                         stampTcpUid(buf, n)
-                                        writeHev(localHevOut, buf, n)
+                                        writeTorTcp(localHevOut, localAutomapOut, buf, n)
                                     }
                                 }
                             }
@@ -222,7 +251,7 @@ class TunDnsMux(
         }
 
         hevToTun = Thread({
-            val localHevIn = FileInputStream(dupOwned(hevFd.fileDescriptor))
+            val localHevIn = FileInputStream(dupOwned(hevFd))
             hevIn = localHevIn
             val buf = ByteArray(MTU)
             try {
@@ -258,10 +287,49 @@ class TunDnsMux(
             start()
         }
 
+        if (automapHevFd != null) {
+            automapHevToTun = Thread({
+                val localAutomapIn = FileInputStream(dupOwned(automapHevFd))
+                automapHevIn = localAutomapIn
+                val buf = ByteArray(MTU)
+                var emptyStreak = 0
+                try {
+                    while (running.get() && generation.get() == gen) {
+                        val n = localAutomapIn.read(buf)
+                        when {
+                            n < 0 -> break
+                            n == 0 -> {
+                                emptyStreak = (emptyStreak + 1).coerceAtMost(8)
+                                LockSupport.parkNanos(EMPTY_READ_BASE_NS shl emptyStreak)
+                                continue
+                            }
+                            else -> {
+                                emptyStreak = 0
+                                synchronized(tunWriteLock) {
+                                    if (!running.get() || generation.get() != gen) return@synchronized
+                                    localTunOut.write(buf, 0, n)
+                                }
+                            }
+                        }
+                    }
+                } catch (error: Exception) {
+                    if (running.get() && generation.get() == gen) {
+                        Timber.w(error, "TunDnsMux automap-hev→tun stopped")
+                        onFatal?.invoke(error)
+                    }
+                }
+            }, "onionvpn-automap-hev-tun").apply {
+                isDaemon = true
+                priority = Thread.NORM_PRIORITY
+                start()
+            }
+        }
+
         Timber.i(
             "TunDnsMux started dns=$vpnDnsAddress divertDns=$divertDnsToDnsCrypt " +
                 "clearnet→$dnsCryptHost:$dnsCryptPort " +
                 "onion→${if (synthesizeOnionAutomap) "synth-automap" else "$torDnsHost:$torDnsPort"} " +
+                "automapDivert=${automapHevFd != null} " +
                 "pool=$DNS_CORE_THREADS..$DNS_MAX_THREADS q=$DNS_QUEUE_CAP gen=$gen",
         )
     }
@@ -276,14 +344,24 @@ class TunDnsMux(
         }
         runCatching { tunIn?.close() }
         runCatching { hevIn?.close() }
+        runCatching { automapHevIn?.close() }
         runCatching { tunOut?.close() }
         runCatching { hevOut?.close() }
+        runCatching { automapHevOut?.close() }
         tunIn = null
         hevIn = null
+        automapHevIn = null
         tunOut = null
         hevOut = null
+        automapHevOut = null
+        // FIS/FOS(FileDescriptor) leave Os/PFD dups open — close owners explicitly.
+        for (pfd in ownedDups) {
+            runCatching { pfd.close() }
+        }
+        ownedDups.clear()
         runCatching { tunFd.close() }
         runCatching { hevFd.close() }
+        runCatching { automapHevFd?.close() }
         tunToHev?.let { t ->
             t.interrupt()
             runCatching { t.join(2_000L) }
@@ -292,8 +370,13 @@ class TunDnsMux(
             t.interrupt()
             runCatching { t.join(2_000L) }
         }
+        automapHevToTun?.let { t ->
+            t.interrupt()
+            runCatching { t.join(2_000L) }
+        }
         tunToHev = null
         hevToTun = null
+        automapHevToTun = null
         packetPool.clear()
         // FakeDNS IPs are reused across sessions — drop stale IP→host bindings.
         pendingQnames.clear()
@@ -329,6 +412,31 @@ class TunDnsMux(
             if (!running.get()) return
             hevOut.write(buf, 0, n)
         }
+    }
+
+    /**
+     * Clearnet TCP → primary plane ([hevFd] = hev or onionmasq).
+     * Automap virtual destinations → [automapHevFd] when present (SOCKS5A rewrite path).
+     */
+    private fun writeTorTcp(
+        hevOut: FileOutputStream,
+        automapOut: FileOutputStream?,
+        buf: ByteArray,
+        n: Int,
+    ) {
+        if (automapOut != null && isAutomapDestination(buf, n)) {
+            synchronized(automapWriteLock) {
+                if (!running.get()) return
+                automapOut.write(buf, 0, n)
+            }
+            return
+        }
+        writeHev(hevOut, buf, n)
+    }
+
+    private fun isAutomapDestination(buf: ByteArray, n: Int): Boolean {
+        val info = IpPacketParser.parse(buf, n) ?: return false
+        return TunnelEndpoints.isAutomapVirtual(info.dstIp)
     }
 
     /** Stamp SYN (and first-seen dest) so SocksUidBridge can IsolateSOCKSAuth after hev CONNECT. */
@@ -383,8 +491,15 @@ class TunDnsMux(
         val qname = parsed.qname ?: return
         // Pending map by (srcPort, queryId) — 16-bit DNS IDs alone collide under load.
         if (!parsed.isResponse && parsed.queryId >= 0) {
-            val ihl = (packet[0].toInt() and 0x0f) * 4
-            val srcPort = ((packet[ihl].toInt() and 0xff) shl 8) or (packet[ihl + 1].toInt() and 0xff)
+            val version = (packet[0].toInt() ushr 4) and 0x0f
+            val udpOff = when (version) {
+                4 -> (packet[0].toInt() and 0x0f) * 4
+                6 -> 40
+                else -> return
+            }
+            if (length < udpOff + 2) return
+            val srcPort = ((packet[udpOff].toInt() and 0xff) shl 8) or
+                (packet[udpOff + 1].toInt() and 0xff)
             val key = pendingQnameKey(srcPort, parsed.queryId)
             pendingQnames[key] = qname
             if (pendingQnames.size > PENDING_QNAME_CAP) {
@@ -497,7 +612,7 @@ class TunDnsMux(
             val expectId = parsedQuery.queryId
             val route = TorNetPolicy.classifyDnsQuery(qname)
             if (route == TorNetPolicy.DnsRoute.Drop) {
-                Timber.d("DNS query dropped — invalid QNAME q=$qname")
+                Timber.d("DNS query dropped — invalid QNAME")
                 return
             }
             val useTorAutomap = route == TorNetPolicy.DnsRoute.TorAutomap
@@ -541,7 +656,7 @@ class TunDnsMux(
             }
 
             if (useTorAutomap && torDnsPort <= 0) {
-                Timber.d("Onion DNS dropped — Tor DNSPort not configured q=$qname")
+                Timber.d("Onion DNS dropped — Tor DNSPort not configured")
                 return
             }
             val upstreamHost = if (useTorAutomap) torDnsAddress else dnsCryptAddress
@@ -587,7 +702,7 @@ class TunDnsMux(
             }
             if (!matched) {
                 // One shorter retry on a fresh socket — total budget ≈ DNSCrypt timeout + slack.
-                Timber.d("DNS forward timeout/mismatch — retry once q=$qname")
+                Timber.d("DNS forward timeout/mismatch — retry once")
                 scratch.resetSocket()
                 val retrySock = scratch.socket()
                 retrySock.soTimeout = DNS_RETRY_TIMEOUT_MS
@@ -625,7 +740,7 @@ class TunDnsMux(
                 }
             }
             if (!matched) {
-                Timber.d("DNS forward timeout/mismatch — query dropped q=$qname")
+                Timber.d("DNS forward timeout/mismatch — query dropped")
                 return
             }
 
@@ -863,8 +978,5 @@ class TunDnsMux(
 
         private fun pendingQnameKey(srcPort: Int, queryId: Int): Long =
             (srcPort.toLong() and 0xffffL shl 16) or (queryId.toLong() and 0xffffL)
-
-        /** Independent OS fd so stream close does not invalidate sibling streams. */
-        private fun dupOwned(src: FileDescriptor): FileDescriptor = Os.dup(src)
     }
 }

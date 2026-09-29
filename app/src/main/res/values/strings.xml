@@ -14,6 +14,8 @@
     <string name="firewall_prompt_notif_title">%1$s wants to connect</string>
     <!-- %1$s = DPI label (DNS/HTTP/HTTPS/SSH/STUN/…), %2$s = emoji+dest, %3$d = port -->
     <string name="firewall_prompt_notif_text">%1$s → %2$s:%3$d</string>
+    <!-- Lockscreen / dumpsys safe — no destination or DPI. %1$s = protocol label. -->
+    <string name="firewall_prompt_notif_text_safe">%1$s connection request — tap for details</string>
     <string name="firewall_threat_malware">Malware / C2</string>
     <string name="firewall_threat_tracking">Ads / tracking / telemetry</string>
     <string name="domain_lists_title">Domain threat lists</string>

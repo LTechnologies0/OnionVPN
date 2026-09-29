@@ -186,13 +186,23 @@ class UidIsolatingTunForwarder(
                     return
                 }
                 FirewallVerdict.ALLOW_OVPN -> {
-                    val sink = FirewallBridge.ovpnPacketSink
-                    if (sink == null || !FirewallBridge.openVpnOverTorUp || !sink.offer(buf, length)) {
+                    val onionLike = TunnelEndpoints.isOnionLikeHostname(remoteHost) ||
+                        TunnelEndpoints.isAutomapVirtualIpv4(meta.dstIp)
+                    if (onionLike) {
                         VpnForwarderDebug.uidLog {
-                            "ALLOW_OVPN demoted to Tor — OVPN unavailable uid=$uid $remoteHost:${meta.dstPort}"
+                            "ALLOW_OVPN→Tor — onion/Automap uid=$uid $remoteHost:${meta.dstPort}"
                         }
-                        // Fall through to Tor session below.
+                        // Fall through to Tor session.
                     } else {
+                        val sink = FirewallBridge.ovpnPacketSink
+                        if (sink == null || !FirewallBridge.openVpnOverTorUp ||
+                            !sink.offer(buf, length)
+                        ) {
+                            VpnForwarderDebug.uidLog {
+                                "ALLOW_OVPN drop — OVPN unavailable uid=$uid $remoteHost:${meta.dstPort}"
+                            }
+                            return
+                        }
                         return
                     }
                 }

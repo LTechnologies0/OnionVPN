@@ -233,13 +233,17 @@ class DomainReputationRepository @Inject constructor(
                 } catch (error: Exception) {
                     if (isProbeGone(error) || tor.currentProbeSocksPort() == null) {
                         Timber.i(
-                            "Domain source aborted id=%s (Tor SOCKS gone): %s",
+                            "Domain source aborted id=%s (Tor SOCKS gone)",
                             source.id,
-                            error.message,
                         )
                         throw IllegalStateException("Tor probe SOCKS lost mid-update", error)
                     }
-                    Timber.w(error, "Domain source failed id=%s required=%s", source.id, source.required)
+                    Timber.w(
+                        "Domain source failed id=%s required=%s (%s)",
+                        source.id,
+                        source.required,
+                        error.javaClass.simpleName,
+                    )
                     if (source.required && !sourceCacheFile(source.id).isFile) {
                         requiredFailures++
                     }
@@ -314,9 +318,9 @@ class DomainReputationRepository @Inject constructor(
             } catch (error: Exception) {
                 lastError = error
                 if (isProbeGone(error)) {
-                    Timber.d("Blocklist mirror aborted (Tor SOCKS gone): %s", url)
+                    Timber.d("Blocklist mirror aborted (Tor SOCKS gone)")
                 } else {
-                    Timber.d("Blocklist mirror failed: %s (%s)", url, error.message)
+                    Timber.d("Blocklist mirror failed (%s)", error.javaClass.simpleName)
                 }
             }
         }

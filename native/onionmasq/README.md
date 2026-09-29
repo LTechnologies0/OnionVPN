@@ -37,15 +37,24 @@ Re-apply OnionVPN patches after a clean onionmasq clone:
 cd third_party/onionmasq
 git apply ../../native/onionmasq/socks-sidecar.patch
 git apply ../../native/onionmasq/safe-uninit-jni.patch
+git apply ../../native/onionmasq/allow-onion-addrs.patch
 ```
+
+**`.onion` requirements (Arti + onionmasq):**
+1. `onion-service-client` on arti-client (upstream onion-tunnel already enables it).
+2. `allow_onion_addrs(true)` on TorClientConfig (`allow-onion-addrs.patch`).
+3. SOCKS sidecar `StreamPrefs::connect_to_onion_services(Explicit(true))`
+   (`socks-sidecar.patch`) — matches onion-tunnel TUN proxy; without it Arti
+   returns `OnionAddressDisabled`.
+4. App Automap divert: TunDnsMux → hev → SocksUidBridge → sidecar SOCKS5A.
+
+Rebuild `libonionmasq_mobile.so` after changing these patches or OpenVPN-over-Tor
+on Arti+onionmasq will get SOCKS auth failure (`0x01`) / `.onion` CONNECT failures.
 
 SOCKS sidecar auth allowlist (must match `TunnelEndpoints`):
 `probe`/`check`, `dnscrypt`|`dnscrypt-nN`/`resolver`, `pac`/`dnscrypt`,
 `pac{uid}`|`pac{uid}-nN`/`p{uid}`|`p{uid}-nN`, `u{uid}`|`u{uid}-nN`/`p{uid}`|`p{uid}-nN`,
 `onionvpn`/`stream`, `uopenvpn`/`popenvpn` (OpenVPN-over-Tor; also `openvpn`/`overtor` after patch rebuild).
-
-Rebuild `libonionmasq_mobile.so` after changing `socks-sidecar.patch` or OpenVPN-over-Tor
-on Arti+onionmasq will get SOCKS auth failure (`0x01`).
 
 `safe-uninit-jni.patch` converts **all** probe/stop/config/command JNI entry points
 to `try_get()` (no-op / 0 / Java exception) when `init()` has not run. Upstream

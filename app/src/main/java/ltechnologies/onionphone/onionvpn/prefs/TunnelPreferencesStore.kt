@@ -143,6 +143,10 @@ class TunnelPreferencesStore @Inject constructor(
         dnsCryptServerName = this[Keys.dnsServer] ?: "cloudflare",
         dnsResolverMode = this[Keys.dnsMode]
             ?.let { runCatching { DnsResolverMode.valueOf(it) }.getOrNull() }
+            ?.let { mode ->
+                // FakeDNS is a no-op (forwarders always DNSCrypt divert).
+                if (mode == DnsResolverMode.FAKE_IP_SOCKS5A) DnsResolverMode.DNSCRYPT_MUX else mode
+            }
             ?: DnsResolverMode.DNSCRYPT_MUX,
         torEngine = TorEngine.fromPreference(this[Keys.torEngine]),
         torBridges = this[Keys.torBridges].orEmpty(),

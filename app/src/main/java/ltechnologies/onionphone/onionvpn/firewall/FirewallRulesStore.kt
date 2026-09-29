@@ -70,9 +70,9 @@ class FirewallRulesStore @Inject constructor(
             _rules.value = next.filterNot { it.isExpired() }
         }
         Timber.d(
-            "Firewall rule upsert uid=%d host=%s:%d verdict=%s scope=%s",
+            "Firewall rule upsert uid=%d dest_len=%d port=%d verdict=%s scope=%s",
             rule.uid,
-            rule.destHost,
+            rule.destHost.length,
             rule.destPort,
             rule.verdict,
             rule.scope,
