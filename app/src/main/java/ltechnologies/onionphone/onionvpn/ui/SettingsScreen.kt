@@ -401,7 +401,8 @@ fun SettingsScreen(
             title = "UDP / Tor Datagram",
             subtitle = "Tor has no deployed CONNECT_UDP (prop. 339). OnionVPN policy:\n" +
                 "• UDP/53 (IPv4+IPv6) → DNSCrypt over Tor\n" +
-                "• TCP IPv4+IPv6 → hev → Tor SOCKS (ATYP 0x01/0x04)\n" +
+                "• TCP IPv4 → hev → Tor SOCKS (ATYP 0x01)\n" +
+                "• TCP IPv6 Automap/.onion ULA only → Tor SOCKS (ATYP 0x04); other IPv6 TCP blackholed\n" +
                 "• QUIC/HTTP3, STUN/WebRTC, DTLS, WireGuard, mDNS, NTP → blackhole\n" +
                 "• Apps fall back to TCP (HTTP/2, no real UDP)\n" +
                 "• Zero clearnet UDP side-channel, zero remote UDP gateway",
@@ -1101,6 +1102,17 @@ fun SettingsScreen(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
+        PrefSwitch(
+            label = "Request Moat bridges via Tor SOCKS",
+            checked = local.moatRequestViaTor,
+            onChecked = { commit(local.copy(moatRequestViaTor = it), restart = false) },
+        )
+        Text(
+            text = "When off, or when Tor is down, Moat uses the Fastly domain-front " +
+                "(not raw clearnet to bridges.torproject.org).",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
         Text(
             text = "Tor bridges",
             style = MaterialTheme.typography.titleMedium,
@@ -1249,9 +1261,9 @@ fun SettingsScreen(
                                     scope.launch {
                                         runCatching {
                                             val socks = torSocksPort()
-                                                ?: error("Tor SOCKS not ready — start the tunnel first")
                                             val outcome = MoatCircumventionClient.fetchBridges(
                                                 transport = transport,
+                                                viaTor = local.moatRequestViaTor,
                                                 socksPort = socks,
                                             )
                                             val normalized = TorBridgeConfig.parseLines(
@@ -1558,9 +1570,6 @@ fun SettingsScreen(
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        if (!local.dnsCryptForceTcp) {
-            SideEffect { commit(local.copy(dnsCryptForceTcp = true)) }
-        }
         PrefSwitch(
             label = "Require DNSSEC",
             checked = local.dnsCryptRequireDnssec,
@@ -1577,15 +1586,11 @@ fun SettingsScreen(
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        PrefSwitch(
-            label = "Prefer DNS query padding",
-            checked = local.dnsCryptQueryPadding,
-            onChecked = { commit(local.copy(dnsCryptQueryPadding = it), restart = true) },
-        )
-        PrefSwitch(
-            label = "Block EDNS Client Subnet",
-            checked = local.dnsCryptBlockEcs,
-            onChecked = { commit(local.copy(dnsCryptBlockEcs = it), restart = true) },
+        Text(
+            text = "DNSCrypt protocol padding is always on. EDNS Client Subnet is never sent " +
+                "(would deanonymize over Tor exits).",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         OutlinedButton(
             onClick = {

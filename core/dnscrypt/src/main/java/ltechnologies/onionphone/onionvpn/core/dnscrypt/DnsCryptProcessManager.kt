@@ -133,21 +133,70 @@ class DnsCryptProcessManager(
 
     fun isRunning(): Boolean = process?.isAlive == true
 
-    /** Soft reconfigure while Connected — rewrite toml + restart with last SOCKS override. */
+    /**
+     * Soft reconfigure while Connected — rewrite toml and SIGHUP if the process is
+     * still alive (skip the Arti-downtime full stop/spawn cycle). Falls back to
+     * [start] when the stub is down.
+     */
     suspend fun applyPreferences(
         serverName: String,
         preferences: TunnelPreferences,
+        socksPortOverride: Int? = null,
+        socksUserOverride: String? = null,
     ): Result<Unit> {
         val ports = lastPorts ?: return Result.failure(
             TunnelFailure.DnsCrypt("reconfigure", "DNSCrypt has no runtime ports"),
         )
-        return start(
-            serverName,
-            ports,
-            preferences,
-            socksPortOverride = lastSocksOverride,
-            socksUserOverride = lastSocksUser,
-        )
+        return withContext(Dispatchers.IO) {
+            lifecycleMutex.withLock {
+                this@DnsCryptProcessManager.preferences = preferences
+                lastServerName = serverName.ifBlank { preferences.dnsCryptServerName }
+                if (socksPortOverride != null) lastSocksOverride = socksPortOverride
+                if (socksUserOverride != null) lastSocksUser = socksUserOverride
+                val socksUser = lastSocksUser ?: TunnelEndpoints.dnsCryptSocksUser()
+                writeConfig(lastServerName, ports, lastSocksOverride, socksUser)
+                if (isRunning() && sighupRunningProcess()) {
+                    Timber.i("DNSCrypt soft reconfigure via SIGHUP")
+                    Result.success(Unit)
+                } else {
+                    null
+                }
+            } ?: start(
+                lastServerName,
+                ports,
+                preferences,
+                socksPortOverride = lastSocksOverride,
+                socksUserOverride = lastSocksUser,
+            )
+        }
+    }
+
+    private fun sighupRunningProcess(): Boolean {
+        val proc = process ?: return false
+        if (!proc.isAlive) return false
+        val pid = processPid(proc)
+        if (pid <= 0) return false
+        return runCatching {
+            android.os.Process.sendSignal(pid, 1) // SIGHUP — reload toml
+            true
+        }.getOrDefault(false)
+    }
+
+    private fun processPid(proc: Process): Int {
+        val fromMethod = runCatching {
+            val m = proc.javaClass.methods.firstOrNull { it.name == "pid" && it.parameterCount == 0 }
+            when (val v = m?.invoke(proc)) {
+                is Int -> v
+                is Long -> v.toInt()
+                else -> -1
+            }
+        }.getOrDefault(-1)
+        if (fromMethod > 0) return fromMethod
+        return runCatching {
+            val field = proc.javaClass.getDeclaredField("pid")
+            field.isAccessible = true
+            field.getInt(proc)
+        }.getOrDefault(-1)
     }
 
     /**
@@ -171,10 +220,9 @@ class DnsCryptProcessManager(
         if (!lastClearCacheMs.compareAndSet(prev, now)) {
             return@withContext Result.success(Unit)
         }
-        Timber.i("DNSCrypt clearQueryCache — soft restart (flush in-memory DNS cache)")
-        start(
+        Timber.i("DNSCrypt clearQueryCache — SIGHUP (soft; no stop/spawn)")
+        applyPreferences(
             lastServerName,
-            ports,
             preferences,
             socksPortOverride = lastSocksOverride,
             socksUserOverride = lastSocksUser,
@@ -337,8 +385,14 @@ class DnsCryptProcessManager(
             DnsCryptPublicResolvers.SOURCE_CACHE_FILE,
             "${DnsCryptPublicResolvers.SOURCE_CACHE_FILE}.minisig",
         )
+        val apkTime = runCatching {
+            File(context.applicationInfo.sourceDir).lastModified()
+        }.getOrDefault(0L)
         for (name in names) {
             val dest = File(configDirectory, name)
+            val stale = !dest.exists() || dest.length() == 0L ||
+                (apkTime > 0L && dest.lastModified() < apkTime)
+            if (!stale) continue
             runCatching {
                 context.assets.open(name).use { input ->
                     dest.outputStream().use { output -> input.copyTo(output) }

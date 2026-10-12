@@ -42,12 +42,14 @@ class FirewallRulesStore @Inject constructor(
     val persistedJournal: StateFlow<List<FirewallJournalEntry>> = _journal.asStateFlow()
 
     val rulesFlow: Flow<List<FirewallRule>> = context.firewallDataStore.data.map { prefs ->
-        decodeRules(prefs[Keys.rulesJson].orEmpty())
+        FirewallRulesCodec.decodeRules(prefs[Keys.rulesJson].orEmpty()).rules
     }
 
     suspend fun load() {
         val prefs = context.firewallDataStore.data.first()
-        _rules.value = decodeRules(prefs[Keys.rulesJson].orEmpty()).filterNot { it.isExpired() }
+        _rules.value = FirewallRulesCodec.decodeRules(prefs[Keys.rulesJson].orEmpty())
+            .rules
+            .filterNot { it.isExpired() }
         _journal.value = decodeJournal(prefs[Keys.journalJson].orEmpty())
         Timber.i(
             "FirewallRulesStore load rules=%d journal=%d",
@@ -58,15 +60,19 @@ class FirewallRulesStore @Inject constructor(
 
     suspend fun upsert(rule: FirewallRule) {
         context.firewallDataStore.edit { prefs ->
-            val current = decodeRules(prefs[Keys.rulesJson].orEmpty())
-                .filterNot {
-                    it.uid == rule.uid &&
-                        it.destHost == rule.destHost &&
-                        it.destPort == rule.destPort &&
-                        it.protocol == rule.protocol
-                }
+            val decoded = FirewallRulesCodec.decodeRules(prefs[Keys.rulesJson].orEmpty())
+            if (decoded is FirewallRulesCodec.DecodeResult.WholeListFailure) {
+                Timber.e("Firewall rule upsert aborted — stored list failed to decode")
+                return@edit
+            }
+            val current = decoded.rules.filterNot {
+                it.uid == rule.uid &&
+                    it.destHost == rule.destHost &&
+                    it.destPort == rule.destPort &&
+                    it.protocol == rule.protocol
+            }
             val next = current + rule
-            prefs[Keys.rulesJson] = encodeRules(next)
+            prefs[Keys.rulesJson] = FirewallRulesCodec.encodeRules(next)
             _rules.value = next.filterNot { it.isExpired() }
         }
         Timber.d(
@@ -81,8 +87,13 @@ class FirewallRulesStore @Inject constructor(
 
     suspend fun remove(id: String) {
         context.firewallDataStore.edit { prefs ->
-            val next = decodeRules(prefs[Keys.rulesJson].orEmpty()).filterNot { it.id == id }
-            prefs[Keys.rulesJson] = encodeRules(next)
+            val decoded = FirewallRulesCodec.decodeRules(prefs[Keys.rulesJson].orEmpty())
+            if (decoded is FirewallRulesCodec.DecodeResult.WholeListFailure) {
+                Timber.e("Firewall rule remove aborted — stored list failed to decode")
+                return@edit
+            }
+            val next = decoded.rules.filterNot { it.id == id }
+            prefs[Keys.rulesJson] = FirewallRulesCodec.encodeRules(next)
             _rules.value = next
         }
         Timber.d("Firewall rule remove id=%s", id)
@@ -90,8 +101,13 @@ class FirewallRulesStore @Inject constructor(
 
     suspend fun removeWhere(predicate: (FirewallRule) -> Boolean) {
         context.firewallDataStore.edit { prefs ->
-            val next = decodeRules(prefs[Keys.rulesJson].orEmpty()).filterNot(predicate)
-            prefs[Keys.rulesJson] = encodeRules(next)
+            val decoded = FirewallRulesCodec.decodeRules(prefs[Keys.rulesJson].orEmpty())
+            if (decoded is FirewallRulesCodec.DecodeResult.WholeListFailure) {
+                Timber.e("Firewall rule removeWhere aborted — stored list failed to decode")
+                return@edit
+            }
+            val next = decoded.rules.filterNot(predicate)
+            prefs[Keys.rulesJson] = FirewallRulesCodec.encodeRules(next)
             _rules.value = next
         }
     }
@@ -104,56 +120,10 @@ class FirewallRulesStore @Inject constructor(
         }
     }
 
-    private fun encodeRules(rules: List<FirewallRule>): String {
-        val arr = JSONArray()
-        rules.forEach { r ->
-            arr.put(
-                JSONObject()
-                    .put("id", r.id)
-                    .put("uid", r.uid)
-                    .put("packageName", r.packageName)
-                    .put("appLabel", r.appLabel)
-                    .put("destHost", r.destHost)
-                    .put("displayHost", r.displayHost)
-                    .put("destPort", r.destPort)
-                    .put("protocol", r.protocol)
-                    .put("verdict", r.verdict.name)
-                    .put("scope", r.scope.name)
-                    .put("expiresAtEpochMs", r.expiresAtEpochMs ?: JSONObject.NULL)
-                    .put("createdAtEpochMs", r.createdAtEpochMs),
-            )
-        }
-        return arr.toString()
-    }
-
-    private fun decodeRules(raw: String): List<FirewallRule> {
-        if (raw.isBlank()) return emptyList()
-        return try {
-            val arr = JSONArray(raw)
-            buildList {
-                for (i in 0 until arr.length()) {
-                    val o = arr.getJSONObject(i)
-                    val expires = if (o.isNull("expiresAtEpochMs")) null else o.getLong("expiresAtEpochMs")
-                    add(
-                        FirewallRule(
-                            id = o.getString("id"),
-                            uid = o.getInt("uid"),
-                            packageName = o.optString("packageName"),
-                            appLabel = o.optString("appLabel"),
-                            destHost = o.optString("destHost"),
-                            destPort = o.optInt("destPort", -1),
-                            protocol = o.optInt("protocol", -1),
-                            verdict = FirewallVerdict.parse(o.getString("verdict")),
-                            scope = FirewallRuleScope.valueOf(o.getString("scope")),
-                            expiresAtEpochMs = expires,
-                            createdAtEpochMs = o.optLong("createdAtEpochMs", 0L),
-                            displayHost = o.optString("displayHost"),
-                        ),
-                    )
-                }
-            }
-        } catch (_: Exception) {
-            emptyList()
+    suspend fun clearJournal() {
+        context.firewallDataStore.edit { prefs ->
+            prefs[Keys.journalJson] = "[]"
+            _journal.value = emptyList()
         }
     }
 

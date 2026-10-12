@@ -17,7 +17,6 @@ import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -46,9 +45,7 @@ fun AppLockGate(
     val state by appLockManager.state.collectAsStateWithLifecycle()
     when (state) {
         AppLockState.UNLOCKED -> content()
-        AppLockState.DEVICE_INSECURE -> DeviceInsecureScreen(
-            onContinue = { appLockManager.markUnlocked() },
-        )
+        AppLockState.DEVICE_INSECURE -> DeviceInsecureScreen()
         AppLockState.LOCKED -> AppLockScreen(
             authenticator = authenticator,
             onSuccess = { appLockManager.markUnlocked() },
@@ -121,7 +118,7 @@ private fun AppLockScreen(
 }
 
 @Composable
-private fun DeviceInsecureScreen(onContinue: () -> Unit) {
+private fun DeviceInsecureScreen() {
     val context = LocalContext.current
     Column(
         modifier = Modifier
@@ -147,9 +144,6 @@ private fun DeviceInsecureScreen(onContinue: () -> Unit) {
             shape = MaterialTheme.shapes.large,
         ) {
             Text("Open security settings")
-        }
-        TextButton(onClick = onContinue) {
-            Text("Continue without app lock")
         }
     }
 }

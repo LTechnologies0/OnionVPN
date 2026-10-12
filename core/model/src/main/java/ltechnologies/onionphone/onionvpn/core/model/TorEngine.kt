@@ -204,7 +204,8 @@ data class TorEngineCapabilities(
             nativeAutomapDnsPort = false,
             synthesizeOnionAutomap = true,
             newIdentity = true,
-            circuitInspection = true, // onionmasq CircuitStore / hops UI when TUN plane is ONIONMASQ
+            // README: Circuits / streams UI = No (no list-circuits API on Arti).
+            circuitInspection = false,
             liveCircuitTiming = true,
             liveSetConf = false,
             // TorClient::set_dormant via Ext JNI when patched .so is loaded.

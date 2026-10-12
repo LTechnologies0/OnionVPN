@@ -51,7 +51,7 @@ class TorEnginePortAllocatorTest {
         assertFalse(a.torrcConfig)
         assertTrue(a.synthesizeOnionAutomap)
         assertTrue(a.newIdentity)
-        assertTrue(a.circuitInspection)
+        assertFalse(a.circuitInspection)
         assertTrue(a.conjureBridges)
         assertFalse(a.nodePrefs)
         assertTrue(a.exitCountryPrefs)

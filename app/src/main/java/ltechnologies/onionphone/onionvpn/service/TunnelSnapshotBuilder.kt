@@ -37,6 +37,8 @@ internal object TunnelSnapshotBuilder {
         newNymCooldownUntilMs: Long = 0L,
         openVpnUp: Boolean = false,
         openVpnDetail: String = "",
+        /** Live Android Always-on lockdown (`VpnService.isLockdownEnabled`). */
+        osLockdownEnabled: Boolean = false,
     ): TunnelSnapshot {
         val caps = torEngine.capabilities
         val proxiesLive = phase == TunnelPhase.Connected ||
@@ -57,9 +59,12 @@ internal object TunnelSnapshotBuilder {
                     torStatus.connected
                 )
         }
+        val killSwitchLive = osLockdownEnabled ||
+            phase == TunnelPhase.Blocking ||
+            (vpnEstablished && phase == TunnelPhase.Connected)
         return TunnelSnapshot(
             phase = phase,
-            killSwitchEnabled = true,
+            killSwitchEnabled = killSwitchLive,
             torRunning = engineLive,
             dnsCryptRunning = dnsCryptRunning,
             vpnEstablished = vpnEstablished,

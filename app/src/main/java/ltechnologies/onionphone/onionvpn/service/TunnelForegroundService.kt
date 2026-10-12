@@ -25,9 +25,10 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
@@ -378,9 +379,8 @@ class TunnelForegroundService : Service() {
                         useSocksResolve = true,
                     )
                 }.onFailure { Timber.e(it, "bootstrap relay resume failed") }
-                dnsCrypt.start(
+                dnsCrypt.applyPreferences(
                     preferences.dnsCryptServerName,
-                    ports,
                     preferences,
                     socksPortOverride = sidecar,
                     socksUserOverride = dnsUser,
@@ -409,11 +409,9 @@ class TunnelForegroundService : Service() {
                 }.onFailure { Timber.e(it, "Arti TCP DNS bootstrap resume failed") }
             }
             Timber.i("Tor downtime end: start DNSCrypt on :%d", ports.dnsCryptListenPort)
-            dnsCrypt.start(
+            dnsCrypt.applyPreferences(
                 preferences.dnsCryptServerName,
-                ports,
                 preferences,
-                // Preserve NEWNYM IsolationToken (`dnscrypt-nN`); stop() clears lastSocksUser.
                 socksUserOverride = TunnelEndpoints.dnsCryptSocksUser(),
             ).onFailure {
                 Timber.e(it, "DNSCrypt resume after Tor downtime failed")
@@ -604,7 +602,6 @@ class TunnelForegroundService : Service() {
                 // Promote FGS synchronously (OnionShare ShareService) — avoids
                 // ForegroundServiceDidNotStartInTimeException if work is deferred.
                 notifications.startForeground(TunnelPhase.StartingTor, throughputText)
-                preferences = preferencesFromIntent(intent)
                 scope.launch {
                     lifecycleMutex.withLock {
                         if (tunnelJob?.isActive == true) {
@@ -615,6 +612,9 @@ class TunnelForegroundService : Service() {
                             Timber.w("Ignoring START — phase=%s", _snapshot.value.phase)
                             return@withLock
                         }
+                        preferences = runCatching {
+                            preferencesStore.preferences.first()
+                        }.getOrElse { preferencesFromIntent(intent) }
                         teardownOnce.set(false)
                         tunnelJob = scope.launch { runStartSequence() }
                     }
@@ -627,11 +627,23 @@ class TunnelForegroundService : Service() {
                     Timber.w("Ignoring STOP — phase=%s", phase)
                     return START_NOT_STICKY
                 }
+                tunnelJob?.cancel()
                 newNymJob?.cancel()
                 newNymJob = null
                 identityRefreshing = false
                 scope.launch { runStopSequence(userInitiated = true) }
                 return START_NOT_STICKY
+            }
+            ACTION_RELOAD_PREFERENCES -> {
+                scope.launch {
+                    preferences = runCatching {
+                        preferencesStore.preferences.first()
+                    }.getOrDefault(preferences)
+                    firewallEngine.applySessionPreferences(preferences)
+                    DiagnosticsGate.setNoLogsEnabled(preferences.noLogsEnabled)
+                    updateSnapshot(_snapshot.value.phase)
+                }
+                return START_STICKY
             }
             ACTION_NEWNYM -> {
                 if (newNymJob?.isActive == true || identityRefreshing) {
@@ -707,9 +719,8 @@ class TunnelForegroundService : Service() {
                                                 bindUdp = true,
                                                 useSocksResolve = true,
                                             )
-                                            dnsCrypt.start(
+                                            dnsCrypt.applyPreferences(
                                                 preferences.dnsCryptServerName,
-                                                ports,
                                                 preferences,
                                                 socksPortOverride = sidecar,
                                                 socksUserOverride = dnsUser,
@@ -764,9 +775,8 @@ class TunnelForegroundService : Service() {
                                                 },
                                             )
                                         }
-                                        dnsCrypt.start(
+                                        dnsCrypt.applyPreferences(
                                             preferences.dnsCryptServerName,
-                                            ports,
                                             preferences,
                                             socksUserOverride = dnsUser,
                                         ).getOrThrow()
@@ -844,6 +854,7 @@ class TunnelForegroundService : Service() {
                 return START_STICKY
             }
             ACTION_REVOKED -> {
+                notifications.startForeground(TunnelPhase.Error, throughputText)
                 Timber.w("VPN revoked by system — fail-closed teardown")
                 // Cancel outside the mutex — a wedged start holding the lock must not
                 // block revoke forever (kotlinx Mutex is not reentrant).
@@ -873,6 +884,10 @@ class TunnelForegroundService : Service() {
             ACTION_ALWAYS_ON -> {
                 // Sync FGS promotion before any await (same as ACTION_START).
                 notifications.startForeground(TunnelPhase.StartingTor, throughputText)
+                // Cancel before mutex — a wedged start holding the lock must not
+                // block Always-On forever (kotlinx Mutex is not reentrant).
+                val hadActiveTunnelJob = tunnelJob?.isActive == true
+                tunnelJob?.cancel()
                 scope.launch {
                     lifecycleMutex.withLock {
                         val vpnMode = OnionVpnService.vpnProfileMode.value
@@ -885,7 +900,7 @@ class TunnelForegroundService : Service() {
                             (phase == TunnelPhase.Connected || phase == TunnelPhase.Validating) &&
                                 (vpnMode == VpnProfileMode.Blocking || forwarderDead)
                         val wedgedStarting =
-                            tunnelJob?.isActive == true &&
+                            hadActiveTunnelJob &&
                                 (vpnMode == VpnProfileMode.Blocking || forwarderDead) &&
                                 (
                                     phase == TunnelPhase.StartingTor ||
@@ -894,18 +909,13 @@ class TunnelForegroundService : Service() {
                                         phase == TunnelPhase.StartingVpn ||
                                         phase == TunnelPhase.Blocking
                                     )
-                        if (tunnelJob?.isActive == true) {
-                            if (!needsReconcile && !wedgedStarting) {
-                                Timber.w("Ignoring ALWAYS_ON — tunnel already starting phase=%s", phase)
-                                return@withLock
-                            }
+                        if (hadActiveTunnelJob) {
                             Timber.w(
-                                "ALWAYS_ON — canceling active job (vpnMode=%s forwarderAlive=%s phase=%s)",
+                                "ALWAYS_ON — canceled active job (vpnMode=%s forwarderAlive=%s phase=%s)",
                                 vpnMode,
                                 !forwarderDead,
                                 phase,
                             )
-                            tunnelJob?.cancel()
                             tunnelJob = null
                             newNymJob?.cancel()
                             newNymJob = null
@@ -933,10 +943,11 @@ class TunnelForegroundService : Service() {
                                 TunnelPhase.Blocking,
                                 lastError = "Always-on VPN rebound — restoring Tor path",
                             )
-                        } else if (phase == TunnelPhase.Connected || phase == TunnelPhase.Validating ||
-                            phase == TunnelPhase.StartingTor || phase == TunnelPhase.StartingDnsCrypt ||
-                            phase == TunnelPhase.StartingOpenVpn ||
-                            phase == TunnelPhase.StartingVpn
+                        } else if (!hadActiveTunnelJob &&
+                            (phase == TunnelPhase.Connected || phase == TunnelPhase.Validating ||
+                                phase == TunnelPhase.StartingTor || phase == TunnelPhase.StartingDnsCrypt ||
+                                phase == TunnelPhase.StartingOpenVpn ||
+                                phase == TunnelPhase.StartingVpn)
                         ) {
                             Timber.w("Ignoring ALWAYS_ON — already up phase=%s", phase)
                             return@withLock
@@ -965,19 +976,20 @@ class TunnelForegroundService : Service() {
         // Teardown before cancelling scope — otherwise TUN/Tor/DNSCrypt leak on process
         // death paths that skip STOP/REVOKED.
         if (teardownOnce.compareAndSet(false, true)) {
-            runCatching {
-                runBlocking(Dispatchers.IO) {
-                    val phase = _snapshot.value.phase
-                    if (phase != TunnelPhase.Idle && phase != TunnelPhase.Stopping) {
-                        Timber.w("onDestroy teardown — phase was %s", phase)
+            val phase = _snapshot.value.phase
+            if (phase != TunnelPhase.Idle && phase != TunnelPhase.Stopping) {
+                Timber.w("onDestroy teardown — phase was %s", phase)
+                // Independent scope: this service's [scope] is cancelled below.
+                CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
+                    runCatching {
                         teardownModules(
                             resetSnapshot = false,
                             phase = TunnelPhase.Idle,
                             lastError = null,
                         )
-                    }
+                    }.onFailure { Timber.w(it, "onDestroy teardown failed") }
                 }
-            }.onFailure { Timber.w(it, "onDestroy teardown failed") }
+            }
         }
         throughputJob?.cancel()
         scope.cancel()
@@ -1058,6 +1070,7 @@ class TunnelForegroundService : Service() {
             }.onFailure { Timber.w(it, "persist firewallEnabled=true failed") }
         }
         DiagnosticsGate.setNoLogsEnabled(preferences.noLogsEnabled)
+        firewallEngine.clearSessionRules()
         // Cancel Tor-bound downloads before we tear down / recycle SOCKS ports.
         domainReputation.onTorUnavailable()
 
@@ -1583,10 +1596,16 @@ class TunnelForegroundService : Service() {
         alreadyHoldingLifecycleLock: Boolean = false,
     ) {
         if (alreadyHoldingLifecycleLock) {
-            handleFailureLocked(message, fromValidation, validations, stopTorProcesses)
-        } else {
-            lifecycleMutex.withLock {
+            withContext(NonCancellable) {
                 handleFailureLocked(message, fromValidation, validations, stopTorProcesses)
+            }
+        } else {
+            scope.launch {
+                lifecycleMutex.withLock {
+                    withContext(NonCancellable) {
+                        handleFailureLocked(message, fromValidation, validations, stopTorProcesses)
+                    }
+                }
             }
         }
     }
@@ -1618,7 +1637,9 @@ class TunnelForegroundService : Service() {
 
         val canBlock = VpnService.prepare(this) == null
         if (canBlock) {
-            enterBlockingMode(message, validations, stopTorProcesses = stopTorProcesses)
+            withContext(NonCancellable) {
+                enterBlockingMode(message, validations, stopTorProcesses = stopTorProcesses)
+            }
             return
         }
 
@@ -1644,19 +1665,19 @@ class TunnelForegroundService : Service() {
         val gen = OnionVpnService.nextGeneration()
         vpnBridge.startBlocking(preferences, gen)
         if (!vpnBridge.waitForBlocking(gen)) {
-            Timber.e("Kill-switch Blocking TUN failed to establish — tearing down")
-            teardownModules(
-                resetSnapshot = false,
-                phase = TunnelPhase.Error,
+            Timber.e("Kill-switch Blocking TUN failed — staying Blocking (no stopSelf)")
+            pacServer.updateUpstream(0, 0)
+            updateSnapshot(
+                TunnelPhase.Blocking,
                 lastError = TunnelFailure.VpnEstablish(
                     "Kill-switch could not engage Blocking TUN after: $message",
                 ).userMessage,
                 validations = validations,
             )
-            stopForeground(STOP_FOREGROUND_REMOVE)
-            stopSelf()
+            notifications.update(TunnelPhase.Blocking, throughputText)
             return
         }
+        pacServer.updateUpstream(0, 0)
         stopSocksDnsBootstrapRelay()
         // Drop stale onionmasq sidecar publish so probes don't hit ghost ports.
         tor.clearExternalRuntimePorts()
@@ -2229,6 +2250,7 @@ class TunnelForegroundService : Service() {
                 onionmasqReady = isOnionmasqLive(),
                 newNymCooldownUntilMs = newNymCooldownUntilMs(),
                 openVpnUp = FirewallBridge.openVpnOverTorUp,
+                osLockdownEnabled = OnionVpnService.vpnLockdown.value,
                 openVpnDetail = openVpnOverTor.status.value.let { st ->
                     when {
                         st.phase == OpenVpnPhase.Idle && !preferences.openVpnOverTorEnabled -> ""
@@ -2326,6 +2348,7 @@ class TunnelForegroundService : Service() {
         const val ACTION_STOP = "ltechnologies.onionphone.onionvpn.tunnel.STOP"
         const val ACTION_NEWNYM = "ltechnologies.onionphone.onionvpn.tunnel.NEWNYM"
         const val ACTION_APPLY_CIRCUIT_TIMING = "ltechnologies.onionphone.onionvpn.tunnel.APPLY_CIRCUIT_TIMING"
+        const val ACTION_RELOAD_PREFERENCES = "ltechnologies.onionphone.onionvpn.tunnel.RELOAD_PREFERENCES"
         const val ACTION_REVOKED = "ltechnologies.onionphone.onionvpn.tunnel.REVOKED"
         const val ACTION_ALWAYS_ON = "ltechnologies.onionphone.onionvpn.tunnel.ALWAYS_ON"
         const val EXTRA_ROUTE_ALL = "route_all"

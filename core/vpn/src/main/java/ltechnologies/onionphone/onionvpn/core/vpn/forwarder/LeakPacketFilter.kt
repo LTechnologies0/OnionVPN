@@ -113,7 +113,7 @@ object LeakPacketFilter {
         if (length < 40 + 20) return false
         val destPort = ((packet[40 + 2].toInt() and 0xff) shl 8) or
             (packet[40 + 3].toInt() and 0xff)
-        // TCP/53 and DoT/853 → blackhole; apps must use UDP/53 → DNSCrypt.
+        // TCP/53 diverted by TunDnsMux; DoT/853 blackholed.
         if (destPort == 53 || destPort == 853) return false
         // Clearnet IPv6 TCP: blackhole — DNSCrypt is A-only; Happy Eyeballs IPv6
         // races through Tor exits cause SSL timeouts (Speedtest). Automap ULA only.
@@ -153,7 +153,34 @@ object LeakPacketFilter {
         return destPort == 53
     }
 
-    /** TCP DNS (53) or DoT (853) — blackhole so apps use UDP/53 → DNSCrypt. */
+    /** TCP dest port 53 (not DoT/853) — divert to DNSCrypt instead of blackhole. */
+    fun isDnsTcpPort53(packet: ByteArray, length: Int): Boolean {
+        if (length < 40 || length > packet.size) return false
+        val version = (packet[0].toInt() ushr 4) and 0x0f
+        return when (version) {
+            4 -> {
+                if (TorNetPolicy.isIpv4Fragment(packet, length)) return false
+                if (!TorNetPolicy.isWellFormedIpv4Packet(packet, length)) return false
+                val ihl = (packet[0].toInt() and 0x0f) * 4
+                if (length < ihl + 20) return false
+                if (packet[9].toInt() and 0xff != PROTO_TCP) return false
+                val destPort = ((packet[ihl + 2].toInt() and 0xff) shl 8) or
+                    (packet[ihl + 3].toInt() and 0xff)
+                destPort == 53
+            }
+            6 -> {
+                if (!TorNetPolicy.isWellFormedIpv6Packet(packet, length)) return false
+                if (length < 40 + 20) return false
+                if (packet[6].toInt() and 0xff != PROTO_TCP) return false
+                val destPort = ((packet[40 + 2].toInt() and 0xff) shl 8) or
+                    (packet[40 + 3].toInt() and 0xff)
+                destPort == 53
+            }
+            else -> false
+        }
+    }
+
+    /** TCP DNS (53) or DoT (853). Port 53 is diverted; 853 stays blackholed. */
     fun isDnsTcpPort(packet: ByteArray, length: Int): Boolean {
         if (length < 40 || length > packet.size) return false
         val version = (packet[0].toInt() ushr 4) and 0x0f

@@ -133,25 +133,17 @@ class AntiLeakDnsCryptAnonymizedTest {
     }
 
     @Test
-    fun paddingAndEcsPrefsEmitHonestyComments() {
-        val on = DnsCryptConfigWriter.write(
-            configDirectory = "/tmp",
-            preferences = TunnelPreferences(
-                dnsCryptQueryPadding = true,
-                dnsCryptBlockEcs = true,
-            ),
-        )
-        assertTrue(on.contains("query_padding:"))
-        assertTrue(on.contains("block ECS:"))
-
-        val off = DnsCryptConfigWriter.write(
+    fun paddingAndEcsAreHardPolicyNotToggles() {
+        val config = DnsCryptConfigWriter.write(
             configDirectory = "/tmp",
             preferences = TunnelPreferences(
                 dnsCryptQueryPadding = false,
                 dnsCryptBlockEcs = false,
             ),
         )
-        assertTrue(off.contains("query_padding disabled"))
-        assertTrue(off.contains("ECS block preference off"))
+        assertTrue(config.contains("force_tcp = true"))
+        assertTrue(config.contains("EDNS Client Subnet is never configured"))
+        assertFalse(config.contains("query_padding disabled"))
+        assertFalse(config.contains("ECS block preference off"))
     }
 }

@@ -39,6 +39,13 @@ class BootCompletedReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent?) {
         val action = intent?.action ?: return
         if (action !in HANDLED_ACTIONS) return
+        if (action == Intent.ACTION_LOCKED_BOOT_COMPLETED) {
+            val um = context.getSystemService(UserManager::class.java)
+            if (um != null && !um.isUserUnlocked) {
+                Timber.d("LOCKED_BOOT: user still locked — skip")
+                return
+            }
+        }
         // Never runBlocking on the receiver thread (often main) — DataStore + start can ANR.
         val pending = goAsync()
         val appCtx = context.applicationContext

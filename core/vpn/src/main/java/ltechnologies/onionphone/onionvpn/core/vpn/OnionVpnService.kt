@@ -360,9 +360,11 @@ class OnionVpnService : VpnService() {
                         )
                     }
                 }
-                // Strict OS lockdown pref: fail Connected unless lockdown is on (API 29+).
+                // Release always refuses Connected without OS lockdown. Debug honors the pref.
+                val releaseBuild =
+                    (applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) == 0
                 if (mode == VpnProfileMode.Connected &&
-                    preferences.requireOsLockdown &&
+                    (releaseBuild || preferences.requireOsLockdown) &&
                     Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
                     !isLockdownEnabled
                 ) {

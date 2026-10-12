@@ -148,7 +148,7 @@ class LeakPacketFilterTest {
     }
 
     @Test
-    fun tcpDns53_notTorrifiable_forceDnsCryptUdp() {
+    fun tcpDns53_notTorrifiable_isDivertedNotSocks() {
         val pkt = ipv4TcpSyn(
             srcIp = byteArrayOf(10, 0, 0, 2),
             dstIp = byteArrayOf(8, 8, 8, 8),
@@ -156,6 +156,7 @@ class LeakPacketFilterTest {
             dstPort = 53,
         )
         assertFalse(LeakPacketFilter.isTorrifiableIpv4Tcp(pkt, pkt.size))
+        assertTrue(LeakPacketFilter.isDnsTcpPort53(pkt, pkt.size))
         assertEquals(
             LeakPacketFilter.BlackholeReason.TcpDns,
             LeakPacketFilter.classifyBlackholeReason(pkt, pkt.size),

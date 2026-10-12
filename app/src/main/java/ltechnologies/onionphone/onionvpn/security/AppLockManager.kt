@@ -10,7 +10,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
 enum class AppLockState {
-    /** No device PIN/pattern — lock unavailable; UI allowed with warning. */
+    /** No device PIN/pattern — lock unavailable; UI stays blocked until a lock is set. */
     DEVICE_INSECURE,
     /** Waiting for system credential / biometric. */
     LOCKED,

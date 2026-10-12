@@ -22,6 +22,7 @@ import ltechnologies.onionphone.onionvpn.core.model.observability.MemoryHygiene
 import ltechnologies.onionphone.onionvpn.core.vpn.dns.DnsHostnameCache
 import ltechnologies.onionphone.onionvpn.core.vpn.dns.DnsOnionAutomapReply
 import ltechnologies.onionphone.onionvpn.core.vpn.dns.DnsPacketParser
+import ltechnologies.onionphone.onionvpn.core.vpn.dns.DnsTruncatedReply
 import ltechnologies.onionphone.onionvpn.core.vpn.dns.OnionAutomapAllocator
 import ltechnologies.onionphone.onionvpn.core.vpn.firewall.ConnectionOwnerResolver
 import ltechnologies.onionphone.onionvpn.core.vpn.firewall.FirewallBridge
@@ -149,6 +150,14 @@ class TunDnsMux(
                             tunEmptyReadStreak = (tunEmptyReadStreak + 1).coerceAtMost(8)
                             LockSupport.parkNanos(EMPTY_READ_BASE_NS shl tunEmptyReadStreak)
                             continue
+                        }
+                        divertDnsToDnsCrypt && LeakPacketFilter.isDnsTcpPort53(buf, n) -> {
+                            tunEmptyReadStreak = 0
+                            if (!FirewallBridge.engine.allowOutbound(buf, n)) {
+                                // Drop
+                            } else {
+                                handleTcpDnsPacket(buf, n, localTunOut)
+                            }
                         }
                         divertDnsToDnsCrypt && LeakPacketFilter.isDnsUdpPort53(buf, n) -> {
                             tunEmptyReadStreak = 0
@@ -592,6 +601,87 @@ class TunDnsMux(
         }
     }
 
+    /**
+     * TCP/53 → DNSCrypt (RFC 1035 length-prefixed). IPv4 only — IPv6 TCP/53 is dropped
+     * so Happy Eyeballs falls back to diverted UDP/53.
+     */
+    private fun handleTcpDnsPacket(packet: ByteArray, length: Int, tunOut: FileOutputStream) {
+        val version = (packet[0].toInt() ushr 4) and 0x0f
+        if (version != 4) return
+        val meta = TcpPacketBuilder.parseTcpMeta(packet, length) ?: return
+        val key = tcpDnsFlowKey(meta.srcIp, meta.srcPort)
+        if (meta.rst) {
+            tcpDnsFlows.remove(key)
+            return
+        }
+        if (meta.synOnly) {
+            val ourSeq = kotlin.random.Random.nextInt()
+            tcpDnsFlows[key] = TcpDnsFlow(ourSeq + 1, meta.seq + 1)
+            val synAck = TcpPacketBuilder.build(
+                srcIp = meta.dstIp,
+                dstIp = meta.srcIp,
+                srcPort = meta.dstPort,
+                dstPort = meta.srcPort,
+                seq = ourSeq,
+                ack = meta.seq + 1,
+                flags = TcpPacketBuilder.FLAG_SYN or TcpPacketBuilder.FLAG_ACK,
+            )
+            synchronized(tunWriteLock) {
+                if (running.get()) runCatching { tunOut.write(synAck, 0, synAck.size) }
+            }
+            return
+        }
+        if (meta.fin) {
+            tcpDnsFlows.remove(key)
+            return
+        }
+        if (meta.payloadLength < 2) return
+        val payloadOff = meta.payloadOffset
+        val msgLen = ((packet[payloadOff].toInt() and 0xff) shl 8) or
+            (packet[payloadOff + 1].toInt() and 0xff)
+        if (msgLen < 12 || payloadOff + 2 + msgLen > length) return
+        val dns = packet.copyOfRange(payloadOff + 2, payloadOff + 2 + msgLen)
+        val replyDns = queryDnsCryptUdp(dns) ?: return
+        val framed = ByteArray(2 + replyDns.size)
+        framed[0] = (replyDns.size ushr 8).toByte()
+        framed[1] = replyDns.size.toByte()
+        System.arraycopy(replyDns, 0, framed, 2, replyDns.size)
+        val flow = tcpDnsFlows[key] ?: TcpDnsFlow(kotlin.random.Random.nextInt(), meta.seq + meta.payloadLength)
+        val tcpReply = TcpPacketBuilder.build(
+            srcIp = meta.dstIp,
+            dstIp = meta.srcIp,
+            srcPort = meta.dstPort,
+            dstPort = meta.srcPort,
+            seq = flow.ourSeq,
+            ack = meta.seq + meta.payloadLength,
+            flags = TcpPacketBuilder.FLAG_ACK or TcpPacketBuilder.FLAG_PSH,
+            payload = framed,
+            payloadLength = framed.size,
+        )
+        tcpDnsFlows[key] = flow.copy(
+            ourSeq = flow.ourSeq + framed.size,
+            theirSeq = meta.seq + meta.payloadLength,
+        )
+        synchronized(tunWriteLock) {
+            if (running.get()) runCatching { tunOut.write(tcpReply, 0, tcpReply.size) }
+        }
+    }
+
+    private fun queryDnsCryptUdp(query: ByteArray): ByteArray? {
+        return runCatching {
+            DatagramSocket(0, InetAddress.getByName(TunnelEndpoints.LOOPBACK)).use { socket ->
+                socket.soTimeout = DNS_TIMEOUT_MS
+                socket.send(DatagramPacket(query, query.size, dnsCryptAddress, dnsCryptPort))
+                val buf = ByteArray(DNS_RESPONSE_CAP)
+                val resp = DatagramPacket(buf, buf.size)
+                socket.receive(resp)
+                buf.copyOf(resp.length)
+            }
+        }.getOrNull()
+    }
+
+    private data class TcpDnsFlow(val ourSeq: Int, val theirSeq: Int)
+
     private fun handleDnsQuery(packet: ByteArray, length: Int, tunOut: FileOutputStream) {
         if (!running.get()) return
         try {
@@ -827,7 +917,22 @@ class TunDnsMux(
     ): Int? {
         val ihl = (request[0].toInt() and 0x0f) * 4
         val totalLen = ihl + 8 + dnsLen
-        if (totalLen > MTU || dnsLen < 0 || totalLen > out.size || requestLen < ihl + 8) return null
+        if (dnsLen < 0 || requestLen < ihl + 8) return null
+        if (totalLen > MTU || totalLen > out.size) {
+            val tc = DnsTruncatedReply.headerOnly(
+                queryId = if (dnsLen >= 2) {
+                    ((dnsPayload[0].toInt() and 0xff) shl 8) or (dnsPayload[1].toInt() and 0xff)
+                } else {
+                    0
+                },
+                queryFlags = if (dnsLen >= 4) {
+                    ((dnsPayload[2].toInt() and 0xff) shl 8) or (dnsPayload[3].toInt() and 0xff)
+                } else {
+                    0x0100
+                },
+            )
+            return buildDnsReplyIpv4(request, requestLen, tc, tc.size, out)
+        }
 
         System.arraycopy(request, 0, out, 0, ihl)
         for (i in 0 until 4) {
@@ -865,7 +970,22 @@ class TunDnsMux(
     ): Int? {
         val udpLen = 8 + dnsLen
         val totalLen = 40 + udpLen
-        if (totalLen > MTU || dnsLen < 0 || totalLen > out.size || requestLen < 48) return null
+        if (dnsLen < 0 || requestLen < 48) return null
+        if (totalLen > MTU || totalLen > out.size) {
+            val tc = DnsTruncatedReply.headerOnly(
+                queryId = if (dnsLen >= 2) {
+                    ((dnsPayload[0].toInt() and 0xff) shl 8) or (dnsPayload[1].toInt() and 0xff)
+                } else {
+                    0
+                },
+                queryFlags = if (dnsLen >= 4) {
+                    ((dnsPayload[2].toInt() and 0xff) shl 8) or (dnsPayload[3].toInt() and 0xff)
+                } else {
+                    0x0100
+                },
+            )
+            return buildDnsReplyIpv6(request, requestLen, tc, tc.size, out)
+        }
 
         System.arraycopy(request, 0, out, 0, 40)
         // Swap src ↔ dst (offsets 8..23 and 24..39).
@@ -975,8 +1095,13 @@ class TunDnsMux(
         /** (srcPort << 16 | queryId) → QNAME for FakeDNS responses that rely on query correlation. */
         private val pendingQnames =
             java.util.concurrent.ConcurrentHashMap<Long, String>(64)
+        private val tcpDnsFlows =
+            java.util.concurrent.ConcurrentHashMap<Long, TcpDnsFlow>(32)
 
         private fun pendingQnameKey(srcPort: Int, queryId: Int): Long =
             (srcPort.toLong() and 0xffffL shl 16) or (queryId.toLong() and 0xffffL)
+
+        private fun tcpDnsFlowKey(srcIp: Int, srcPort: Int): Long =
+            (srcIp.toLong() shl 16) or (srcPort.toLong() and 0xffffL)
     }
 }

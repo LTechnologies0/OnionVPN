@@ -31,6 +31,7 @@ import ltechnologies.onionphone.onionvpn.core.model.FirewallRuleScope
 import ltechnologies.onionphone.onionvpn.core.model.FirewallVerdict
 import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
 import ltechnologies.onionphone.onionvpn.core.model.TunnelPreferences
+import ltechnologies.onionphone.onionvpn.core.model.observability.DiagnosticsGate
 import ltechnologies.onionphone.onionvpn.core.vpn.dns.DnsHostnameCache
 import ltechnologies.onionphone.onionvpn.core.vpn.firewall.ApplicationLayerDetector
 import ltechnologies.onionphone.onionvpn.core.vpn.firewall.ConnectionOwnerResolver
@@ -126,6 +127,7 @@ class InteractiveFirewallEngine @Inject constructor(
         }
         // Drop sticky ALLOW_OVPN/Tor decisions from the previous tunnel session.
         caches.clearAll()
+        scope.launch { rulesStore.removeWhere { it.scope == FirewallRuleScope.SESSION } }
         synchronized(queueLock) {
             waitQueue.clear()
             pendingByKey.clear()
@@ -148,10 +150,19 @@ class InteractiveFirewallEngine @Inject constructor(
             // Seed prefs before first packet so firewallEnabled isn't stuck on default false.
             runCatching { preferences.set(coerceFirewallPrefs(preferencesStore.preferences.first())) }
             var lastDefault = preferences.get().firewallDefaultAction
+            var lastNoLogs = preferences.get().noLogsEnabled
             preferencesStore.preferences.collect { raw ->
                 val next = coerceFirewallPrefs(raw)
                 val prevDefault = lastDefault
+                val prevNoLogs = lastNoLogs
                 preferences.set(next)
+                if (next.noLogsEnabled && !prevNoLogs) {
+                    lastNoLogs = true
+                    _journal.value = emptyList()
+                    runCatching { rulesStore.clearJournal() }
+                } else {
+                    lastNoLogs = next.noLogsEnabled
+                }
                 // Sticky ALLOW_OVPN flow cache survives Settings default flips and keeps
                 // peer RST pollution on Tor-path browsers until tunnel restart.
                 if (next.firewallDefaultAction != prevDefault) {
@@ -266,32 +277,16 @@ class InteractiveFirewallEngine @Inject constructor(
         }
         if (uid == ownUid) return FirewallVerdict.ALLOW_TOR
 
-        // SYN without owner: Waydroid/WebView often miss getConnectionOwnerUid on first
-        // packets. Fail-open to the configured default (never invent OVPN when down).
-        // Stamp the 5-tuple so mid-flow cannot pick a Tor sticky rule and SoftEther→Tor flip.
-        // HEV CONNECT still refuses without a UID stamp (parity with PAC — no uunknown merge).
+        // SYN without owner: fail-closed. HEV CONNECT also refuses without a UID stamp
+        // (parity with PAC — no uunknown merge / shared IsolateSOCKSAuth token).
         if (info.isTcpSyn && !ConnectionOwnerResolver.isValidUid(uid)) {
-            val live = when (prefs.firewallDefaultAction) {
-                FirewallDefaultAction.DENY -> FirewallVerdict.DENY
-                FirewallDefaultAction.ALLOW_OVPN -> coerceLiveOvpn(defaultOvpnOrTor(prefs), prefs)
-                FirewallDefaultAction.ALLOW,
-                FirewallDefaultAction.ASK,
-                -> FirewallVerdict.ALLOW_TOR
-            }
-            if (live != FirewallVerdict.DENY) {
-                caches.rememberFlow(tupleKey, live)
-            }
-            return live
+            return FirewallVerdict.DENY
         }
         // Mid-flow often loses owner UID on Android. Prefer sticky tuple cache (checked
-        // above). Without it: if OpenVPN-over-Tor is enabled, DENY — inventing Tor would
-        // flip a SoftEther flow onto a Tor exit after an unlikely stamp miss.
+        // above). Without it: DENY — inventing Tor would flip a SoftEther flow onto a
+        // Tor exit after an unlikely stamp miss.
         if (!ConnectionOwnerResolver.isValidUid(uid) && info.isTcp && !info.isTcpSyn) {
-            return if (prefs.openVpnOverTorEnabled) {
-                FirewallVerdict.DENY
-            } else {
-                midFlowFallback(prefs)
-            }
+            return FirewallVerdict.DENY
         }
         if (!ConnectionOwnerResolver.isValidUid(uid)) {
             return FirewallVerdict.DENY
@@ -969,6 +964,7 @@ class InteractiveFirewallEngine @Inject constructor(
         ruleScope: FirewallRuleScope,
         note: String,
     ) {
+        if (DiagnosticsGate.isNoLogs() || preferences.get().noLogsEnabled) return
         val entry = FirewallJournalEntry(
             id = UUID.randomUUID().toString(),
             timestampEpochMs = System.currentTimeMillis(),

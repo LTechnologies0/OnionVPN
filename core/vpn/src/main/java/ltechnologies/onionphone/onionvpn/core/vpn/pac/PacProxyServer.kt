@@ -34,6 +34,8 @@ class PacProxyServer(
 
     val pacUrl: String get() = TunnelEndpoints.pacUrl()
 
+    val isRunning: Boolean get() = running.get()
+
     fun updateUpstream(torSocksPort: Int, dnsCryptListenPort: Int) {
         socksBridge.updateUpstream(torSocksPort, dnsCryptListenPort)
         bridgeUp.set(torSocksPort > 0 && dnsCryptListenPort > 0)
@@ -50,7 +52,13 @@ class PacProxyServer(
         if (clientExecutor.isShutdown || clientExecutor.isTerminated) {
             clientExecutor = newClientExecutor()
         }
-        socksBridge.start()
+        try {
+            socksBridge.start()
+        } catch (e: Exception) {
+            running.set(false)
+            Timber.e(e, "PAC SOCKS bridge failed to start")
+            throw e
+        }
         val server = try {
             ServerSocket(listenPort, 8, InetAddress.getByName(TunnelEndpoints.LOOPBACK))
         } catch (e: Exception) {

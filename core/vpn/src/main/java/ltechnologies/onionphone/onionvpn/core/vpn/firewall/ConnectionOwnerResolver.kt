@@ -142,10 +142,11 @@ class ConnectionOwnerResolver(context: Context) {
 
     private fun ipv4BytesToInt(bytes: ByteArray): Int {
         require(bytes.size == 4)
-        return (bytes[0].toInt() and 0xff) or
-            ((bytes[1].toInt() and 0xff) shl 8) or
-            ((bytes[2].toInt() and 0xff) shl 16) or
-            ((bytes[3].toInt() and 0xff) shl 24)
+        // Network order — same packing as [IpPacketParser.ipv4Int].
+        return ((bytes[0].toInt() and 0xff) shl 24) or
+            ((bytes[1].toInt() and 0xff) shl 16) or
+            ((bytes[2].toInt() and 0xff) shl 8) or
+            (bytes[3].toInt() and 0xff)
     }
 
     private fun resolveApi29Once(info: IpPacketInfo): Int {
@@ -249,26 +250,10 @@ class ConnectionOwnerResolver(context: Context) {
         val addr = InetAddress.getByName(ip)
         val bytes = addr.address
         if (bytes.size != 16) return ""
-        val ipHex = buildString(32) {
-            for (b in bytes) {
-                append(String.format("%02X", b.toInt() and 0xff))
-            }
-        }
-        val portHex = String.format("%04X", port)
-        return "$ipHex:$portHex"
+        return procNetIpv6PortHex(bytes, port)
     }
 
-    private fun ipv4PortHex(ip: Int, port: Int): String {
-        val ipHex = String.format(
-            "%02X%02X%02X%02X",
-            ip and 0xff,
-            (ip ushr 8) and 0xff,
-            (ip ushr 16) and 0xff,
-            (ip ushr 24) and 0xff,
-        )
-        val portHex = String.format("%04X", port)
-        return "$ipHex:$portHex"
-    }
+    private fun ipv4PortHex(ip: Int, port: Int): String = procNetIpv4PortHex(ip, port)
 
     private class AddressScratch {
         val localBytes = ByteArray(4)
@@ -284,5 +269,39 @@ class ConnectionOwnerResolver(context: Context) {
 
         fun isValidUid(uid: Int): Boolean =
             uid != Process.INVALID_UID && uid >= 0
+
+        /**
+         * `/proc/net/tcp` IPv4: each address is a little-endian 32-bit word in hex.
+         * [ip] is network-order (`a.b.c.d` = `a<<24|…`).
+         */
+        fun procNetIpv4PortHex(ip: Int, port: Int): String {
+            val ipHex = String.format(
+                "%02X%02X%02X%02X",
+                ip and 0xff,
+                (ip ushr 8) and 0xff,
+                (ip ushr 16) and 0xff,
+                (ip ushr 24) and 0xff,
+            )
+            return "$ipHex:${String.format("%04X", port and 0xffff)}"
+        }
+
+        /**
+         * `/proc/net/tcp6`: four little-endian 32-bit words (not concatenated network bytes).
+         * `::1` is `00000000000000000000000001000000` on little-endian Android.
+         */
+        fun procNetIpv6PortHex(networkBytes: ByteArray, port: Int): String {
+            require(networkBytes.size == 16)
+            val ipHex = buildString(32) {
+                var word = 0
+                while (word < 16) {
+                    append(String.format("%02X", networkBytes[word + 3].toInt() and 0xff))
+                    append(String.format("%02X", networkBytes[word + 2].toInt() and 0xff))
+                    append(String.format("%02X", networkBytes[word + 1].toInt() and 0xff))
+                    append(String.format("%02X", networkBytes[word].toInt() and 0xff))
+                    word += 4
+                }
+            }
+            return "$ipHex:${String.format("%04X", port and 0xffff)}"
+        }
     }
 }

@@ -32,6 +32,12 @@ import timber.log.Timber
  */
 object MoatCircumventionClient {
     private const val BASE = "https://bridges.torproject.org/moat/circumvention/"
+    /**
+     * Tor Project Fastly front for Moat when Tor SOCKS is down
+     * (domain-fronted — ISP sees Fastly, not bridges.torproject.org).
+     */
+    private const val FASTLY_BASE =
+        "https://moat.torproject.org.global.prod.fastly.net/moat/circumvention/"
     private val JSON = "application/json; charset=utf-8".toMediaType()
 
     /** Prefer reliable PTs first; webtunnel last (CDN/TLS sensitive). */
@@ -75,7 +81,7 @@ object MoatCircumventionClient {
     suspend fun fetchBridges(
         transport: String,
         country: String? = null,
-        @Suppress("UNUSED_PARAMETER") viaTor: Boolean = true,
+        viaTor: Boolean = true,
         socksPort: Int? = null,
     ): FetchOutcome {
         val want = transport.trim().lowercase()
@@ -84,6 +90,7 @@ object MoatCircumventionClient {
         val primary = fetchSettings(
             transports = listOf(want),
             country = country,
+            viaTor = viaTor,
             socksPort = socksPort,
         )
         val primaryLines = pickLines(primary, want)
@@ -103,7 +110,7 @@ object MoatCircumventionClient {
         }
 
         if (want == "obfs4" || want == "snowflake" || want == "webtunnel") {
-            val builtin = fetchBuiltin(listOf(want), socksPort = socksPort)
+            val builtin = fetchBuiltin(listOf(want), viaTor = viaTor, socksPort = socksPort)
             if (builtin.isNotEmpty()) {
                 return FetchOutcome(
                     lines = builtin,
@@ -126,21 +133,22 @@ object MoatCircumventionClient {
     suspend fun fetchSettings(
         transports: List<String> = listOf("obfs4", "snowflake", "webtunnel"),
         country: String? = null,
-        @Suppress("UNUSED_PARAMETER") viaTor: Boolean = true,
+        viaTor: Boolean = true,
         socksPort: Int? = null,
     ): Result = withContext(Dispatchers.IO) {
         val body = JSONObject().apply {
             put("transports", JSONArray(transports))
             if (!country.isNullOrBlank()) put("country", country.trim().lowercase())
         }.toString()
-        val client = httpClient(socksPort)
-        val primary = postJson(client, BASE + "settings", body)
+        val route = resolveRoute(viaTor, socksPort)
+        val client = httpClient(route)
+        val primary = postJson(client, route.base + "settings", body)
         val parsed = parseResponse(primary)
         if (parsed.settings.isNotEmpty()) {
             return@withContext parsed.copy(fromDefaults = false)
         }
         Timber.i("Moat settings empty (country=%s) — trying defaults", parsed.country)
-        val defaults = postJson(client, BASE + "defaults", body)
+        val defaults = postJson(client, route.base + "defaults", body)
         parseResponse(defaults).copy(
             fromDefaults = true,
             country = parsed.country ?: parseResponse(defaults).country,
@@ -178,12 +186,13 @@ object MoatCircumventionClient {
     /** GET `/moat/circumvention/builtin` — stable public TBA-style lines (Tor SOCKS only). */
     suspend fun fetchBuiltin(
         transports: List<String>,
-        @Suppress("UNUSED_PARAMETER") viaTor: Boolean = true,
+        viaTor: Boolean = true,
         socksPort: Int? = null,
     ): List<String> = withContext(Dispatchers.IO) {
-        val client = httpClient(socksPort)
+        val route = resolveRoute(viaTor, socksPort)
+        val client = httpClient(route)
         val req = Request.Builder()
-            .url(BASE + "builtin")
+            .url(route.base + "builtin")
             .header("Accept", "application/json")
             .header("User-Agent", "OnionVPN/moat")
             .get()
@@ -245,17 +254,36 @@ object MoatCircumventionClient {
         }
     }
 
-    /** Always Tor SOCKS — refuse clearnet Moat (ISP + local MitM of bridge lines). */
-    private fun httpClient(socksPort: Int?): OkHttpClient {
+    private data class Route(val base: String, val socksPort: Int?)
+
+    /**
+     * Tor SOCKS when [viaTor] and a live SocksPort exist.
+     * Otherwise Fastly domain-front (Moat while Tor is down / meek-style front).
+     */
+    private fun resolveRoute(viaTor: Boolean, socksPort: Int?): Route {
         val port = socksPort?.takeIf { it > 0 }
-            ?: error("Tor SOCKS not ready — start the tunnel before requesting Moat bridges")
-        return OkHttpClient.Builder()
+        return if (viaTor && port != null) {
+            Route(BASE, port)
+        } else {
+            Timber.i("Moat via Fastly domain-front (viaTor=%s socks=%s)", viaTor, port)
+            Route(FASTLY_BASE, null)
+        }
+    }
+
+    private fun httpClient(route: Route): OkHttpClient {
+        val builder = OkHttpClient.Builder()
             .connectTimeout(30, TimeUnit.SECONDS)
             .readTimeout(60, TimeUnit.SECONDS)
             .applyTorClientHardening()
-            .proxy(Proxy(Proxy.Type.SOCKS, InetSocketAddress(TunnelEndpoints.LOOPBACK, port)))
-            .dns(TorSocksDns)
-            .build()
+        val port = route.socksPort
+        return if (port != null) {
+            builder
+                .proxy(Proxy(Proxy.Type.SOCKS, InetSocketAddress(TunnelEndpoints.LOOPBACK, port)))
+                .dns(TorSocksDns)
+                .build()
+        } else {
+            builder.build()
+        }
     }
 
     private fun postJson(client: OkHttpClient, url: String, json: String): String {

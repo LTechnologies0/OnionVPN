@@ -182,16 +182,8 @@ object DnsCryptConfigWriter {
             lb_strategy = 'p2'
             lb_estimator = false
             cert_refresh_delay = 240
-            ${if (preferences.dnsCryptQueryPadding) {
-                "# query_padding: DNSCrypt pads by protocol; prefer DoH padding if .so supports it"
-            } else {
-                "# query_padding disabled by preference (protocol may still pad)"
-            }}
-            ${if (preferences.dnsCryptBlockEcs) {
-                "# block ECS: never set edns_client_subnet (would deanonymize over Tor exits)"
-            } else {
-                "# ECS block preference off"
-            }}
+            # DNSCrypt protocol pads queries. EDNS Client Subnet is never configured
+            # (would deanonymize over Tor exits). force_tcp is always on (SOCKS has no UDP).
 
             # Upstream DNSCrypt server connections go through Tor SOCKS (isolated port).
             # Username/password → IsolateSOCKSAuth token (socks-extensions stream isolation).

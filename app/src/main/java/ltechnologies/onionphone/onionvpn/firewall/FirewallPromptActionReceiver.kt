@@ -15,7 +15,7 @@ import timber.log.Timber
 
 /**
  * Handles Tor / OVPN / Deny actions on the firewall request notification.
- * Defaults to permanent rules — finer scopes remain available in the Firewall screen.
+ * Notification taps are SESSION scope — PERMANENT stays in the Firewall screen.
  */
 @AndroidEntryPoint
 class FirewallPromptActionReceiver : BroadcastReceiver() {
@@ -40,7 +40,7 @@ class FirewallPromptActionReceiver : BroadcastReceiver() {
         val pending = goAsync()
         CoroutineScope(SupervisorJob() + Dispatchers.Default).launch {
             try {
-                engine.answerPrompt(requestId, verdict, FirewallRuleScope.PERMANENT)
+                engine.answerPrompt(requestId, verdict, FirewallRuleScope.SESSION)
             } catch (e: Exception) {
                 Timber.w(e, "Firewall prompt answer failed")
             } finally {

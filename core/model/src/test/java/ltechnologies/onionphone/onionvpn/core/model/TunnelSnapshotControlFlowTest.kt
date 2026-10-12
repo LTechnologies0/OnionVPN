@@ -17,10 +17,10 @@ class TunnelSnapshotControlFlowTest {
     }
 
     @Test
-    fun canStop_blocksIdleStoppingError() {
+    fun canStop_blocksIdleStopping_allowsError() {
         assertFalse(TunnelSnapshot(phase = TunnelPhase.Idle).canStop)
         assertFalse(TunnelSnapshot(phase = TunnelPhase.Stopping).canStop)
-        assertFalse(TunnelSnapshot(phase = TunnelPhase.Error).canStop)
+        assertTrue(TunnelSnapshot(phase = TunnelPhase.Error).canStop)
         assertTrue(TunnelSnapshot(phase = TunnelPhase.Connected).canStop)
         assertTrue(TunnelSnapshot(phase = TunnelPhase.StartingTor).canStop)
         assertTrue(TunnelSnapshot(phase = TunnelPhase.Blocking).canStop)

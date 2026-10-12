@@ -111,7 +111,7 @@ data class TunnelPreferences(
     /**
      * When true, wireless ADB (`com.android.shell` / `adbd`) is excluded from the
      * VPN so network ADB can use clearnet. **Forced false in release** (option hidden).
-     * Debug DataStore default: true. USB ADB is unaffected.
+     * Debug DataStore default: false (opt-in). USB ADB is unaffected.
      * Changing this requires VPN rebind (restart tunnel).
      */
     val allowAdbClearnetLeak: Boolean = false,

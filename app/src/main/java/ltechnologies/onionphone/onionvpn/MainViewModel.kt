@@ -174,6 +174,7 @@ class MainViewModel @Inject constructor(
                         if (prefs == previous) return@withLock
                         // Live apply without full tunnel restart (Orbot-style SETCONF where possible).
                         orchestrator.applyCircuitTiming(prefs)
+                        orchestrator.reloadPreferences()
                         withContext(Dispatchers.IO) {
                             tor.setBridgesLive(prefs.torBridges)
                             tor.setNodePrefsLive(

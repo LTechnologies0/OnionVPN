@@ -18,7 +18,7 @@ class TorEngineCapabilitiesCopyTest {
         assertTrue(a.liveCircuitTiming)
         assertTrue(a.synthesizeOnionAutomap)
         assertTrue(a.socksAuthIsolation)
-        assertTrue(a.circuitInspection)
+        assertFalse(a.circuitInspection) // README: no circuits UI on Arti
         assertTrue(a.multiSocksSessionGroups) // app-layer ArtiSocksRoleMux
         assertFalse(a.classicControlPlane)
         assertFalse(a.nodePrefs)
@@ -50,7 +50,7 @@ class TorEngineCapabilitiesCopyTest {
         assertFalse(text, text.contains("SessionGroup", ignoreCase = true))
         assertTrue(text, text.contains("Conjure", ignoreCase = true))
         assertTrue(text, text.contains("Single-country Exit", ignoreCase = true))
-        assertFalse(text, text.contains("No circuits UI", ignoreCase = true))
+        assertTrue(text, text.contains("No circuits UI", ignoreCase = true))
         assertFalse(text, text.contains("no Conjure", ignoreCase = true))
         assertFalse(text, text.contains("ControlPort SETCONF"))
     }
@@ -69,7 +69,7 @@ class TorEngineCapabilitiesCopyTest {
     fun arti_enginePickerHint_doesNotDenyConjure() {
         val text = TorEngine.ARTI.enginePickerHint()
         assertTrue(text, text.contains("Conjure supported", ignoreCase = true))
-        assertFalse(text, text.contains("no circuits UI", ignoreCase = true))
+        assertTrue(text, text.contains("no circuits UI", ignoreCase = true))
         assertTrue(text, text.contains("Exit country only", ignoreCase = true))
         assertFalse(text, text.contains("no Conjure", ignoreCase = true))
         assertFalse(text, text.contains("shared SocksPort", ignoreCase = true))

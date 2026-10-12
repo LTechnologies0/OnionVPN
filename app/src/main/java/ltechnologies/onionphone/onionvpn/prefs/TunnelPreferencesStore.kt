@@ -102,12 +102,12 @@ class TunnelPreferencesStore @Inject constructor(
             prefs[Keys.maxDirtiness] = toWrite.torMaxCircuitDirtinessSec
             prefs[Keys.requireNoLog] = toWrite.dnsCryptRequireNoLog
             prefs[Keys.requireNoFilter] = toWrite.dnsCryptRequireNoFilter
-            prefs[Keys.forceTcp] = toWrite.dnsCryptForceTcp
+            prefs[Keys.forceTcp] = true
             prefs[Keys.requireDnssec] = toWrite.dnsCryptRequireDnssec
             prefs[Keys.dnsAnonymized] = toWrite.dnsCryptAnonymized
             prefs[Keys.dnsQueryPadding] = toWrite.dnsCryptQueryPadding
             prefs[Keys.dnsBlockEcs] = toWrite.dnsCryptBlockEcs
-            prefs[Keys.requireOsLockdown] = toWrite.requireOsLockdown
+            prefs[Keys.requireOsLockdown] = if (isDebuggable) toWrite.requireOsLockdown else true
             prefs[Keys.firewallEnabled] = toWrite.firewallEnabled
             prefs[Keys.firewallDefault] = toWrite.firewallDefaultAction.name
             prefs[Keys.firewallTempMin] = toWrite.firewallTempMinutes
@@ -124,7 +124,7 @@ class TunnelPreferencesStore @Inject constructor(
             prefs[Keys.openVpnOverTor] = toWrite.openVpnOverTorEnabled
             prefs[Keys.openVpnProfileConfigured] = toWrite.openVpnProfileConfigured
             prefs[Keys.openVpnAuthUser] = toWrite.openVpnAuthUser
-            prefs[Keys.openVpnAuthPassword] = toWrite.openVpnAuthPassword
+            prefs[Keys.openVpnAuthPassword] = OpenVpnPasswordCipher.encrypt(toWrite.openVpnAuthPassword)
             prefs[Keys.welcomeCompleted] = toWrite.welcomeCompleted
             Timber.d(
                 "TunnelPreferences updated engine=%s plane=%s firewall=%s noLogs=%s ovpn=%s",
@@ -159,12 +159,17 @@ class TunnelPreferencesStore @Inject constructor(
         torMaxCircuitDirtinessSec = this[Keys.maxDirtiness] ?: 600,
         dnsCryptRequireNoLog = this[Keys.requireNoLog] ?: true,
         dnsCryptRequireNoFilter = this[Keys.requireNoFilter] ?: false,
-        dnsCryptForceTcp = this[Keys.forceTcp] ?: true,
+        dnsCryptForceTcp = true, // SOCKS has no UDP — never honor a stored false.
         dnsCryptRequireDnssec = this[Keys.requireDnssec] ?: true,
         dnsCryptAnonymized = this[Keys.dnsAnonymized] ?: false,
         dnsCryptQueryPadding = this[Keys.dnsQueryPadding] ?: true,
         dnsCryptBlockEcs = this[Keys.dnsBlockEcs] ?: true,
-        requireOsLockdown = this[Keys.requireOsLockdown] ?: !isDebuggable,
+        // Release always requires OS lockdown (pref cannot disable). Debug honors the toggle.
+        requireOsLockdown = if (isDebuggable) {
+            this[Keys.requireOsLockdown] ?: false
+        } else {
+            true
+        },
         // Via OVPN needs the interactive firewall; never leave OVPN mode with firewall off.
         firewallEnabled = when {
             (this[Keys.openVpnOverTor] == true) -> true
@@ -190,9 +195,9 @@ class TunnelPreferencesStore @Inject constructor(
             ?.filter { it.isNotEmpty() }
             ?.toSet()
             ?: emptySet(),
-        // Release: always false (option removed from UI). Debug: default on for wireless ADB.
+        // Fail-closed: default false even in debug (opt-in only). Release never persists true.
         allowAdbClearnetLeak = if (isDebuggable) {
-            this[Keys.allowAdbClearnetLeak] ?: true
+            this[Keys.allowAdbClearnetLeak] ?: false
         } else {
             false
         },
@@ -200,7 +205,7 @@ class TunnelPreferencesStore @Inject constructor(
         openVpnOverTorEnabled = this[Keys.openVpnOverTor] ?: false,
         openVpnProfileConfigured = this[Keys.openVpnProfileConfigured] ?: false,
         openVpnAuthUser = this[Keys.openVpnAuthUser].orEmpty(),
-        openVpnAuthPassword = this[Keys.openVpnAuthPassword].orEmpty(),
+        openVpnAuthPassword = OpenVpnPasswordCipher.decrypt(this[Keys.openVpnAuthPassword].orEmpty()),
         welcomeCompleted = this[Keys.welcomeCompleted] ?: false,
     )
 }

@@ -83,6 +83,14 @@ class TunnelOrchestrator @Inject constructor(
         )
     }
 
+    /** Reload DataStore prefs into the running service (live apply from Settings). */
+    fun reloadPreferences() {
+        context.startService(
+            Intent(context, TunnelForegroundService::class.java)
+                .setAction(TunnelForegroundService.ACTION_RELOAD_PREFERENCES),
+        )
+    }
+
     /** Live SETCONF MaxCircuitDirtiness / NewCircuitPeriod while connected. */
     fun applyCircuitTiming(preferences: TunnelPreferences) {
         context.startService(

@@ -457,10 +457,10 @@ data class TunnelSnapshot(
             phase == TunnelPhase.Error ||
             phase == TunnelPhase.Blocking
 
-    /** Phases where STOP is meaningful. */
+    /** Phases where STOP is meaningful (Error still owns FGS/TUN until user stops). */
     val canStop: Boolean
         get() = when (phase) {
-            TunnelPhase.Idle, TunnelPhase.Stopping, TunnelPhase.Error -> false
+            TunnelPhase.Idle, TunnelPhase.Stopping -> false
             else -> true
         }
 
