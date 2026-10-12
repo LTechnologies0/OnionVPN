@@ -102,6 +102,33 @@ class TorControlClient {
         )
     }
 
+    /** kotlin-tor loopback ControlPort (cookie auth, same pipeline as [connect]). */
+    fun connectTcp(
+        host: String,
+        port: Int,
+        cookieFile: File,
+        bridgesConfigured: Boolean = false,
+    ) {
+        disconnect(sendShutdown = false)
+        if (!cookieFile.exists() || cookieFile.length() == 0L) {
+            throw IOException("Cookie file missing: ${cookieFile.absolutePath}")
+        }
+        val cookieHex = cookieFile.readBytes().joinToString("") { b ->
+            "%02X".format(b.toInt() and 0xff)
+        }
+        transport.openTcp(host, port)
+
+        transport.command("AUTHENTICATE $cookieHex")
+        runCatching { transport.command("TAKEOWNERSHIP") }
+        runCatching { transport.command("RESETCONF __OwningControllerProcess") }
+        runCatching { transport.command("USEFEATURE VERBOSE_NAMES") }
+        runCatching { transport.command("USEFEATURE EXTENDED_EVENTS") }
+        subscribeClientEvents(bridgesConfigured)
+        refreshBootstrap()
+        _status.update { it.copy(connected = true, lastError = null) }
+        Timber.i("Tor control connected (tcp %s:%d) bridges=%s", host, port, bridgesConfigured)
+    }
+
     /**
      * Incremental SETEVENTS: each successful tier becomes the new baseline.
      * Optional / PT keywords are tried **one event at a time** — Tor 552s the

@@ -92,6 +92,7 @@ internal object TunnelSnapshotBuilder {
                 when {
                     onionmasqReady -> "onionmasq"
                     torEngine == TorEngine.ARTI -> "arti-mobile"
+                    torEngine == TorEngine.KOTLIN_TOR -> "kotlin-tor"
                     else -> ""
                 }
             },

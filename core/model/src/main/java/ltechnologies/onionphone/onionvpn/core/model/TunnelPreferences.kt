@@ -26,6 +26,11 @@ data class TunnelPreferences(
      * Changing this requires a tunnel restart.
      */
     val torEngine: TorEngine = TorEngine.LITTLE_T,
+    /**
+     * DNSCrypt stub backend. Default [DnsEngine.NATIVE_PROXY]; [DnsEngine.KOTLIN] uses
+     * org.kotlindnscrypt over Tor SOCKS. Changing requires tunnel restart.
+     */
+    val dnsEngine: DnsEngine = DnsEngine.NATIVE_PROXY,
     val torBridges: String = "",
     val torEntryNodes: String = "",
     val torExitNodes: String = "",

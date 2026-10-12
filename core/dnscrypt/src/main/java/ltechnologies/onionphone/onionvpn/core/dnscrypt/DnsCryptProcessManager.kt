@@ -13,7 +13,9 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import ltechnologies.onionphone.onionvpn.core.dnscrypt.config.DnsCryptConfigWriter
 import ltechnologies.onionphone.onionvpn.core.dnscrypt.config.DnsCryptPublicResolvers
+import ltechnologies.onionphone.onionvpn.core.dnscrypt.kotlin.KotlinDnsCryptRuntime
 import ltechnologies.onionphone.onionvpn.core.dnscrypt.lifecycle.DnsCryptReadiness
+import ltechnologies.onionphone.onionvpn.core.model.DnsEngine
 import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
 import ltechnologies.onionphone.onionvpn.core.model.TunnelFailure
 import ltechnologies.onionphone.onionvpn.core.model.TunnelPreferences
@@ -39,6 +41,8 @@ class DnsCryptProcessManager(
     private val context: Context,
 ) {
     private var process: Process? = null
+    private val kotlinRuntime = KotlinDnsCryptRuntime()
+    private var kotlinEngineActive = false
     private var logThread: Thread? = null
     private val listenerReady = AtomicBoolean(false)
     private val serverReady = AtomicBoolean(false)
@@ -92,7 +96,17 @@ class DnsCryptProcessManager(
                 listenPort = ports.dnsCryptListenPort
                 listenerReady.set(false)
                 serverReady.set(false)
+                kotlinEngineActive = preferences.dnsEngine == DnsEngine.KOTLIN
                 try {
+                    if (kotlinEngineActive) {
+                        return@stepSuspending startKotlinEngine(
+                            lastServerName,
+                            ports,
+                            preferences,
+                            socksPortOverride,
+                            socksUser,
+                        )
+                    }
                     OpTrace.step("dnscrypt", "ensure_binary") { ensureExecutable(binaryFile) }
                     OpTrace.step("dnscrypt", "write_config") {
                         writeConfig(lastServerName, ports, socksPortOverride, socksUser)
@@ -131,7 +145,8 @@ class DnsCryptProcessManager(
         }
     }
 
-    fun isRunning(): Boolean = process?.isAlive == true
+    fun isRunning(): Boolean =
+        if (kotlinEngineActive) kotlinRuntime.isRunning() else process?.isAlive == true
 
     /**
      * Soft reconfigure while Connected — rewrite toml and SIGHUP if the process is
@@ -154,6 +169,18 @@ class DnsCryptProcessManager(
                 if (socksPortOverride != null) lastSocksOverride = socksPortOverride
                 if (socksUserOverride != null) lastSocksUser = socksUserOverride
                 val socksUser = lastSocksUser ?: TunnelEndpoints.dnsCryptSocksUser()
+                kotlinEngineActive = preferences.dnsEngine == DnsEngine.KOTLIN
+                if (kotlinEngineActive) {
+                    val socksPort = lastSocksOverride ?: ports.torDnsCryptSocksPort
+                    kotlinRuntime.onLogLine = onLogLine
+                    kotlinRuntime.reconfigure(
+                        torSocksPort = socksPort,
+                        socksUser = socksUser,
+                        serverName = lastServerName,
+                        preferences = preferences,
+                    )
+                    return@withLock Result.success(Unit)
+                }
                 writeConfig(lastServerName, ports, lastSocksOverride, socksUser)
                 if (isRunning() && sighupRunningProcess()) {
                     Timber.i("DNSCrypt soft reconfigure via SIGHUP")
@@ -220,6 +247,10 @@ class DnsCryptProcessManager(
         if (!lastClearCacheMs.compareAndSet(prev, now)) {
             return@withContext Result.success(Unit)
         }
+        if (kotlinEngineActive) {
+            kotlinRuntime.clearQueryCache()
+            return@withContext Result.success(Unit)
+        }
         Timber.i("DNSCrypt clearQueryCache — SIGHUP (soft; no stop/spawn)")
         applyPreferences(
             lastServerName,
@@ -227,6 +258,38 @@ class DnsCryptProcessManager(
             socksPortOverride = lastSocksOverride,
             socksUserOverride = lastSocksUser,
         )
+    }
+
+    private suspend fun startKotlinEngine(
+        serverName: String,
+        ports: TunnelRuntimePorts,
+        preferences: TunnelPreferences,
+        socksPortOverride: Int?,
+        socksUser: String,
+    ): Result<Unit> {
+        val socksPort = socksPortOverride ?: ports.torDnsCryptSocksPort
+        kotlinRuntime.onLogLine = onLogLine
+        OpTrace.step("dnscrypt", "write_config") {
+            writeConfig(serverName, ports, socksPortOverride, socksUser)
+        }
+        OpTrace.stepSuspending("dnscrypt", "kotlin_start") {
+            kotlinRuntime.start(
+                listenPort = ports.dnsCryptListenPort,
+                torSocksPort = socksPort,
+                socksUser = socksUser,
+                serverName = serverName,
+                preferences = preferences,
+            )
+        }
+        OpTrace.stepSuspending("dnscrypt", "wait_listener") {
+            waitForListener(ports.dnsCryptListenPort)
+        }
+        OpTrace.stepSuspending("dnscrypt", "wait_server") {
+            waitForLiveServer(ports.dnsCryptListenPort)
+        }
+        OpTrace.info("dnscrypt", "kotlin listening on ${ports.dnsCryptListenPort}")
+        Timber.i("kotlin-DNSCrypt listening on ${ports.dnsCryptListenPort}")
+        return Result.success(Unit)
     }
 
     private fun spawnProcess() {
@@ -282,7 +345,7 @@ class DnsCryptProcessManager(
             if (!kotlin.coroutines.coroutineContext.isActive) {
                 throw CancellationException("DNSCrypt server wait cancelled")
             }
-            if (process?.isAlive != true) {
+            if (!kotlinEngineActive && process?.isAlive != true) {
                 throw TunnelFailure.DnsCrypt(
                     "upstream",
                     "DNSCrypt process exited before upstream was ready",
@@ -321,7 +384,7 @@ class DnsCryptProcessManager(
             if (!kotlin.coroutines.coroutineContext.isActive) {
                 throw CancellationException("DNSCrypt listener wait cancelled")
             }
-            if (process?.isAlive != true) {
+            if (!kotlinEngineActive && process?.isAlive != true) {
                 throw TunnelFailure.DnsCrypt(
                     "listen",
                     "DNSCrypt process exited before listener was ready on port $port",
@@ -410,6 +473,10 @@ class DnsCryptProcessManager(
     }
 
     private fun stopInternal() {
+        if (kotlinEngineActive) {
+            kotlinRuntime.stop()
+            kotlinEngineActive = false
+        }
         process?.destroyForcibly()
         runCatching { process?.waitFor() }
         process = null

@@ -24,6 +24,7 @@ import ltechnologies.onionphone.onionvpn.core.model.observability.MemoryHygiene
 import ltechnologies.onionphone.onionvpn.core.model.observability.OpTrace
 import ltechnologies.onionphone.onionvpn.core.model.stability.ProcessLogLevel
 import ltechnologies.onionphone.onionvpn.core.tor.arti.ArtiRuntime
+import ltechnologies.onionphone.onionvpn.core.tor.kotlintor.KotlinTorRuntime
 import ltechnologies.onionphone.onionvpn.core.tor.config.TorBridgeConfig
 import ltechnologies.onionphone.onionvpn.core.tor.config.TorConfigWriter
 import ltechnologies.onionphone.onionvpn.core.tor.control.TorControlClient
@@ -83,6 +84,19 @@ class TorProcessManager(
     private var preferences: TunnelPreferences = TunnelPreferences()
     private var activeEngine: TorEngine = TorEngine.LITTLE_T
     private val arti = ArtiRuntime(context)
+    private val kotlinTor = KotlinTorRuntime(context)
+
+    /** VpnService.protect for kotlin-tor uplink (set before [start] when engine is [TorEngine.KOTLIN_TOR]). */
+    var vpnSocketProtector: ((Int) -> Boolean)? = null
+        set(value) {
+            field = value
+            kotlinTor.socketProtector = value
+        }
+    var vpnSocketProtectorSocket: ((java.net.Socket) -> Boolean)? = null
+        set(value) {
+            field = value
+            kotlinTor.socketProtectorSocket = value
+        }
     /**
      * App-layer dormant flag for Arti when Ext JNI is absent.
      * Prefer [ArtiControlNative.setDormant] (TorClient::set_dormant) when patched .so is loaded.
@@ -251,6 +265,7 @@ class TorProcessManager(
     val runtimeConfigFile: File
         get() = when (activeEngine) {
             TorEngine.ARTI -> arti.statusFile
+            TorEngine.KOTLIN_TOR -> kotlinTor.torrcFile
             TorEngine.LITTLE_T -> torrcFile
         }
 
@@ -278,6 +293,7 @@ class TorProcessManager(
                     artiDormant = false
                     startArti(ports, preferences)
                 }
+                TorEngine.KOTLIN_TOR -> startKotlinTor(ports, preferences)
                 TorEngine.LITTLE_T -> startLittleT(ports, preferences)
             }
         }
@@ -313,6 +329,66 @@ class TorProcessManager(
             runtimePorts = null
             Result.failure(TunnelFailure.fromThrowable(error, context = "arti.start"))
         }
+    }
+
+    private suspend fun startKotlinTor(
+        ports: TunnelRuntimePorts,
+        preferences: TunnelPreferences,
+    ): Result<Unit> {
+        OpTrace.debug("tor", "kotlin_tor.stop_prior")
+        stopInternal()
+        runtimePorts = ports
+        return try {
+            OpTrace.step("tor", "ensure_binaries") {
+                ensurePluggableTransportBinaries(preferences.torBridges)
+                ensureGeoIpFiles()
+                prepareDataDirectoryForBridges(preferences.torBridges)
+            }
+            OpTrace.stepSuspending("tor", "kotlin_tor.start") {
+                kotlinTor.start(ports, preferences)
+            }
+            OpTrace.stepSuspending("tor", "geoip") {
+                ensureGeoIpFiles(socksPort = ports.torProbeSocksPort)
+                applyGeoIpIfPresent()
+            }
+            waitForKotlinTorControlPort(timeoutMs = 60_000)
+            OpTrace.stepSuspending("tor", "control_connect") {
+                control.connectTcp(
+                    host = "127.0.0.1",
+                    port = kotlinTor.controlPort(),
+                    cookieFile = kotlinTor.cookieFile,
+                    bridgesConfigured = TorBridgeConfig.isConfigured(preferences.torBridges),
+                )
+            }
+            OpTrace.stepSuspending("tor", "bootstrap", ProcessLogLevel.INFO) {
+                waitForBootstrap(ports)
+            }
+            OpTrace.stepSuspending("tor", "set_active") { control.setActive() }
+            OpTrace.info(
+                "tor",
+                "kotlin-tor ready socks=${ports.torSocksPort} control=${kotlinTor.controlPort()}",
+            )
+            Result.success(Unit)
+        } catch (error: Exception) {
+            OpTrace.error("tor", "kotlin-tor failed to start", error)
+            Timber.e(error, "kotlin-tor failed to start")
+            stopInternal()
+            runtimePorts = null
+            Result.failure(TunnelFailure.fromThrowable(error, context = "kotlin_tor.start"))
+        }
+    }
+
+    private suspend fun waitForKotlinTorControlPort(timeoutMs: Long) {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            if (kotlinTor.controlPort() > 0 && kotlinTor.cookieFile.isFile &&
+                kotlinTor.cookieFile.length() > 0L
+            ) {
+                return
+            }
+            delay(100)
+        }
+        throw IOException("kotlin-tor control port not ready")
     }
 
     private suspend fun startLittleT(
@@ -372,6 +448,7 @@ class TorProcessManager(
 
     fun isRunning(): Boolean = when (activeEngine) {
         TorEngine.ARTI -> arti.isRunning()
+        TorEngine.KOTLIN_TOR -> kotlinTor.isRunning()
         TorEngine.LITTLE_T -> process?.isAlive == true
     }
 
@@ -406,7 +483,7 @@ class TorProcessManager(
 
     /** True when classic ControlSocket session is open (never true on Arti). */
     fun isClassicControlConnected(): Boolean =
-        activeEngine == TorEngine.LITTLE_T && control.isConnected
+        activeEngine.usesClassicControl && control.isConnected
 
     private fun requireClassic(op: String): Result<Unit>? {
         if (activeEngine == TorEngine.ARTI) {
@@ -456,7 +533,7 @@ class TorProcessManager(
                     },
                 )
             }
-            TorEngine.LITTLE_T -> {
+            TorEngine.LITTLE_T, TorEngine.KOTLIN_TOR -> {
                 if (!control.isConnected && !ensureClassicControlConnected()) {
                     return@withContext Result.failure(IOException("control not connected"))
                 }
@@ -646,7 +723,7 @@ class TorProcessManager(
             TorEngine.ARTI -> {
                 newNym().map { 0 }
             }
-            TorEngine.LITTLE_T -> {
+            TorEngine.LITTLE_T, TorEngine.KOTLIN_TOR -> {
                 if (!control.isConnected) {
                     return@withContext Result.failure(IOException("control not connected"))
                 }
@@ -717,7 +794,7 @@ class TorProcessManager(
                     },
                 )
             }
-            TorEngine.LITTLE_T -> {
+            TorEngine.LITTLE_T, TorEngine.KOTLIN_TOR -> {
                 if (!control.isConnected) {
                     return@withContext Result.failure(IOException("control not connected"))
                 }
@@ -812,8 +889,26 @@ class TorProcessManager(
      * Without this, NEWNYM / CIRC / SETCONF stay broken until a full tunnel restart.
      */
     fun ensureClassicControlConnected(): Boolean {
-        if (activeEngine != TorEngine.LITTLE_T) return false
+        if (!activeEngine.usesClassicControl) return false
         if (control.isConnected) return true
+        if (activeEngine == TorEngine.KOTLIN_TOR) {
+            if (!kotlinTor.isRunning()) return false
+            val port = kotlinTor.controlPort()
+            if (port <= 0 || !kotlinTor.cookieFile.isFile) return false
+            return try {
+                control.connectTcp(
+                    host = "127.0.0.1",
+                    port = port,
+                    cookieFile = kotlinTor.cookieFile,
+                    bridgesConfigured = TorBridgeConfig.isConfigured(preferences.torBridges),
+                )
+                runCatching { control.setActive() }
+                true
+            } catch (error: Exception) {
+                Timber.w(error, "kotlin-tor control reconnect failed")
+                false
+            }
+        }
         val proc = process
         if (proc == null || !proc.isAlive) return false
         if (!controlSocketFile.exists() || !cookieFile.exists() || cookieFile.length() == 0L) {
@@ -976,11 +1071,11 @@ class TorProcessManager(
                         )
                     }
                 }
-                TorEngine.LITTLE_T -> {
-                    if (!control.isConnected) {
-                        return@withContext Result.failure(IOException("control not connected"))
-                    }
-                    control.resolve(hostname, timeoutMs)
+            TorEngine.LITTLE_T, TorEngine.KOTLIN_TOR -> {
+                if (!control.isConnected) {
+                    return@withContext Result.failure(IOException("control not connected"))
+                }
+                control.resolve(hostname, timeoutMs)
                 }
             }
         }
@@ -1017,6 +1112,10 @@ class TorProcessManager(
         return when (activeEngine) {
             TorEngine.LITTLE_T ->
                 process?.isAlive == true &&
+                    TorReadiness.isPrimarySocksReady(ports) &&
+                    TorReadiness.isDnsPortAnyReady(ports.torDnsPort, timeoutMs = 1_000)
+            TorEngine.KOTLIN_TOR ->
+                kotlinTor.isRunning() &&
                     TorReadiness.isPrimarySocksReady(ports) &&
                     TorReadiness.isDnsPortAnyReady(ports.torDnsPort, timeoutMs = 1_000)
             TorEngine.ARTI -> isArtiTrafficReady(ports)
@@ -1525,7 +1624,10 @@ class TorProcessManager(
     }
 
     private suspend fun stopInternal() {
-        if (activeEngine == TorEngine.ARTI || arti.isRunning()) {
+        if (kotlinTor.isRunning()) {
+            kotlinTor.stop()
+            control.resetStatus()
+        } else if (activeEngine == TorEngine.ARTI || arti.isRunning()) {
             // Await Stopped so a following Little-T/Arti start does not race AMEx state.
             arti.stopAndAwait()
             control.resetStatus()

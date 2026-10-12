@@ -14,6 +14,7 @@ import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
+import ltechnologies.onionphone.onionvpn.core.model.DnsEngine
 import ltechnologies.onionphone.onionvpn.core.model.DnsResolverMode
 import ltechnologies.onionphone.onionvpn.core.model.FirewallDefaultAction
 import ltechnologies.onionphone.onionvpn.core.model.TorEngine
@@ -33,6 +34,7 @@ class TunnelPreferencesStore @Inject constructor(
         val routeAll = booleanPreferencesKey("route_all")
         val killSwitch = booleanPreferencesKey("kill_switch")
         val dnsServer = stringPreferencesKey("dns_server")
+        val dnsEngine = stringPreferencesKey("dns_engine")
         val dnsMode = stringPreferencesKey("dns_mode")
         val torEngine = stringPreferencesKey("tor_engine")
         val torBridges = stringPreferencesKey("tor_bridges")
@@ -92,6 +94,7 @@ class TunnelPreferencesStore @Inject constructor(
             prefs[Keys.routeAll] = toWrite.routeAllTrafficThroughTor
             prefs[Keys.killSwitch] = true // constant — never persist off
             prefs[Keys.dnsServer] = toWrite.dnsCryptServerName
+            prefs[Keys.dnsEngine] = toWrite.dnsEngine.name
             prefs[Keys.dnsMode] = toWrite.dnsResolverMode.name
             prefs[Keys.torEngine] = toWrite.torEngine.name
             prefs[Keys.torBridges] = toWrite.torBridges
@@ -141,6 +144,7 @@ class TunnelPreferencesStore @Inject constructor(
         routeAllTrafficThroughTor = this[Keys.routeAll] ?: true,
         killSwitchEnabled = true, // constant app kill-switch
         dnsCryptServerName = this[Keys.dnsServer] ?: "cloudflare",
+        dnsEngine = DnsEngine.fromPreference(this[Keys.dnsEngine]),
         dnsResolverMode = this[Keys.dnsMode]
             ?.let { runCatching { DnsResolverMode.valueOf(it) }.getOrNull() }
             ?.let { mode ->

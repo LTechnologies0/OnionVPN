@@ -25,6 +25,7 @@ dependencies {
     implementation(libs.okhttp)
     // Tor Project / Guardian Project Arti mobile (Rust Tor) — dual-engine with libtor.so
     implementation(libs.arti.mobile)
+    implementation("org.kotlintor:android")
 
     testImplementation(libs.junit)
 }

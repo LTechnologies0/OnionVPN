@@ -21,6 +21,7 @@ dependencies {
     implementation(libs.kotlinx.coroutines.core)
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.timber)
+    implementation("org.kotlindnscrypt:core")
 
     testImplementation(libs.junit)
 }

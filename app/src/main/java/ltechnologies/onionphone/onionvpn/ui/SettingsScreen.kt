@@ -53,6 +53,7 @@ import ltechnologies.onionphone.onionvpn.bridges.MoatCircumventionClient
 import ltechnologies.onionphone.onionvpn.core.dnscrypt.config.DnsCryptPublicResolvers
 import ltechnologies.onionphone.onionvpn.core.model.DnsResolverMode
 import ltechnologies.onionphone.onionvpn.core.model.FirewallDefaultAction
+import ltechnologies.onionphone.onionvpn.core.model.DnsEngine
 import ltechnologies.onionphone.onionvpn.core.model.TorEngine
 import ltechnologies.onionphone.onionvpn.core.model.TunDataPlane
 import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
@@ -894,6 +895,20 @@ fun SettingsScreen(
                 enabled = controlsEnabled,
                 label = { Text("Arti") },
             )
+            FilterChip(
+                selected = local.torEngine == TorEngine.KOTLIN_TOR,
+                onClick = {
+                    commit(
+                        local.copy(
+                            torEngine = TorEngine.KOTLIN_TOR,
+                            tunDataPlane = TunDataPlane.HEV_SOCKS,
+                        ),
+                        restart = true,
+                    )
+                },
+                enabled = controlsEnabled,
+                label = { Text("kotlin-tor") },
+            )
         }
         SectionHeader(
             title = "TUN data plane",
@@ -925,6 +940,7 @@ fun SettingsScreen(
                     Text(
                         when (local.torEngine) {
                             TorEngine.ARTI -> "hev SOCKS (Arti)"
+                            TorEngine.KOTLIN_TOR -> "hev SOCKS (kotlin-tor)"
                             else -> "hev SOCKS (C Tor)"
                         },
                     )
@@ -1508,6 +1524,31 @@ fun SettingsScreen(
         }
 
         SectionHeader(
+            title = "DNSCrypt engine",
+            subtitle = local.dnsEngine.settingsSubtitle(),
+        )
+        Row(
+            modifier = Modifier.horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            FilterChip(
+                selected = local.dnsEngine == DnsEngine.NATIVE_PROXY,
+                onClick = {
+                    commit(local.copy(dnsEngine = DnsEngine.NATIVE_PROXY), restart = true)
+                },
+                enabled = controlsEnabled,
+                label = { Text("Native proxy") },
+            )
+            FilterChip(
+                selected = local.dnsEngine == DnsEngine.KOTLIN,
+                onClick = {
+                    commit(local.copy(dnsEngine = DnsEngine.KOTLIN), restart = true)
+                },
+                enabled = controlsEnabled,
+                label = { Text("kotlin-DNSCrypt") },
+            )
+        }
+        SectionHeader(
             title = "DNSCrypt",
             subtitle = "Upstream forced through Tor SOCKS; bootstrap via Tor DNSPort; " +
                 "full public-resolvers catalog (${DnsCryptPublicResolvers.knownServers.size} IPv4). " +
@@ -1581,13 +1622,13 @@ fun SettingsScreen(
             onChecked = { commit(local.copy(dnsCryptAnonymized = it), restart = true) },
         )
         Text(
-            text = "Adds a relay hop when the pinned dnscrypt-proxy supports [anonymized_dns]. " +
-                "Filters out resolvers marked incompatible with anonymization.",
+            text = "Adds a relay hop (native [anonymized_dns] or kotlin-DNSCrypt relay catalog). " +
+                "Filters out resolvers marked incompatible with anonymization — same on both engines.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         Text(
-            text = "DNSCrypt protocol padding is always on. EDNS Client Subnet is never sent " +
+            text = "DNSCrypt protocol padding is always on (native + kotlin). EDNS Client Subnet is never sent " +
                 "(would deanonymize over Tor exits).",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,

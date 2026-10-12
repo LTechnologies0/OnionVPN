@@ -6,23 +6,39 @@ package ltechnologies.onionphone.onionvpn.core.model
  * - [LITTLE_T]: classic C Tor (`libtor.so` + torrc + ControlSocket).
  * - [ARTI]: Rust Arti via Guardian Project / Tor Project `arti-mobile`
  *   (in-process SOCKS + DNS proxy; embeds arti-client 0.36.0; no classic control port).
+ * - [KOTLIN_TOR]: in-process [org.kotlintor] with classic control-spec over loopback TCP.
  */
 enum class TorEngine {
     LITTLE_T,
     ARTI,
+    KOTLIN_TOR,
     ;
 
     val displayName: String
         get() = when (this) {
             LITTLE_T -> "C Tor (libtor)"
             ARTI -> "Arti (Rust)"
+            KOTLIN_TOR -> "kotlin-tor (JVM)"
         }
+
+    /** Separate `libtor.so` child process (not in-process JVM). */
+    val usesLittleTProcess: Boolean
+        get() = this == LITTLE_T
+
+    /** Classic control-spec (cookie auth, CIRC/STREAM, SETCONF when supported). */
+    val usesClassicControl: Boolean
+        get() = this == LITTLE_T || this == KOTLIN_TOR
+
+    /** In-process Tor client (Arti or kotlin-tor). */
+    val usesInProcessClient: Boolean
+        get() = this == ARTI || this == KOTLIN_TOR
 
     /** Feature matrix used to gate UI, validation, and recovery paths. */
     val capabilities: TorEngineCapabilities
         get() = when (this) {
             LITTLE_T -> TorEngineCapabilities.LITTLE_T
             ARTI -> TorEngineCapabilities.ARTI
+            KOTLIN_TOR -> TorEngineCapabilities.KOTLIN_TOR
         }
 
     /**
@@ -103,15 +119,8 @@ enum class TorEngine {
     }
 
     companion object {
-        fun fromPreference(raw: String?): TorEngine {
-            if (raw.equals("KOTLIN_TOR", ignoreCase = true) ||
-                raw.equals("kotlin_tor", ignoreCase = true)
-            ) {
-                // Former kotlin-tor prefs migrate to classic C Tor (same HEV_SOCKS plane).
-                return LITTLE_T
-            }
-            return entries.firstOrNull { it.name.equals(raw, ignoreCase = true) } ?: LITTLE_T
-        }
+        fun fromPreference(raw: String?): TorEngine =
+            entries.firstOrNull { it.name.equals(raw, ignoreCase = true) } ?: LITTLE_T
     }
 }
 
@@ -193,6 +202,11 @@ data class TorEngineCapabilities(
             nodePrefs = true,
             exitCountryPrefs = true,
             bridgesAtStart = true,
+        )
+
+        /** kotlin-tor: control-spec over TCP; torrc-derived config; circuits UI when bootstrapped. */
+        val KOTLIN_TOR = LITTLE_T.copy(
+            torrcConfig = true,
         )
 
         val ARTI = TorEngineCapabilities(

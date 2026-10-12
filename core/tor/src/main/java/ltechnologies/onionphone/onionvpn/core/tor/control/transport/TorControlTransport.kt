@@ -8,6 +8,8 @@ import java.io.File
 import java.io.IOException
 import java.io.InputStreamReader
 import java.io.OutputStreamWriter
+import java.net.InetSocketAddress
+import java.net.Socket
 import java.nio.charset.StandardCharsets
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -34,6 +36,7 @@ internal class TorControlTransport(
 ) {
     private val commandLock = Any()
     private var socket: LocalSocket? = null
+    private var tcpSocket: Socket? = null
     private var reader: BufferedReader? = null
     private var writer: BufferedWriter? = null
     private var readerThread: Thread? = null
@@ -66,6 +69,20 @@ internal class TorControlTransport(
             ),
         )
         socket = sock
+        reader = BufferedReader(InputStreamReader(sock.inputStream, StandardCharsets.US_ASCII))
+        writer = BufferedWriter(OutputStreamWriter(sock.outputStream, StandardCharsets.US_ASCII))
+        running.set(true)
+        startReader()
+    }
+
+    /** Loopback TCP ControlPort (kotlin-tor). */
+    fun openTcp(host: String, port: Int) {
+        closeQuietly()
+        if (port <= 0) throw IOException("ControlPort invalid: $port")
+        val sock = Socket()
+        sock.tcpNoDelay = true
+        sock.connect(InetSocketAddress(host, port), 5_000)
+        tcpSocket = sock
         reader = BufferedReader(InputStreamReader(sock.inputStream, StandardCharsets.US_ASCII))
         writer = BufferedWriter(OutputStreamWriter(sock.outputStream, StandardCharsets.US_ASCII))
         running.set(true)
@@ -111,9 +128,11 @@ internal class TorControlTransport(
         runCatching { writer?.close() }
         runCatching { reader?.close() }
         runCatching { socket?.close() }
+        runCatching { tcpSocket?.close() }
         writer = null
         reader = null
         socket = null
+        tcpSocket = null
         readerThread?.interrupt()
         readerThread = null
     }

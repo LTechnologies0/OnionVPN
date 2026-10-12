@@ -38,8 +38,8 @@ class TorEnginePortAllocatorTest {
         assertEquals(TorEngine.ARTI, TorEngine.fromPreference("arti"))
         assertEquals(TorEngine.LITTLE_T, TorEngine.fromPreference("LITTLE_T"))
         // Former kotlin-tor prefs migrate to C Tor.
-        assertEquals(TorEngine.LITTLE_T, TorEngine.fromPreference("KOTLIN_TOR"))
-        assertEquals(TorEngine.LITTLE_T, TorEngine.fromPreference("kotlin_tor"))
+        assertEquals(TorEngine.KOTLIN_TOR, TorEngine.fromPreference("KOTLIN_TOR"))
+        assertEquals(TorEngine.KOTLIN_TOR, TorEngine.fromPreference("kotlin_tor"))
     }
 
     @Test

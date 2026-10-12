@@ -1,5 +1,6 @@
 package ltechnologies.onionphone.onionvpn.core.model
 
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -29,7 +30,10 @@ class TorEngineCapabilitiesCopyTest {
 
     @Test
     fun littleT_capabilityMatrix_hasFullControlPlane() {
-        val c = TorEngine.LITTLE_T.capabilities
+        val c = TorEngine.KOTLIN_TOR.capabilities
+        assertEquals(TorEngine.LITTLE_T.capabilities, c)
+
+        val little = TorEngine.LITTLE_T.capabilities
         assertTrue(c.classicControlPlane)
         assertTrue(c.multiSocksSessionGroups)
         assertTrue(c.torrcConfig)

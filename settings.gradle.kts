@@ -20,6 +20,9 @@ dependencyResolutionManagement {
 
 rootProject.name = "onion-vpn"
 
+includeBuild("../../kotlin-tor")
+includeBuild("../kotlin-DNSCrypt")
+
 include(
     ":app",
     ":baselineprofile",

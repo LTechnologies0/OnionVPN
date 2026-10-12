@@ -664,7 +664,7 @@ class TunnelForegroundService : Service() {
                         )
                         return START_STICKY
                     }
-                } else if (preferences.torEngine == TorEngine.LITTLE_T) {
+                } else if (preferences.torEngine.usesClassicControl) {
                     // Soft debounce — SocksPort stays up (C Tor defers NEWNYM).
                     val wait = lastLittleTNewNymMs + LITTLE_T_NEWNYM_SOFT_DEBOUNCE_MS -
                         System.currentTimeMillis()
@@ -784,7 +784,7 @@ class TunnelForegroundService : Service() {
                                         Timber.w(it, "DNSCrypt NEWNYM token rotate failed")
                                     }
                                 }
-                                if (preferences.torEngine == TorEngine.LITTLE_T) {
+                                if (preferences.torEngine.usesLittleTProcess) {
                                     lastLittleTNewNymMs = System.currentTimeMillis()
                                 }
                             }
@@ -1151,6 +1151,14 @@ class TunnelForegroundService : Service() {
         // HEV / C Tor: classic tor.start → DNSCrypt → Connected.
         var activePorts = ports
         if (effectivePlane != TunDataPlane.ONIONMASQ) {
+            tor.vpnSocketProtector = { fd -> OnionVpnService.protectSocket(fd) }
+            tor.vpnSocketProtectorSocket = { sock ->
+                runCatching {
+                    android.os.ParcelFileDescriptor.fromSocket(sock).use { pfd ->
+                        OnionVpnService.protectSocket(pfd.fd)
+                    }
+                }.getOrDefault(false)
+            }
             val torResult = try {
                 OpTrace.stepSuspending("tunnel", "tor_start", ProcessLogLevel.INFO) {
                     tor.start(ports, preferences)
@@ -2276,7 +2284,7 @@ class TunnelForegroundService : Service() {
     private fun maybeSignalActive() {
         if (!preferences.torEngine.capabilities.dormantSignals) return
         val st = tor.controlStatus.value
-        val controlLive = preferences.torEngine == TorEngine.LITTLE_T &&
+        val controlLive = preferences.torEngine.usesClassicControl &&
             tor.control.isConnected
         val artiLive = preferences.torEngine == TorEngine.ARTI &&
             (st.connected || tor.isRunning())

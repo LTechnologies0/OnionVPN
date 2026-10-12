@@ -13,7 +13,7 @@ import java.io.File
  * is present (UI chip). This factory does **not** invent a default — it only coerces
  * invalid combinations: missing `.so` → HEV; C Tor × onionmasq → HEV.
  * **Arti + HEV:** allowed when explicitly requested (arti-mobile SOCKS + Automap).
- * **C Tor:** always [TunDataPlane.HEV_SOCKS].
+ * **C Tor / kotlin-tor:** always [TunDataPlane.HEV_SOCKS].
  */
 object TunDataPlaneFactory {
     fun resolve(

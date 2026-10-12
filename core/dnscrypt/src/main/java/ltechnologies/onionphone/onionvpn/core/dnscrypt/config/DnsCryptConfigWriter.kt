@@ -100,29 +100,8 @@ object DnsCryptConfigWriter {
         val proxy =
             "socks5://$user:${TunnelEndpoints.socksDnsCryptPass()}" +
                 "@${TunnelEndpoints.LOOPBACK}:$torSocksPort"
-        val resolvedList = DnsCryptPublicResolvers.resolveNames(
-            serverName.ifBlank { preferences.dnsCryptServerName },
-        ).let { names ->
-            val torFriendly = DnsCryptPublicResolvers.ensureTorFriendlyServers(names)
-            if (!preferences.dnsCryptAnonymized) {
-                torFriendly
-            } else {
-                // Prefer servers that document Anonymized DNSCrypt / relay compatibility.
-                val filtered = torFriendly.filter { name ->
-                    if (name == DnsCryptPublicResolvers.AUTO) return@filter true
-                    val desc = DnsCryptPublicResolvers.byName[name]?.description.orEmpty()
-                    !desc.contains("incompatible with anonymization", ignoreCase = true) &&
-                        (
-                            desc.contains("Anonymized DNSCrypt", ignoreCase = true) ||
-                                desc.contains("as Anonymized", ignoreCase = true) ||
-                                desc.contains("relay", ignoreCase = true) ||
-                                name.startsWith("dnscry.pt-")
-                            )
-                }
-                filtered.ifEmpty { torFriendly }
-            }
-        }
-        val isAuto = resolvedList.size == 1 && resolvedList[0] == DnsCryptPublicResolvers.AUTO
+        val resolvedList = DnsCryptResolverPlan.resolvedServerNames(serverName, preferences)
+        val isAuto = DnsCryptResolverPlan.isAutoSelection(resolvedList)
         val serverNamesBlock = if (isAuto) {
             "# server_names omitted — use every resolver matching require_* filters"
         } else {

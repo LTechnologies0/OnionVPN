@@ -356,7 +356,7 @@ object TorControlCompat {
             ?: Parity.ENGINE_LIMITATION
 
     fun isSupported(engine: TorEngine, opName: String): Boolean {
-        if (engine == TorEngine.LITTLE_T) return true
+        if (engine.usesClassicControl) return true
         return when (behavior(opName)) {
             ArtiBehavior.EQUIVALENT,
             ArtiBehavior.NOOP_OK,
