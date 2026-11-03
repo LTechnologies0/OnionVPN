@@ -21,12 +21,13 @@ enum class SocksConnectPlane {
 interface PacketFirewall {
     /**
      * Route an outbound TUN packet.
-     * @return [FirewallVerdict.DENY] to drop; [ALLOW_TOR] / [ALLOW_OVPN] to forward.
+     * @return [FirewallVerdict.DENY] to drop; [ALLOW_TOR] / [ALLOW_OVPN] / [ALLOW_LAN]
+     * to forward on the matching plane.
      */
     fun outboundRoute(packet: ByteArray, length: Int): FirewallVerdict
 
     /**
-     * @return true to forward (Tor or OVPN); false to drop.
+     * @return true to forward (Tor, OVPN, or LAN); false to drop.
      */
     fun allowOutbound(packet: ByteArray, length: Int): Boolean =
         outboundRoute(packet, length).forwards

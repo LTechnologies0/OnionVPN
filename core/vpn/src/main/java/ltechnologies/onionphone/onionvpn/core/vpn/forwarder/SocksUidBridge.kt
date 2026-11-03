@@ -21,6 +21,8 @@ import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.locks.LockSupport
+import java.net.InetSocketAddress
+import ltechnologies.onionphone.onionvpn.core.model.FirewallVerdict
 import ltechnologies.onionphone.onionvpn.core.model.TorNetPolicy
 import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
 import ltechnologies.onionphone.onionvpn.core.model.observability.MemoryHygiene
@@ -175,21 +177,69 @@ class SocksUidBridge(
                     reply(output, 0x02)
                     return
                 }
-                val torPort = torSocksPort.get()
-                if (torPort <= 0) {
-                    // Tor downtime (DisableNetwork / Arti restart) — refuse locally.
-                    reply(output, 0x01)
-                    return
-                }
                 val socksHost = rewriteAutomapHost(host) ?: run {
                     VpnForwarderDebug.socksLog { "SocksUidBridge drop Automap IP without hostname" }
                     reply(output, 0x04)
                     return
                 }
+                val lanDest = TorNetPolicy.isLanRoutableIpv4Literal(socksHost) ||
+                    TorNetPolicy.isLanRoutableIpv4Literal(host)
                 // Defense-in-depth: TunDnsMux already gated the SYN, but CONNECT must
                 // re-check (stamp theft / pre-Q peer fail-open / rule flip before hev dial).
-                if (!allowFirewallSocks(uid, connectHost = host, socksHost = socksHost, port = port)) {
-                    reply(output, 0x02)
+                val route = firewallSocksRoute(
+                    uid = uid,
+                    connectHost = host,
+                    socksHost = socksHost,
+                    port = port,
+                )
+                when (route) {
+                    FirewallVerdict.DENY -> {
+                        reply(output, 0x02)
+                        return
+                    }
+                    FirewallVerdict.ALLOW_LAN -> {
+                        if (!lanDest) {
+                            Timber.w("SocksUidBridge ALLOW_LAN refused — dest not RFC1918")
+                            reply(output, 0x02)
+                            return
+                        }
+                        if (!pipeSlots.tryAcquire(2)) {
+                            VpnForwarderDebug.socksLog { "SocksUidBridge pipe pool full — reject LAN" }
+                            reply(output, 0x01)
+                            return
+                        }
+                        val upstream = try {
+                            dialLanProtected(socksHost, port)
+                        } catch (e: Exception) {
+                            pipeSlots.release(2)
+                            throw e
+                        }
+                        client.soTimeout = 0
+                        upstream.soTimeout = 0
+                        reply(output, 0x00)
+                        Timber.i("SocksUidBridge uid=%d LAN ok", uid)
+                        if (!startPipe(client, upstream, slotsAcquired = true)) {
+                            runCatching { upstream.close() }
+                            return
+                        }
+                        handedOff = true
+                        return
+                    }
+                    FirewallVerdict.ALLOW_TOR,
+                    FirewallVerdict.ALLOW_OVPN,
+                    -> {
+                        if (lanDest) {
+                            // Tor exits / SoftEther cannot reach the user's LAN.
+                            Timber.w("SocksUidBridge refuse Tor/OVPN to RFC1918")
+                            reply(output, 0x02)
+                            return
+                        }
+                    }
+                }
+                val torPort = torSocksPort.get()
+                if (torPort <= 0) {
+                    // Tor downtime (DisableNetwork / Arti restart) — refuse locally.
+                    reply(output, 0x01)
                     return
                 }
                 val user = TunnelEndpoints.socksUserForUid(uid)
@@ -334,15 +384,15 @@ class SocksUidBridge(
     }
 
     /**
-     * Same policy surface as PAC [PacketFirewall.allowSocksConnect].
+     * Same policy surface as PAC [PacketFirewall.socksConnectRoute].
      * [socksHost] is post-Automap rewrite (onion hostname or clearnet IP/host).
      */
-    private fun allowFirewallSocks(
+    private fun firewallSocksRoute(
         uid: Int,
         connectHost: String,
         socksHost: String,
         port: Int,
-    ): Boolean {
+    ): FirewallVerdict {
         val onion = TunnelEndpoints.isOnionLikeHostname(socksHost) ||
             TunnelEndpoints.isOnionLikeHostname(connectHost)
         val destHost = when {
@@ -358,19 +408,36 @@ class SocksUidBridge(
             TunnelEndpoints.parseIpv4Literal(connectHost) != null -> connectHost
             else -> ""
         }
-        val allowed = FirewallBridge.engine.allowSocksConnect(
+        val route = FirewallBridge.engine.socksConnectRoute(
             uid = uid,
             destHost = destHost,
             destIp = destIp,
             destPort = port,
             plane = SocksConnectPlane.HEV_UID_BRIDGE,
         )
-        if (!allowed) {
+        if (route == FirewallVerdict.DENY) {
             VpnForwarderDebug.socksLog {
                 "SocksUidBridge firewall DENY uid=$uid"
             }
         }
-        return allowed
+        return route
+    }
+
+    /**
+     * Dial RFC1918 on the underlying network (Wi‑Fi/Ethernet) — never through the TUN.
+     * Fail-closed if [protectSocket] is missing or returns false.
+     */
+    private fun dialLanProtected(host: String, port: Int): Socket {
+        val protect = protectSocket
+            ?: throw IOException("LAN dial refused — protectSocket not wired")
+        val upstream = Socket()
+        upstream.tcpNoDelay = true
+        if (!protect(upstream)) {
+            runCatching { upstream.close() }
+            throw IOException("LAN dial refused — VpnService.protect failed")
+        }
+        upstream.connect(InetSocketAddress(host, port), LAN_CONNECT_TIMEOUT_MS)
+        return upstream
     }
 
     private fun resolveUidForConnect(host: String, port: Int): Int {
@@ -668,6 +735,8 @@ class SocksUidBridge(
         private const val MAX_PIPE_HALF_SLOTS = 512
         /** Match C Tor SocksTimeout (120s) — Arti cold circuits regularly exceed 25s. */
         private const val BRIDGE_HANDSHAKE_MS = 120_000
+        /** Local LAN node (e.g. Cake Wallet → 192.168.x.x) should answer quickly. */
+        private const val LAN_CONNECT_TIMEOUT_MS = 15_000
         private val ipv4Scratch = ThreadLocal.withInitial { ByteArray(4) }
         private val replyAddrScratch = ThreadLocal.withInitial { ByteArray(4) }
     }

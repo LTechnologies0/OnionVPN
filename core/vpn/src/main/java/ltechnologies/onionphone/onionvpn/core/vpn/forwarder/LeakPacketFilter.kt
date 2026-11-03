@@ -3,6 +3,7 @@ package ltechnologies.onionphone.onionvpn.core.vpn.forwarder
 import java.util.concurrent.atomic.AtomicLong
 import ltechnologies.onionphone.onionvpn.core.model.TorNetPolicy
 import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
+import ltechnologies.onionphone.onionvpn.core.vpn.firewall.FirewallBridge
 import timber.log.Timber
 
 /**
@@ -13,7 +14,8 @@ import timber.log.Timber
  * 2. Forward IPv4 TCP (+ Automap IPv6 ULA) via hev → SocksUidBridge → Tor SOCKS.
  * 3. Blackhole clearnet IPv6 TCP (DNSCrypt A-only; kills Happy Eyeballs Tor stalls),
  *    other UDP/ICMP/multicast so apps fall back to TCP.
- * 4. Never forward to the clearnet underlying network.
+ * 4. Never forward to the clearnet underlying network — except RFC1918 TCP when
+ *    [FirewallBridge.deferRfc1918LanToFirewall] (interactive Via LAN / Deny).
  */
 object LeakPacketFilter {
     private const val PROTO_ICMP = 1
@@ -287,7 +289,10 @@ object LeakPacketFilter {
                 isPrivateLanBlackholeDest(packet) &&
                 !isDnsUdpPort53(packet, length)
             ) {
-                return BlackholeReason.PrivateLan
+                // RFC1918 TCP may be offered to the interactive firewall (Via LAN).
+                if (!isDeferableRfc1918LanTcp(packet, length)) {
+                    return BlackholeReason.PrivateLan
+                }
             }
         }
         if (shouldDropEarly(packet, length)) {
@@ -297,9 +302,26 @@ object LeakPacketFilter {
             return classifyBlackholeReason(packet, length)
         }
         if (!isTorrifiableTcp(packet, length)) {
+            if (isDeferableRfc1918LanTcp(packet, length)) return null
             return classifyBlackholeReason(packet, length)
         }
         return null
+    }
+
+    /**
+     * RFC1918 IPv4 TCP eligible for firewall Via LAN when defer is armed.
+     * CGNAT / loopback / VpnTun / documentation stay hard-blackholed.
+     */
+    fun isDeferableRfc1918LanTcp(packet: ByteArray, length: Int): Boolean {
+        if (!FirewallBridge.deferRfc1918LanToFirewall) return false
+        if (length < 20 || length > packet.size) return false
+        val version = (packet[0].toInt() ushr 4) and 0x0f
+        if (version != 4) return false
+        if (!TorNetPolicy.isWellFormedIpv4Packet(packet, length)) return false
+        if (TorNetPolicy.isIpv4Fragment(packet, length)) return false
+        if ((packet[9].toInt() and 0xff) != PROTO_TCP) return false
+        if (isDnsTcpPort(packet, length)) return false
+        return TorNetPolicy.isLanRoutableIpv4(ipv4Int(packet, 16))
     }
 
     /**
@@ -320,9 +342,21 @@ object LeakPacketFilter {
                 val proto = packet[9].toInt() and 0xff
                 when (proto) {
                     PROTO_TCP, PROTO_UDP -> {
-                        if (TorNetPolicy.mustBlackholeIpv4Destination(ipv4Int(packet, 16))) {
+                        val dst = ipv4Int(packet, 16)
+                        if (TorNetPolicy.mustBlackholeIpv4Destination(dst)) {
                             // DivertDns UDP/53: caller may divert first — do not drop here.
-                            !(proto == PROTO_UDP && isDnsUdpPort53(packet, length))
+                            if (proto == PROTO_UDP && isDnsUdpPort53(packet, length)) {
+                                false
+                            } else if (proto == PROTO_TCP &&
+                                TorNetPolicy.isLanRoutableIpv4(dst) &&
+                                FirewallBridge.deferRfc1918LanToFirewall &&
+                                !isDnsTcpPort(packet, length)
+                            ) {
+                                // Defer RFC1918 TCP to interactive Via LAN / Deny.
+                                false
+                            } else {
+                                true
+                            }
                         } else {
                             false
                         }

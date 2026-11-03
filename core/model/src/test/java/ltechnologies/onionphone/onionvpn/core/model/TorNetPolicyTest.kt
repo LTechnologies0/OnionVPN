@@ -97,6 +97,14 @@ class TorNetPolicyTest {
         assertTrue(TorNetPolicy.mustBlackholeIpv4Destination(
             TunnelEndpoints.parseIpv4Literal("192.0.2.1")!!, // Documentation
         ))
+        assertTrue(TorNetPolicy.isLanRoutableIpv4Literal("192.168.1.50"))
+        assertTrue(TorNetPolicy.isLanRoutableIpv4Literal("10.0.0.1"))
+        assertTrue(TorNetPolicy.isLanRoutableIpv4Literal("172.16.0.1"))
+        assertFalse(TorNetPolicy.isLanRoutableIpv4Literal("100.64.0.1")) // CGNAT
+        assertFalse(TorNetPolicy.isLanRoutableIpv4Literal("10.8.0.2")) // VpnTun
+        assertFalse(TorNetPolicy.isLanRoutableIpv4Literal("10.192.0.42")) // Automap
+        assertFalse(TorNetPolicy.isLanRoutableIpv4Literal("127.0.0.1"))
+        assertFalse(TorNetPolicy.isLanRoutableIpv4Literal("8.8.8.8"))
     }
 
     @Test

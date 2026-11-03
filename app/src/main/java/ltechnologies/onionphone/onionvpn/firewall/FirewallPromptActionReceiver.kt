@@ -30,6 +30,7 @@ class FirewallPromptActionReceiver : BroadcastReceiver() {
         val verdict = when (intent.action) {
             ACTION_ALLOW_TOR -> FirewallVerdict.ALLOW_TOR
             ACTION_ALLOW_OVPN -> FirewallVerdict.ALLOW_OVPN
+            ACTION_ALLOW_LAN -> FirewallVerdict.ALLOW_LAN
             ACTION_ALLOW -> FirewallVerdict.ALLOW_TOR // legacy action string
             ACTION_DENY -> FirewallVerdict.DENY
             else -> {
@@ -53,6 +54,7 @@ class FirewallPromptActionReceiver : BroadcastReceiver() {
         const val ACTION_ALLOW = "ltechnologies.onionphone.onionvpn.firewall.ALLOW"
         const val ACTION_ALLOW_TOR = "ltechnologies.onionphone.onionvpn.firewall.ALLOW_TOR"
         const val ACTION_ALLOW_OVPN = "ltechnologies.onionphone.onionvpn.firewall.ALLOW_OVPN"
+        const val ACTION_ALLOW_LAN = "ltechnologies.onionphone.onionvpn.firewall.ALLOW_LAN"
         const val ACTION_DENY = "ltechnologies.onionphone.onionvpn.firewall.DENY"
         const val EXTRA_REQUEST_ID = "request_id"
     }

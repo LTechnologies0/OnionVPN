@@ -219,7 +219,10 @@ class TunDnsMux(
                                     }
                                     FirewallVerdict.ALLOW_OVPN -> {
                                         // SoftEther cannot SOCKS5A Automap/.onion — always Tor path.
-                                        if (isAutomapDestination(buf, n)) {
+                                        // SoftEther also cannot reach the user's LAN — never OVPN→LAN.
+                                        if (isRfc1918LanDestination(buf, n)) {
+                                            Timber.w("ALLOW_OVPN drop — LAN dest cannot use SoftEther")
+                                        } else if (isAutomapDestination(buf, n)) {
                                             Timber.w("ALLOW_OVPN→Tor — Automap dest cannot use SoftEther")
                                             stampTcpUid(buf, n)
                                             writeTorTcp(localHevOut, localAutomapOut, buf, n)
@@ -238,9 +241,19 @@ class TunDnsMux(
                                             }
                                         }
                                     }
-                                    FirewallVerdict.ALLOW_TOR -> {
+                                    FirewallVerdict.ALLOW_LAN -> {
+                                        // hev → SocksUidBridge dials protect()'d clearnet (RFC1918).
                                         stampTcpUid(buf, n)
                                         writeTorTcp(localHevOut, localAutomapOut, buf, n)
+                                    }
+                                    FirewallVerdict.ALLOW_TOR -> {
+                                        // Never torrify RFC1918 — exits cannot reach LAN.
+                                        if (isRfc1918LanDestination(buf, n)) {
+                                            Timber.w("ALLOW_TOR drop — LAN dest cannot use Tor SOCKS")
+                                        } else {
+                                            stampTcpUid(buf, n)
+                                            writeTorTcp(localHevOut, localAutomapOut, buf, n)
+                                        }
                                     }
                                 }
                             }
@@ -446,6 +459,11 @@ class TunDnsMux(
     private fun isAutomapDestination(buf: ByteArray, n: Int): Boolean {
         val info = IpPacketParser.parse(buf, n) ?: return false
         return TunnelEndpoints.isAutomapVirtual(info.dstIp)
+    }
+
+    private fun isRfc1918LanDestination(buf: ByteArray, n: Int): Boolean {
+        val info = IpPacketParser.parse(buf, n) ?: return false
+        return TorNetPolicy.isLanRoutableIpv4Literal(info.dstIp)
     }
 
     /** Stamp SYN (and first-seen dest) so SocksUidBridge can IsolateSOCKSAuth after hev CONNECT. */

@@ -1,5 +1,6 @@
 package ltechnologies.onionphone.onionvpn.core.vpn.forwarder
 
+import ltechnologies.onionphone.onionvpn.core.vpn.firewall.FirewallBridge
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -10,6 +11,7 @@ class LeakPacketFilterTest {
     @Before
     fun reset() {
         LeakPacketFilter.resetStats()
+        FirewallBridge.deferRfc1918LanToFirewall = false
     }
 
     @Test
@@ -127,6 +129,45 @@ class LeakPacketFilterTest {
             LeakPacketFilter.BlackholeReason.PrivateLan,
             LeakPacketFilter.classifyBlackholeReason(pkt, pkt.size),
         )
+    }
+
+    @Test
+    fun privateLanTcp_defersToFirewallWhenArmed() {
+        val pkt = ipv4TcpSyn(
+            srcIp = byteArrayOf(10, 8, 0, 2),
+            dstIp = byteArrayOf(192.toByte(), 168.toByte(), 1, 50),
+            srcPort = 40_000,
+            dstPort = 18_081,
+        )
+        FirewallBridge.deferRfc1918LanToFirewall = true
+        try {
+            assertTrue(LeakPacketFilter.isDeferableRfc1918LanTcp(pkt, pkt.size))
+            assertFalse(LeakPacketFilter.shouldDropEarly(pkt, pkt.size))
+            assertEquals(null, LeakPacketFilter.blackholeBeforeTorTcp(pkt, pkt.size))
+        } finally {
+            FirewallBridge.deferRfc1918LanToFirewall = false
+        }
+    }
+
+    @Test
+    fun cgnatTcp_neverDefersToFirewall() {
+        val pkt = ipv4TcpSyn(
+            srcIp = byteArrayOf(10, 8, 0, 2),
+            dstIp = byteArrayOf(100, 64, 0, 1),
+            srcPort = 40_000,
+            dstPort = 443,
+        )
+        FirewallBridge.deferRfc1918LanToFirewall = true
+        try {
+            assertFalse(LeakPacketFilter.isDeferableRfc1918LanTcp(pkt, pkt.size))
+            assertTrue(LeakPacketFilter.shouldDropEarly(pkt, pkt.size))
+            assertEquals(
+                LeakPacketFilter.BlackholeReason.PrivateLan,
+                LeakPacketFilter.blackholeBeforeTorTcp(pkt, pkt.size),
+            )
+        } finally {
+            FirewallBridge.deferRfc1918LanToFirewall = false
+        }
     }
 
     @Test

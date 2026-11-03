@@ -143,6 +143,9 @@ object TorNetPolicy {
      * Destinations that must never reach Tor SOCKS / hev / onionmasq (LAN, CGNAT,
      * loopback, VPN TUN, documentation, multicast, link-local).
      * Tor Automap virtuals and globally routable addresses still go through Tor SOCKS.
+     *
+     * RFC1918 may still be offered as [FirewallVerdict.ALLOW_LAN] (protect'd clearnet)
+     * when the interactive firewall defers private TCP — see [isLanRoutableIpv4].
      */
     fun mustBlackholeIpv4Destination(ipInt: Int): Boolean =
         when (classifyIpv4(ipInt)) {
@@ -154,6 +157,18 @@ object TorNetPolicy {
             // TorAutomap + GloballyRoutable → false (torrify)
             else -> false
         }
+
+    /**
+     * User-LAN private address (10/8, 172.16/12, 192.168/16) eligible for Via LAN.
+     * Excludes CGNAT, loopback, VpnTun, documentation, link-local, Automap.
+     */
+    fun isLanRoutableIpv4(ipInt: Int): Boolean =
+        classifyIpv4(ipInt) == IpClass.PrivateRfc1918
+
+    fun isLanRoutableIpv4Literal(hostAddress: String): Boolean {
+        val ip = TunnelEndpoints.parseIpv4Literal(hostAddress) ?: return false
+        return isLanRoutableIpv4(ip)
+    }
 
     fun isRfc1123Hostname(hostname: String): Boolean {
         if (hostname.isEmpty() || hostname.length > MAX_HOSTNAME_LEN) return false

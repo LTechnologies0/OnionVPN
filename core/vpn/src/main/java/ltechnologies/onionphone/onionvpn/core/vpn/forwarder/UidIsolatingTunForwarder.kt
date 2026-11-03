@@ -206,6 +206,13 @@ class UidIsolatingTunForwarder(
                         return
                     }
                 }
+                FirewallVerdict.ALLOW_LAN -> {
+                    // Landmine path has no protect()'d LAN dialer — hev/TunDnsMux owns Via LAN.
+                    VpnForwarderDebug.uidLog {
+                        "ALLOW_LAN drop — UidIsolating path has no LAN plane uid=$uid $remoteHost:${meta.dstPort}"
+                    }
+                    return
+                }
                 FirewallVerdict.ALLOW_TOR -> Unit
             }
             val user = TunnelEndpoints.socksUserForUid(uid)

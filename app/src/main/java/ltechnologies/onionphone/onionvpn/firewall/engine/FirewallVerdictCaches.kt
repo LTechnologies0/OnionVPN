@@ -86,7 +86,10 @@ internal class FirewallVerdictCaches {
                 val it2 = flowCache.entries.iterator()
                 while (it2.hasNext() && n < FLOW_TRIM_BUDGET * 2) {
                     val e = it2.next()
-                    if (e.value != FirewallVerdict.ALLOW_OVPN && e.value != FirewallVerdict.DENY) {
+                    if (e.value != FirewallVerdict.ALLOW_OVPN &&
+                        e.value != FirewallVerdict.ALLOW_LAN &&
+                        e.value != FirewallVerdict.DENY
+                    ) {
                         removeFlowKey(e.key)
                         it2.remove()
                         n++
@@ -94,12 +97,15 @@ internal class FirewallVerdictCaches {
                 }
             }
             if (flowCache.size > MAX_FLOW_CACHE) {
-                // Never drop ALLOW_OVPN / DENY — mid-flow without stamp fail-closes to DENY
-                // and inventing SoftEther from rules is forbidden; keep live OVPN planes.
+                // Never drop ALLOW_OVPN / ALLOW_LAN / DENY — mid-flow without stamp
+                // fail-closes to DENY; keep live OVPN / LAN planes.
                 val it3 = flowCache.entries.iterator()
                 while (it3.hasNext() && n < FLOW_TRIM_BUDGET * 3) {
                     val e = it3.next()
-                    if (e.value == FirewallVerdict.ALLOW_OVPN || e.value == FirewallVerdict.DENY) {
+                    if (e.value == FirewallVerdict.ALLOW_OVPN ||
+                        e.value == FirewallVerdict.ALLOW_LAN ||
+                        e.value == FirewallVerdict.DENY
+                    ) {
                         continue
                     }
                     removeFlowKey(e.key)
@@ -135,7 +141,10 @@ internal class FirewallVerdictCaches {
             val it2 = decisionCache.entries.iterator()
             while (it2.hasNext() && n < DECISION_TRIM_BUDGET * 2) {
                 val e = it2.next()
-                if (e.value != FirewallVerdict.ALLOW_OVPN && e.value != FirewallVerdict.DENY) {
+                if (e.value != FirewallVerdict.ALLOW_OVPN &&
+                    e.value != FirewallVerdict.ALLOW_LAN &&
+                    e.value != FirewallVerdict.DENY
+                ) {
                     removeDecisionKey(e.key)
                     it2.remove()
                     n++

@@ -39,6 +39,7 @@ fun FirewallPromptContent(
     }.getOrNull()
     val destColor = threatTextColor(info.threatCategory)
     val threatLabel = threatLabelOrNull(info.threatCategory)
+    val lanOnly = info.lanDestination
 
     Column(
         modifier = Modifier
@@ -48,10 +49,14 @@ fun FirewallPromptContent(
     ) {
         Text("Connection request", style = MaterialTheme.typography.headlineSmall)
         Text(
-            if (ovpnAvailable) {
-                "Choose how this outbound connection leaves the device."
-            } else {
-                "A new outbound connection wants to leave through Tor."
+            when {
+                lanOnly ->
+                    "This destination is on your local network (RFC1918). " +
+                        "Allow clearnet via LAN, or deny."
+                ovpnAvailable ->
+                    "Choose how this outbound connection leaves the device."
+                else ->
+                    "A new outbound connection wants to leave through Tor."
             },
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -123,33 +128,52 @@ fun FirewallPromptContent(
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
 
-        Text("Via Tor", style = MaterialTheme.typography.titleSmall)
-        ScopeRow(
-            tempMinutes = tempMinutes,
-            onPermanent = { onAnswer(FirewallVerdict.ALLOW_TOR, FirewallRuleScope.PERMANENT) },
-            onSession = { onAnswer(FirewallVerdict.ALLOW_TOR, FirewallRuleScope.SESSION) },
-            onTemporary = { onAnswer(FirewallVerdict.ALLOW_TOR, FirewallRuleScope.TEMPORARY) },
-            permanentLabel = "Allow via Tor permanently",
-            sessionLabel = "Allow via Tor until VPN stops",
-            temporaryLabel = "Allow via Tor for $tempMinutes min",
-        )
-
-        if (ovpnAvailable) {
-            Text("Via OpenVPN (over Tor)", style = MaterialTheme.typography.titleSmall)
+        if (lanOnly) {
+            Text("Via LAN", style = MaterialTheme.typography.titleSmall)
             Text(
-                "Site sees the VPN egress IP, not a Tor exit. DNS stays DNSCrypt-over-Tor.",
+                "Leaves the VPN tunnel on Wi‑Fi/Ethernet (VpnService.protect). " +
+                    "Tor and OpenVPN cannot reach private LAN addresses.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             ScopeRow(
                 tempMinutes = tempMinutes,
-                onPermanent = { onAnswer(FirewallVerdict.ALLOW_OVPN, FirewallRuleScope.PERMANENT) },
-                onSession = { onAnswer(FirewallVerdict.ALLOW_OVPN, FirewallRuleScope.SESSION) },
-                onTemporary = { onAnswer(FirewallVerdict.ALLOW_OVPN, FirewallRuleScope.TEMPORARY) },
-                permanentLabel = "Allow via OVPN permanently",
-                sessionLabel = "Allow via OVPN until VPN stops",
-                temporaryLabel = "Allow via OVPN for $tempMinutes min",
+                onPermanent = { onAnswer(FirewallVerdict.ALLOW_LAN, FirewallRuleScope.PERMANENT) },
+                onSession = { onAnswer(FirewallVerdict.ALLOW_LAN, FirewallRuleScope.SESSION) },
+                onTemporary = { onAnswer(FirewallVerdict.ALLOW_LAN, FirewallRuleScope.TEMPORARY) },
+                permanentLabel = "Allow via LAN permanently",
+                sessionLabel = "Allow via LAN until VPN stops",
+                temporaryLabel = "Allow via LAN for $tempMinutes min",
             )
+        } else {
+            Text("Via Tor", style = MaterialTheme.typography.titleSmall)
+            ScopeRow(
+                tempMinutes = tempMinutes,
+                onPermanent = { onAnswer(FirewallVerdict.ALLOW_TOR, FirewallRuleScope.PERMANENT) },
+                onSession = { onAnswer(FirewallVerdict.ALLOW_TOR, FirewallRuleScope.SESSION) },
+                onTemporary = { onAnswer(FirewallVerdict.ALLOW_TOR, FirewallRuleScope.TEMPORARY) },
+                permanentLabel = "Allow via Tor permanently",
+                sessionLabel = "Allow via Tor until VPN stops",
+                temporaryLabel = "Allow via Tor for $tempMinutes min",
+            )
+
+            if (ovpnAvailable) {
+                Text("Via OpenVPN (over Tor)", style = MaterialTheme.typography.titleSmall)
+                Text(
+                    "Site sees the VPN egress IP, not a Tor exit. DNS stays DNSCrypt-over-Tor.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                ScopeRow(
+                    tempMinutes = tempMinutes,
+                    onPermanent = { onAnswer(FirewallVerdict.ALLOW_OVPN, FirewallRuleScope.PERMANENT) },
+                    onSession = { onAnswer(FirewallVerdict.ALLOW_OVPN, FirewallRuleScope.SESSION) },
+                    onTemporary = { onAnswer(FirewallVerdict.ALLOW_OVPN, FirewallRuleScope.TEMPORARY) },
+                    permanentLabel = "Allow via OVPN permanently",
+                    sessionLabel = "Allow via OVPN until VPN stops",
+                    temporaryLabel = "Allow via OVPN for $tempMinutes min",
+                )
+            }
         }
 
         Text("Refuse", style = MaterialTheme.typography.titleSmall)

@@ -42,6 +42,14 @@ object FirewallBridge {
     var openVpnOverTorUp: Boolean = false
 
     /**
+     * When true, IPv4 TCP to RFC1918 is not silently blackholed — TunDnsMux asks the
+     * interactive firewall (Via LAN / Deny). CGNAT / loopback / VpnTun stay blackholed.
+     * Set by InteractiveFirewallEngine from prefs (firewall or OVPN-over-Tor on).
+     */
+    @Volatile
+    var deferRfc1918LanToFirewall: Boolean = false
+
+    /**
      * Optional callback to inject decrypted OVPN→app IP packets into the VpnService TUN
      * (set by TunDnsMux while the TUN is live).
      */

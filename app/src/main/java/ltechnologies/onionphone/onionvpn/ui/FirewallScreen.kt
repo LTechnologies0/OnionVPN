@@ -244,6 +244,7 @@ private fun ruleDisplayDest(rule: FirewallRule): String {
 private fun verdictLabel(verdict: FirewallVerdict): String = when (verdict) {
     FirewallVerdict.ALLOW_TOR -> "Via Tor"
     FirewallVerdict.ALLOW_OVPN -> "Via OVPN"
+    FirewallVerdict.ALLOW_LAN -> "Via LAN"
     FirewallVerdict.DENY -> "Deny"
 }
 

@@ -64,16 +64,6 @@ internal class FirewallPromptNotifier(
             info.protocolLabel,
         ) + threatSuffix
         val openPending = detailPendingIntent(info.requestId)
-        val allowPending = actionPendingIntent(
-            FirewallPromptActionReceiver.ACTION_ALLOW_TOR,
-            info.requestId,
-            REQUEST_ALLOW,
-        )
-        val allowOvpnPending = actionPendingIntent(
-            FirewallPromptActionReceiver.ACTION_ALLOW_OVPN,
-            info.requestId,
-            REQUEST_ALLOW_OVPN,
-        )
         val denyPending = actionPendingIntent(
             FirewallPromptActionReceiver.ACTION_DENY,
             info.requestId,
@@ -93,21 +83,42 @@ internal class FirewallPromptNotifier(
             .setOngoing(true)
             .setAutoCancel(false)
             .setOnlyAlertOnce(true)
-            .addAction(
-                0,
-                appContext.getString(R.string.firewall_action_allow_tor),
-                allowPending,
-            )
-        if (FirewallBridge.openVpnOverTorUp &&
-            !info.socksPlane &&
-            !TunnelEndpoints.isOnionLikeHostname(info.destHost ?: info.destIp) &&
-            !TunnelEndpoints.isAutomapVirtual(info.destIp)
-        ) {
+        if (info.lanDestination) {
+            // RFC1918: only Via LAN / Deny (Tor exits cannot reach the user's LAN).
             builder.addAction(
                 0,
-                appContext.getString(R.string.firewall_action_allow_ovpn),
-                allowOvpnPending,
+                appContext.getString(R.string.firewall_action_allow_lan),
+                actionPendingIntent(
+                    FirewallPromptActionReceiver.ACTION_ALLOW_LAN,
+                    info.requestId,
+                    REQUEST_ALLOW_LAN,
+                ),
             )
+        } else {
+            builder.addAction(
+                0,
+                appContext.getString(R.string.firewall_action_allow_tor),
+                actionPendingIntent(
+                    FirewallPromptActionReceiver.ACTION_ALLOW_TOR,
+                    info.requestId,
+                    REQUEST_ALLOW,
+                ),
+            )
+            if (FirewallBridge.openVpnOverTorUp &&
+                !info.socksPlane &&
+                !TunnelEndpoints.isOnionLikeHostname(info.destHost ?: info.destIp) &&
+                !TunnelEndpoints.isAutomapVirtual(info.destIp)
+            ) {
+                builder.addAction(
+                    0,
+                    appContext.getString(R.string.firewall_action_allow_ovpn),
+                    actionPendingIntent(
+                        FirewallPromptActionReceiver.ACTION_ALLOW_OVPN,
+                        info.requestId,
+                        REQUEST_ALLOW_OVPN,
+                    ),
+                )
+            }
         }
         builder.addAction(
             0,
@@ -198,5 +209,6 @@ internal class FirewallPromptNotifier(
         private const val REQUEST_ALLOW = 4302
         private const val REQUEST_DENY = 4303
         private const val REQUEST_ALLOW_OVPN = 4304
+        private const val REQUEST_ALLOW_LAN = 4305
     }
 }

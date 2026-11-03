@@ -11,6 +11,7 @@ package ltechnologies.onionphone.onionvpn.core.model
  *
  * - [ALLOW_TOR]: forward via Tor SOCKS (site may see a Tor exit).
  * - [ALLOW_OVPN]: forward via OpenVPN-over-Tor (site sees the VPN egress IP).
+ * - [ALLOW_LAN]: forward via underlying LAN/Wi‑Fi (`VpnService.protect`), RFC1918 only.
  * - [DENY]: drop / RST.
  *
  * Legacy persisted value `ALLOW` is migrated to [ALLOW_TOR].
@@ -18,10 +19,11 @@ package ltechnologies.onionphone.onionvpn.core.model
 enum class FirewallVerdict {
     ALLOW_TOR,
     ALLOW_OVPN,
+    ALLOW_LAN,
     DENY,
     ;
 
-    /** True when the packet/flow should leave the device (Tor or OVPN). */
+    /** True when the packet/flow should leave the device (Tor, OVPN, or LAN). */
     val forwards: Boolean
         get() = this != DENY
 
@@ -141,6 +143,11 @@ data class FirewallConnectionInfo(
      * Hides SoftEther action and forces Tor on OVPN answers.
      */
     val socksPlane: Boolean = false,
+    /**
+     * RFC1918 private destination — only [FirewallVerdict.ALLOW_LAN] / [DENY] apply
+     * (Tor exits and SoftEther cannot reach the user's LAN).
+     */
+    val lanDestination: Boolean = false,
     val timestampEpochMs: Long = System.currentTimeMillis(),
 ) {
     /** Prefer hostname for display; fall back to IP. */
