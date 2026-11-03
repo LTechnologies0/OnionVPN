@@ -811,6 +811,18 @@ class InteractiveFirewallEngine @Inject constructor(
             }
             else -> verdict
         }
+        // Cake Wallet / monerod often use several ports on the same LAN IP (RPC 18081,
+        // ZMQ 18089, …). Via LAN / Deny must cover the whole host, not a single port.
+        val lanHostWide = lanDest &&
+            (effective == FirewallVerdict.ALLOW_LAN || effective == FirewallVerdict.DENY)
+        if (lanHostWide) {
+            // Drop sibling-port ASK prompts before promote (else 18089 pops up after 18081).
+            cancelLanHostPrompts(
+                uid = answered.request.uid,
+                lanHost = answered.matchDest,
+                exceptRequestId = answered.request.requestId,
+            )
+        }
         // Cancel current notification before promoting the next head of queue.
         promptNotifier.cancel()
         synchronized(queueLock) {
@@ -829,8 +841,8 @@ class InteractiveFirewallEngine @Inject constructor(
             appLabel = answered.request.appLabel,
             // Automap: match .onion hostname; clearnet: match packet IP.
             destHost = answered.matchDest,
-            destPort = answered.request.destPort,
-            protocol = answered.request.protocol,
+            destPort = if (lanHostWide) -1 else answered.request.destPort,
+            protocol = if (lanHostWide) -1 else answered.request.protocol,
             verdict = effective,
             scope = ruleScope,
             expiresAtEpochMs = expires,
@@ -838,11 +850,17 @@ class InteractiveFirewallEngine @Inject constructor(
         )
         scope.launch { rulesStore.upsert(rule) }
         rules.updateAndGet { list ->
-            list.filterNot {
-                it.uid == rule.uid &&
-                    it.destHost == rule.destHost &&
-                    it.destPort == rule.destPort &&
-                    it.protocol == rule.protocol
+            list.filterNot { existing ->
+                if (lanHostWide) {
+                    // Replace every prior rule for this app→LAN IP (all ports).
+                    existing.uid == rule.uid &&
+                        existing.destHost.equals(rule.destHost, ignoreCase = true)
+                } else {
+                    existing.uid == rule.uid &&
+                        existing.destHost == rule.destHost &&
+                        existing.destPort == rule.destPort &&
+                        existing.protocol == rule.protocol
+                }
             } + rule
         }
         // TEMPORARY must not sticky decisionCache: rules StateFlow only emits on upsert/remove,
@@ -861,6 +879,11 @@ class InteractiveFirewallEngine @Inject constructor(
                 scope.launch { rulesStore.removeWhere { it.isExpired() } }
             }, delayMs)
         } else {
+            // Drop stale per-port DENY/ALLOW stickies so sibling LAN ports hit the new host rule.
+            if (lanHostWide) {
+                caches.invalidateDestination(answered.matchDest)
+                caches.invalidateDestination(answered.request.destIp)
+            }
             caches.rememberDecision(
                 answered.decisionKey,
                 answered.flowKey,
@@ -868,6 +891,21 @@ class InteractiveFirewallEngine @Inject constructor(
                 answered.matchDest,
                 answered.tupleKey,
             )
+            // Sticky SOCKS re-check (hev CONNECT) — TUN decisionKey is namespaced separately.
+            if (lanHostWide) {
+                val socksRk = FirewallCacheKeys.socksDecisionKey(
+                    answered.request.uid,
+                    answered.matchDest,
+                    answered.request.destPort,
+                    IpPacketParser.PROTO_TCP,
+                )
+                val socksFk = FirewallCacheKeys.socksFlowKey(
+                    answered.request.uid,
+                    answered.matchDest,
+                    answered.request.destPort,
+                )
+                caches.rememberDecision(socksRk, socksFk, effective, answered.matchDest)
+            }
             // flowCache must hold live plane so a Tor SYN while OVPN was down does not
             // mid-TCP flip to SoftEther after SNAT recovers (decisionCache keeps intent).
             if (live != effective) {
@@ -998,6 +1036,36 @@ class InteractiveFirewallEngine @Inject constructor(
     }
 
     /** Drop ASK queue entries tied to an Automap IP or its old/new hostnames. */
+    /**
+     * After Via LAN / Deny for an RFC1918 host, drop other queued prompts for the same
+     * app UID + IP (different dest ports). Active was already cleared by [answerPrompt].
+     */
+    private fun cancelLanHostPrompts(uid: Int, lanHost: String, exceptRequestId: String) {
+        val host = lanHost.trim().lowercase()
+        if (host.isEmpty()) return
+        fun QueuedPrompt.tiedToLanHost(): Boolean {
+            if (request.uid != uid) return false
+            if (request.requestId == exceptRequestId) return false
+            val dests = listOf(matchDest, request.destIp, request.destHost.orEmpty())
+            return dests.any { it.trim().equals(host, ignoreCase = true) }
+        }
+        synchronized(queueLock) {
+            val toDrop = pendingByKey.values.filter { it.tiedToLanHost() }.toList()
+            for (q in toDrop) {
+                pendingByKey.remove(q.ruleKey)
+                waitQueue.remove(q.ruleKey)
+            }
+            if (toDrop.isNotEmpty()) {
+                Timber.i(
+                    "LAN host verdict — cancelled %d sibling ASK prompt(s) for %s",
+                    toDrop.size,
+                    host,
+                )
+                publishQueueDepthLocked()
+            }
+        }
+    }
+
     private fun cancelAutomapPrompts(ip: String, oldHost: String, newHost: String) {
         val targets = setOf(ip, oldHost, newHost)
             .map { it.trim().lowercase() }

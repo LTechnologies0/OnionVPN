@@ -170,20 +170,29 @@ class SocksUidBridge(
             try {
                 negotiateHevAuth(input, output)
                 val (host, port) = readConnect(input, output) ?: return
-                val uid = resolveUidForConnect(host, port)
+                val socksHostEarly = rewriteAutomapHost(host)
+                val lanDestEarly = socksHostEarly != null && (
+                    TorNetPolicy.isLanRoutableIpv4Literal(socksHostEarly) ||
+                        TorNetPolicy.isLanRoutableIpv4Literal(host)
+                    )
+                // LAN SYNs often race hev CONNECT (async owner UID). Wait longer before refuse.
+                val uid = resolveUidForConnect(
+                    host = host,
+                    port = port,
+                    retries = if (lanDestEarly) UID_RETRY_LAN else UID_RETRY,
+                )
                 if (!ConnectionOwnerResolver.isValidUid(uid)) {
                     // Fail-closed: shared uunknown would merge distinct apps (parity with PAC).
                     Timber.w("SocksUidBridge UID miss — refuse CONNECT")
                     reply(output, 0x02)
                     return
                 }
-                val socksHost = rewriteAutomapHost(host) ?: run {
+                val socksHost = socksHostEarly ?: run {
                     VpnForwarderDebug.socksLog { "SocksUidBridge drop Automap IP without hostname" }
                     reply(output, 0x04)
                     return
                 }
-                val lanDest = TorNetPolicy.isLanRoutableIpv4Literal(socksHost) ||
-                    TorNetPolicy.isLanRoutableIpv4Literal(host)
+                val lanDest = lanDestEarly
                 // Defense-in-depth: TunDnsMux already gated the SYN, but CONNECT must
                 // re-check (stamp theft / pre-Q peer fail-open / rule flip before hev dial).
                 val route = firewallSocksRoute(
@@ -212,7 +221,10 @@ class SocksUidBridge(
                             dialLanProtected(socksHost, port)
                         } catch (e: Exception) {
                             pipeSlots.release(2)
-                            throw e
+                            // Host unreachable / protect fail — SOCKS host unreachable (not auth).
+                            VpnForwarderDebug.socksLog(e) { "SocksUidBridge LAN dial failed" }
+                            reply(output, 0x04)
+                            return
                         }
                         client.soTimeout = 0
                         upstream.soTimeout = 0
@@ -426,28 +438,45 @@ class SocksUidBridge(
     /**
      * Dial RFC1918 on the underlying network (Wi‑Fi/Ethernet) — never through the TUN.
      * Fail-closed if [protectSocket] is missing or returns false.
+     * One retry: Android sometimes returns false from protect() under VPN churn.
      */
     private fun dialLanProtected(host: String, port: Int): Socket {
         val protect = protectSocket
             ?: throw IOException("LAN dial refused — protectSocket not wired")
-        val upstream = Socket()
-        upstream.tcpNoDelay = true
-        if (!protect(upstream)) {
-            runCatching { upstream.close() }
-            throw IOException("LAN dial refused — VpnService.protect failed")
+        var last: Exception? = null
+        repeat(2) { attempt ->
+            val upstream = Socket()
+            try {
+                upstream.tcpNoDelay = true
+                if (!protect(upstream)) {
+                    runCatching { upstream.close() }
+                    throw IOException("LAN dial refused — VpnService.protect failed")
+                }
+                upstream.connect(InetSocketAddress(host, port), LAN_CONNECT_TIMEOUT_MS)
+                return upstream
+            } catch (e: Exception) {
+                last = e
+                runCatching { upstream.close() }
+                if (attempt == 0) {
+                    LockSupport.parkNanos(LAN_DIAL_RETRY_PARK_NS)
+                }
+            }
         }
-        upstream.connect(InetSocketAddress(host, port), LAN_CONNECT_TIMEOUT_MS)
-        return upstream
+        throw last ?: IOException("LAN dial failed")
     }
 
-    private fun resolveUidForConnect(host: String, port: Int): Int {
+    private fun resolveUidForConnect(
+        host: String,
+        port: Int,
+        retries: Int = UID_RETRY,
+    ): Int {
         // Peek (non-consuming): parallel streams to the same dest must not steal the stamp.
         // Peer UID gate above blocks foreign processes from using a stolen stamp.
         TcpFlowUidIndex.peekHost(host, port)?.uid?.let { uid ->
             if (ConnectionOwnerResolver.isValidUid(uid)) return uid
         }
         // Retry: SYN stamp may race hev's SOCKS open (async owner-uid resolve).
-        repeat(UID_RETRY) {
+        repeat(retries.coerceAtLeast(0)) {
             LockSupport.parkNanos(UID_PARK_NS)
             TcpFlowUidIndex.peekHost(host, port)?.uid?.let { uid ->
                 if (ConnectionOwnerResolver.isValidUid(uid)) return uid
@@ -721,7 +750,9 @@ class SocksUidBridge(
 
     companion object {
         private const val UID_RETRY = 24
-        private const val UID_PARK_NS = 5_000_000L // 5ms × 24 ≈ 120ms then refuse
+        /** LAN: owner UID often resolves after hev already dials SOCKS (~200–400ms). */
+        private const val UID_RETRY_LAN = 80
+        private const val UID_PARK_NS = 5_000_000L // 5ms × 24 ≈ 120ms; ×80 ≈ 400ms LAN
         private const val AUTOMAP_RETRY = 40
         private const val AUTOMAP_PARK_NS = 5_000_000L // 5ms × 40 ≈ 200ms DNS→cache race
         /** Clearnet IP→hostname: DNSCrypt reply often races hev SOCKS open (~50–100ms). */
@@ -737,6 +768,7 @@ class SocksUidBridge(
         private const val BRIDGE_HANDSHAKE_MS = 120_000
         /** Local LAN node (e.g. Cake Wallet → 192.168.x.x) should answer quickly. */
         private const val LAN_CONNECT_TIMEOUT_MS = 15_000
+        private const val LAN_DIAL_RETRY_PARK_NS = 50_000_000L // 50ms between protect/connect tries
         private val ipv4Scratch = ThreadLocal.withInitial { ByteArray(4) }
         private val replyAddrScratch = ThreadLocal.withInitial { ByteArray(4) }
     }
