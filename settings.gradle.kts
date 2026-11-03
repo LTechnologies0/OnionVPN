@@ -20,8 +20,22 @@ dependencyResolutionManagement {
 
 rootProject.name = "onion-vpn"
 
-includeBuild("../../kotlin-tor")
-includeBuild("../kotlin-DNSCrypt")
+/**
+ * Optional composite engines. Present locally for development; CI may check out
+ * kotlin-tor under composite/kotlin-tor. Absent → stub engines (C Tor / native DNSCrypt only).
+ */
+fun findComposite(vararg relatives: String): java.io.File? =
+    relatives
+        .map { file(it) }
+        .firstOrNull { dir ->
+            dir.isDirectory &&
+                (dir.resolve("settings.gradle.kts").isFile || dir.resolve("settings.gradle").isFile)
+        }
+
+val kotlinTorDir = findComposite("composite/kotlin-tor", "../../kotlin-tor")
+val kotlinDnsCryptDir = findComposite("composite/kotlin-DNSCrypt", "../kotlin-DNSCrypt")
+kotlinTorDir?.let { includeBuild(it) }
+kotlinDnsCryptDir?.let { includeBuild(it) }
 
 include(
     ":app",
