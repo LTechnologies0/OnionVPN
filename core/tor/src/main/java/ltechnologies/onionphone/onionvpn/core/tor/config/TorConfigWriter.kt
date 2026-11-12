@@ -36,6 +36,12 @@ object TorConfigWriter {
     const val CONTROL_SOCKET_NAME = "control.sock"
 
     /**
+     * Apps SessionGroup SocksPort unix socket basename under [DataDirectory].
+     * Mode `0600` — only the OnionVPN UID can dial; closes loopback TCP forge (W5-01 C2).
+     */
+    const val APPS_SOCKS_SOCKET_NAME = "apps_socks.sock"
+
+    /**
      * CookieAuthentication file basename under [DataDirectory].
      * Hex contents authenticate [ltechnologies.onionphone.onionvpn.core.tor.control.TorControlClient].
      */
@@ -64,7 +70,8 @@ object TorConfigWriter {
 
     /**
      * @param dataDirectory absolute Tor DataDirectory path
-     * @param socksPort apps/hev SocksPort
+     * @param socksPort apps/hev SocksPort (TCP). Ignored for the apps listener when
+     *   [appsSocksUnix] is true — unix socket under [dataDirectory] is used instead.
      * @param dnsCryptSocksPort DNSCrypt upstream SocksPort
      * @param probeSocksPort validation/leak-probe SocksPort
      * @param openVpnSocksPort OpenVPN-over-Tor control channel SocksPort
@@ -72,6 +79,8 @@ object TorConfigWriter {
      * @param dnsPort Tor DNSPort (Automap)
      * @param preferences bridges, nodes, circuit dirtiness
      * @param nativeLibraryDir absolute path to extracted jniLibs (PT binaries); null skips auto-CTP
+     * @param appsSocksUnix when true, apps SessionGroup binds `unix:[DataDirectory]/APPS_SOCKS_SOCKET_NAME`
+     *   (little-t / kotlin-tor). TCP apps SocksPort stays unpublished so bare `u/p` forge dies.
      */
     @Suppress("UNUSED_PARAMETER")
     fun write(
@@ -84,7 +93,9 @@ object TorConfigWriter {
         dnsPort: Int = TunnelEndpoints.TOR_DNS_PORT,
         preferences: TunnelPreferences = TunnelPreferences(),
         nativeLibraryDir: String? = null,
+        appsSocksUnix: Boolean = false,
     ): String {
+        val appsSocksPath = File(dataDirectory, APPS_SOCKS_SOCKET_NAME).absolutePath
         val torrc = buildString {
         appendLine("DataDirectory $dataDirectory")
         appendLine("ClientOnly 1")
@@ -98,8 +109,15 @@ object TorConfigWriter {
         appendLine("SocksPolicy accept 127.0.0.1")
         appendLine("SocksPolicy reject *")
 
+        val appsListen =
+            if (appsSocksUnix) {
+                // Filesystem unix — mode set by Tor; same-UID only. No TCP apps listener.
+                "unix:\"$appsSocksPath\""
+            } else {
+                "${TunnelEndpoints.LOOPBACK}:$socksPort"
+            }
         appendLine(
-            "SOCKSPort ${TunnelEndpoints.LOOPBACK}:$socksPort " +
+            "SOCKSPort $appsListen " +
                 // IPv6Traffic: allow onion/IPv6 streams. Do NOT PreferIPv6 — DNSCrypt is A-only
                 // locally, but SOCKS5A hostname CONNECT is re-resolved at the exit; PreferIPv6
                 // then picks broken AAAA paths and apps (Speedtest OkHttp) hit SSL read timeouts.
@@ -234,14 +252,22 @@ object TorConfigWriter {
         }
         }
         Timber.i(
-            "torrc written socks=:%d dns=:%d bridges=%s dirt=%d bytes=%d",
-            socksPort,
+            "torrc written socks=%s dns=:%d bridges=%s dirt=%d bytes=%d",
+            if (appsSocksUnix) "unix:$APPS_SOCKS_SOCKET_NAME" else ":$socksPort",
             dnsPort,
             preferences.torBridges.isNotBlank(),
             preferences.torMaxCircuitDirtinessSec,
             torrc.length,
         )
-        OpTrace.info("tor", "torrc written socks=:$socksPort dns=:$dnsPort bytes=${torrc.length}")
+        OpTrace.info(
+            "tor",
+            "torrc written socks=" +
+                (if (appsSocksUnix) "unix" else ":$socksPort") +
+                " dns=:$dnsPort bytes=${torrc.length}",
+        )
         return torrc
     }
+
+    fun appsSocksSocketFile(dataDirectory: String): File =
+        File(dataDirectory, APPS_SOCKS_SOCKET_NAME)
 }

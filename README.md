@@ -1,6 +1,6 @@
 # OnionVPN
 
-Privacy-focused Android VPN that routes **all device traffic through Tor**, with **DNSCrypt** for app DNS over Tor SOCKS (TunDnsMux divert). Inspired by InviZible and Mullvad-style leak protection.
+Privacy-focused Android VPN that routes device traffic through **Tor** by default, with **DNSCrypt** for app DNS over Tor SOCKS (TunDnsMux divert). Optional firewall paths: **Via LAN** (RFC1918 on Wi‑Fi/Ethernet) and **Via OVPN** (OpenVPN/SoftEther over Tor). Inspired by InviZible and Mullvad-style leak protection.
 
 **Package:** `ltechnologies.onionphone.onionvpn`  
 **Min SDK 26 · Target / Compile SDK 37 · Java/Kotlin 21 · Jetpack Compose**
@@ -9,9 +9,11 @@ Privacy-focused Android VPN that routes **all device traffic through Tor**, with
 
 | Feature | Description |
 |---------|-------------|
-| Tor tunnel | Full-device VPN via hev-socks5-tunnel → Tor SOCKS; kill switch blocks traffic when the tunnel is down |
+| Tor tunnel | Full-device VPN via hev-socks5-tunnel → Tor SOCKS; Blocking kill-switch when down (Connected may also use Via LAN / Via OVPN) |
 | DNSCrypt | App DNS resolved through DNSCrypt (upstream via Tor); TunDnsMux on `10.8.0.1` |
-| Interactive firewall | OpenSnitch-style Accept / Deny for new outbound connections (notification + prompt, FIFO queue, permanent / session / temporary rules) |
+| Via LAN | Firewall “Via LAN”: RFC1918 TCP clearnet on Wi‑Fi/Eth (`LanClearnetDial`); not a Tor exit |
+| Via OVPN | Optional OpenVPN/SoftEther **over Tor**; SoftEther cannot reach LAN or Automap |
+| Interactive firewall | OpenSnitch-style Tor / Deny / Via LAN / Via OVPN prompts (FIFO, permanent / session / temporary) |
 | Domain threat lists | HaGeZi lists colour destinations on prompts: 🟢 safe (unlisted), 🟠 ads/tracking/telemetry, 🔴 malware/C2 — updates prefer Tor when the tunnel is up |
 | App lock | Lock the UI without stopping the tunnel or kill switch |
 | Tor tuning | Circuit rotation presets, stream isolation modes, editable `torrc` / `dnscrypt-proxy.toml` |
@@ -23,7 +25,7 @@ Privacy-focused Android VPN that routes **all device traffic through Tor**, with
 
 | Layer | Role |
 |-------|------|
-| Tor | SOCKS + DNSPort (ephemeral ports), SafeSocks depending on DNS mode |
+| Tor | SOCKS + DNSPort (ephemeral ports), SafeSocks 0 (SOCKS5A / Automap remote DNS) |
 | Arti (opt-in) | In-process Rust Tor via `arti-mobile` and/or onionmasq; capability-gated ControlPort gaps |
 | onionmasq | When selected: TUN → smoltcp → arti-client; SOCKS sidecar for DNSCrypt IsolationTokens (see `docs/TUN_DATA_PLANE.md`) |
 | DNSCrypt | App DNS via TunDnsMux; upstream via Tor SOCKS; bootstrap via Tor DNSPort |
@@ -135,7 +137,7 @@ Pick **C Tor** or **Arti** at runtime. Capabilities are gated via `TorEngineCapa
 
 | Capability | C Tor | Arti |
 |------------|-------|------|
-| SOCKS proxy | Multi-port SessionGroups | Single shared SOCKS (+ SOCKS user/pass) |
+| SOCKS proxy | Multi-port SessionGroups | Role-mux SOCKS + IsolationToken `u{uid}` / `p{uid}` (apps / DNSCrypt / OVPN) |
 | `.onion` Automap | Native DNSPort Automap | App-side synthesizer → SOCKS5A |
 | Classic ControlSocket | Yes | No (`arti.status` + Ext JNI / synthetic) |
 | Circuits / streams UI | Yes | No (no list-circuits API) |

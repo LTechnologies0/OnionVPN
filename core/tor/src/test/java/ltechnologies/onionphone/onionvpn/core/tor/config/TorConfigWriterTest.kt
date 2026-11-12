@@ -79,6 +79,29 @@ class TorConfigWriterTest {
     }
 
     @Test
+    fun appsSocksUnix_hidesTcpAppsListener() {
+        val torrc = TorConfigWriter.write(
+            dataDirectory = "/data/data/app/tor",
+            socksPort = 1111,
+            dnsCryptSocksPort = 2222,
+            probeSocksPort = 3333,
+            openVpnSocksPort = 6666,
+            dnsPort = 4444,
+            appsSocksUnix = true,
+        )
+        val appLine = torrc.lineSequence().first {
+            it.startsWith("SOCKSPort ") &&
+                it.contains("SessionGroup=${TunnelEndpoints.SESSION_GROUP_APPS}")
+        }
+        assertTrue(appLine.contains("unix:\"/data/data/app/tor/${TorConfigWriter.APPS_SOCKS_SOCKET_NAME}\""))
+        assertFalse(
+            "TCP apps SocksPort must not be published when unix is enabled",
+            appLine.contains("${TunnelEndpoints.LOOPBACK}:1111"),
+        )
+        assertTrue(torrc.contains("SOCKSPort ${TunnelEndpoints.LOOPBACK}:2222"))
+    }
+
+    @Test
     fun mitmHardening_rejectInternal_safeLogging_refuseUnknownExits() {
         val torrc = TorConfigWriter.write(dataDirectory = "/tmp/tor")
         assertTrue(torrc.contains("ClientRejectInternalAddresses 1"))

@@ -65,6 +65,8 @@ class OnionmasqTunForwarder(
     private val worker = AtomicReference<Job?>(null)
     private val automapHevWorker = AtomicReference<Job?>(null)
     private val running = AtomicBoolean(false)
+    /** When false, ignore hev/mux onFatal (stop/rebind must not clear the next session). */
+    private val acceptFatals = AtomicBoolean(false)
     /**
      * True once we have handed a TUN fd to [OnionMasq.start] (or are about to).
      *
@@ -80,6 +82,7 @@ class OnionmasqTunForwarder(
     private var omEnd: ParcelFileDescriptor? = null
     private var automapHevEnd: ParcelFileDescriptor? = null
     private var uidBridge: SocksUidBridge? = null
+    private var automapHevConfigHandle: HevConfigMaterializer.Handle? = null
     private val mainHandler = Handler(Looper.getMainLooper())
     private var eventObserver: Observer<OnionmasqEvent>? = null
     /** Tor VPN parity: drives OnionMasqJni.setInternetConnectivity on uplink changes. */
@@ -157,11 +160,17 @@ class OnionmasqTunForwarder(
                 // Upstream Tor port starts at 0; TunnelForegroundService calls
                 // updateTorSocks(sidecar) after OnionMasq bootstrap.
                 val hevPass = HevSocks5TunForwarder.newBridgeSessionPassword()
+                acceptFatals.set(true)
+                // Ignore fatals after stop()/rebind so a dying previous hev cannot clear
+                // the live forwarderAlive (B02 rebind race).
+                val sessionFatal: (Throwable) -> Unit = { error ->
+                    if (acceptFatals.get()) onFatal?.invoke(error)
+                }
                 val bridge = SocksUidBridge(
                     context = context,
                     hevBridgePassword = hevPass,
                     protectSocket = protectSocket,
-                    onFatal = onFatal,
+                    onFatal = sessionFatal,
                 )
                 bridge.start(torSocks = 0, dnsCrypt = dnsCryptPort)
                 uidBridge = bridge
@@ -170,36 +179,65 @@ class OnionmasqTunForwarder(
                 val automapHevNative = automapPair[0]
                 val automapMuxEnd = automapPair[1]
                 automapHevEnd = automapHevNative
-                val automapJob = scope.launch {
-                    val configFile = java.io.File(context.filesDir, "hev-onionmasq-automap.yaml")
-                    configFile.writeText(
-                        buildAutomapHevConfig(
-                            TunnelEndpoints.LOOPBACK,
-                            TunnelEndpoints.SOCKS_UID_BRIDGE_PORT,
-                            hevPass,
-                        ),
+                val automapYaml = buildAutomapHevConfig(
+                    TunnelEndpoints.LOOPBACK,
+                    TunnelEndpoints.SOCKS_UID_BRIDGE_PORT,
+                    hevPass,
+                )
+                // One process-global TProxy: Automap + ALLOW_LAN share this hev plane
+                // (cannot dual-Start). Both divert via SocksUidBridge — not OnionMasq (C2).
+                val fromStrOk = hev.sockstun.TProxyService.isFromStrAvailable()
+                if (!fromStrOk) {
+                    val automapHandle = HevConfigMaterializer.materialize(
+                        yaml = automapYaml,
+                        cacheDir = java.io.File(context.cacheDir, "hev"),
+                        nameHint = "hev-onionmasq-automap",
                     )
-                    Timber.i(
-                        "Starting Automap hev on fd=%d → SocksUidBridge :%d",
-                        automapHevNative.fd,
-                        TunnelEndpoints.SOCKS_UID_BRIDGE_PORT,
-                    )
-                    try {
-                        hev.sockstun.TProxyService.TProxyStartService(
-                            configFile.absolutePath,
-                            automapHevNative.fd,
-                        )
-                    } catch (error: Exception) {
-                        Timber.e(error, "Automap hev exited")
-                        onFatal?.invoke(
-                            TunnelFailure.ForwarderDead(
-                                "Automap hev exited: ${error.message}",
-                                error,
-                            ),
-                        )
-                    }
+                    automapHevConfigHandle = automapHandle
                 }
-                automapHevWorker.set(automapJob)
+                // Start Automap hev BEFORE mux — refuse must abort start (W4-05), not arm
+                // a dead DGRAM peer. Materializer kept until stop() after TProxyStop (B03).
+                Timber.i(
+                    "Starting Automap hev on fd=%d → SocksUidBridge :%d (shared Automap+LAN)",
+                    automapHevNative.fd,
+                    TunnelEndpoints.SOCKS_UID_BRIDGE_PORT,
+                )
+                if (!HevTProxyGate.startExclusive(this@OnionmasqTunForwarder) {
+                        if (fromStrOk) {
+                            val rc = hev.sockstun.TProxyService.startFromStr(
+                                automapYaml,
+                                automapHevNative.fd,
+                            )
+                            if (rc != 0) {
+                                Timber.w("Automap hev FromStr rc=%d — path fallback", rc)
+                                val automapHandle = HevConfigMaterializer.materialize(
+                                    yaml = automapYaml,
+                                    cacheDir = java.io.File(context.cacheDir, "hev"),
+                                    nameHint = "hev-onionmasq-automap",
+                                )
+                                automapHevConfigHandle = automapHandle
+                                hev.sockstun.TProxyService.TProxyStartService(
+                                    automapHandle.path,
+                                    automapHevNative.fd,
+                                )
+                            }
+                        } else {
+                            hev.sockstun.TProxyService.TProxyStartService(
+                                automapHevConfigHandle!!.path,
+                                automapHevNative.fd,
+                            )
+                        }
+                    }
+                ) {
+                    throw TunnelFailure.ForwarderDead(
+                        "Automap hev Start refused — TProxy already owned",
+                    )
+                }
+                try {
+                    Thread.sleep(75)
+                } catch (_: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                }
 
                 val pair = HevSocks5TunForwarder.createPacketSocketPair()
                 val onionEnd = pair[0]
@@ -221,7 +259,7 @@ class OnionmasqTunForwarder(
                     automapHevFd = automapMuxEnd,
                     onFatal = { error ->
                         Timber.e(error, "TunDnsMux died (onionmasq path)")
-                        onFatal?.invoke(error)
+                        sessionFatal(error)
                     },
                 )
                 dnsMux = mux
@@ -291,6 +329,7 @@ class OnionmasqTunForwarder(
 
     override fun stop() {
         OpTrace.debug("onionmasq", "stop")
+        acceptFatals.set(false)
         running.set(false)
         detachEventObserver()
         unregisterPackageReceiver()
@@ -310,17 +349,22 @@ class OnionmasqTunForwarder(
             .onFailure { Timber.w(it, "OnionMasq.unbindVPNService failed") }
         dnsMux?.stop()
         dnsMux = null
-        try {
-            hev.sockstun.TProxyService.TProxyStopService()
-        } catch (error: Exception) {
-            Timber.w(error, "Failed to stop Automap hev")
+        HevTProxyGate.stopIfOwner(this) {
+            try {
+                hev.sockstun.TProxyService.TProxyStopService()
+            } catch (error: Exception) {
+                Timber.w(error, "Failed to stop Automap hev")
+            }
         }
         automapHevWorker.getAndSet(null)?.cancel()
         uidBridge?.stop()
         uidBridge = null
         worker.getAndSet(null)?.cancel()
         supervisor.cancelChildren()
-        // Only if start() failed before detachFd(); after detach, native owns the fd.
+        automapHevConfigHandle?.close()
+        automapHevConfigHandle = null
+        // Legacy durable path scrub (pre-memfd installs).
+        runCatching { java.io.File(context.filesDir, "hev-onionmasq-automap.yaml").delete() }
         runCatching { omEnd?.close() }
         omEnd = null
         runCatching { automapHevEnd?.close() }

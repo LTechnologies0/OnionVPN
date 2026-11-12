@@ -20,6 +20,7 @@ import javax.net.ssl.HttpsURLConnection
 import javax.net.ssl.SSLPeerUnverifiedException
 import javax.net.ssl.SSLSocketFactory
 import ltechnologies.onionphone.onionvpn.core.model.SocksJavaProxyAuth
+import ltechnologies.onionphone.onionvpn.core.model.TorNetPolicy
 import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
 import ltechnologies.onionphone.onionvpn.core.vpn.forwarder.Socks5Client
 import ltechnologies.onionphone.onionvpn.core.model.net.SecureTorHttp.applyTorClientHardening
@@ -309,7 +310,9 @@ class SocksDnsBootstrapRelay(
         val qname = parsed.qname?.takeIf { it.isNotBlank() } ?: return null
 
         hostnameResolver?.invoke(qname)?.let { ip ->
-            DnsOnionAutomapReply.buildAResponse(udpQuery, 0, udpQuery.size, ip)?.let { return it }
+            if (isGloballyRoutableBootstrapA(ip)) {
+                DnsOnionAutomapReply.buildAResponse(udpQuery, 0, udpQuery.size, ip)?.let { return it }
+            }
         }
 
         if (useSocksResolve) {
@@ -325,7 +328,7 @@ class SocksDnsBootstrapRelay(
             }.onSuccess { addr ->
                 val host = addr.hostAddress?.substringBefore('%') ?: return@onSuccess
                 // Prefer IPv4 for DNSCrypt bootstrap (block_ipv6=true).
-                if (addr.address.size == 4) {
+                if (addr.address.size == 4 && isGloballyRoutableBootstrapA(host)) {
                     DnsOnionAutomapReply.buildAResponse(udpQuery, 0, udpQuery.size, host)
                         ?.let { return it }
                 }
@@ -364,14 +367,15 @@ class SocksDnsBootstrapRelay(
     private fun resolveViaDohOkHttp(udpQuery: ByteArray, endpoint: DohEndpoint): ByteArray? {
         if (!running.get()) return null
         return try {
+            // Tight timeouts — bootstrap only; long stalls delayed DNSCrypt readiness.
             val client = OkHttpClient.Builder()
                 .proxy(Proxy(Proxy.Type.SOCKS, InetSocketAddress(socksHost, socksPort)))
                 .dns(BootstrapTorSocksDns)
-                .connectTimeout(20, TimeUnit.SECONDS)
-                .readTimeout(25, TimeUnit.SECONDS)
-                .writeTimeout(20, TimeUnit.SECONDS)
-                .callTimeout(45, TimeUnit.SECONDS)
-                .retryOnConnectionFailure(true)
+                .connectTimeout(12, TimeUnit.SECONDS)
+                .readTimeout(15, TimeUnit.SECONDS)
+                .writeTimeout(12, TimeUnit.SECONDS)
+                .callTimeout(25, TimeUnit.SECONDS)
+                .retryOnConnectionFailure(false)
                 .applyTorClientHardening()
                 .build()
             val url = "https://${endpoint.sniHost}:${endpoint.port}${endpoint.path}"
@@ -381,7 +385,7 @@ class SocksDnsBootstrapRelay(
                     Request.Builder()
                         .url(url)
                         .header("Accept", "application/dns-message")
-                        .header("User-Agent", "OnionVPN-bootstrap")
+                        // No custom UA — avoid OnionVPN fingerprint on DoH exits.
                         .post(body)
                         .build(),
                 ).execute().use { response ->
@@ -418,11 +422,11 @@ class SocksDnsBootstrapRelay(
                     proxyPort = socksPort,
                     username = socksUser,
                     password = socksPass,
-                    connectTimeoutMs = 15_000,
-                    handshakeTimeoutMs = 60_000,
-                ).connect(connectHost, endpoint.port).use { tcp ->
+                    connectTimeoutMs = 12_000,
+                    handshakeTimeoutMs = 25_000,
+                ).connectTcpSocket(connectHost, endpoint.port).use { tcp ->
                     if (!running.get()) return null
-                    tcp.soTimeout = 25_000
+                    tcp.soTimeout = 15_000
                     val sslFactory = SSLSocketFactory.getDefault() as SSLSocketFactory
                     val ssl = sslFactory.createSocket(
                         tcp,
@@ -434,7 +438,7 @@ class SocksDnsBootstrapRelay(
                     runCatching {
                         ssl.enabledProtocols = arrayOf("TLSv1.3", "TLSv1.2")
                     }
-                    ssl.soTimeout = 25_000
+                    ssl.soTimeout = 15_000
                     ssl.startHandshake()
                     val hv = HttpsURLConnection.getDefaultHostnameVerifier()
                     if (!hv.verify(endpoint.sniHost, ssl.session)) {
@@ -449,7 +453,6 @@ class SocksDnsBootstrapRelay(
                         append("Accept: application/dns-message\r\n")
                         append("Content-Length: ${udpQuery.size}\r\n")
                         append("Connection: close\r\n")
-                        append("User-Agent: OnionVPN-bootstrap\r\n")
                         append("\r\n")
                     }.toByteArray(Charsets.US_ASCII)
                     out.write(headers)
@@ -499,7 +502,8 @@ class SocksDnsBootstrapRelay(
     }
 
     /**
-     * DoH cache/poison defense: accept only responses that echo our query ID and QNAME.
+     * DoH cache/poison defense: accept only responses that echo our query ID and QNAME,
+     * and whose A RDATA is globally routable (no RFC1918 / Automap / CGNAT).
      */
     private fun bindDohResponse(query: ByteArray, response: ByteArray): ByteArray? {
         if (response.size < 12) return null
@@ -522,7 +526,20 @@ class SocksDnsBootstrapRelay(
                 return null
             }
         }
+        for (a in r.aRecords) {
+            if (!isGloballyRoutableBootstrapA(a)) {
+                Timber.d("SocksDnsBootstrapRelay DoH A refused (private/Automap)")
+                return null
+            }
+        }
         return response
+    }
+
+    /** Bootstrap A must be clearnet-routable — never VirtualAddrNetwork / RFC1918 / CGNAT. */
+    private fun isGloballyRoutableBootstrapA(ipLiteral: String): Boolean {
+        val ipInt = TunnelEndpoints.parseIpv4Literal(ipLiteral) ?: return false
+        if (TunnelEndpoints.isAutomapVirtualIpv4(ipInt)) return false
+        return !TorNetPolicy.mustBlackholeIpv4Destination(ipInt)
     }
 
     private fun readChunkedBody(inp: BufferedInputStream): ByteArray? {
@@ -574,12 +591,13 @@ class SocksDnsBootstrapRelay(
             val path: String = DEFAULT_DOH_PATH,
         )
 
-        /** Ordered DoH providers — OkHttp uses [DohEndpoint.sniHost] via SOCKS5h. */
+        /**
+         * Ordered DoH providers (bootstrap fallback only). Keep short — each miss
+         * costs a Tor circuit + TLS; drop Google to avoid dual-vendor correlation.
+         */
         private val DOH_ENDPOINTS = listOf(
             DohEndpoint(DEFAULT_DOH_CONNECT_HOST, DEFAULT_DOH_SNI_HOST),
-            DohEndpoint("1.0.0.1", "cloudflare-dns.com"),
             DohEndpoint("9.9.9.9", "dns.quad9.net"),
-            DohEndpoint("8.8.8.8", "dns.google"),
         )
 
         /**

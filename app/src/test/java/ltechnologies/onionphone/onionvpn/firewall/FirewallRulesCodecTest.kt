@@ -48,4 +48,16 @@ class FirewallRulesCodecTest {
         assertTrue(decoded is FirewallRulesCodec.DecodeResult.Ok)
         assertTrue(decoded.rules.isEmpty())
     }
+
+    @Test
+    fun decode_skipsEmptyDestHost() {
+        val json = """[{
+            "id":"uidwide","uid":10123,"packageName":"x","appLabel":"X",
+            "destHost":"","destPort":443,"protocol":6,
+            "verdict":"ALLOW_TOR","scope":"PERMANENT"
+        }]"""
+        val decoded = FirewallRulesCodec.decodeRules(json)
+        assertTrue(decoded is FirewallRulesCodec.DecodeResult.Ok)
+        assertTrue(decoded.rules.isEmpty())
+    }
 }

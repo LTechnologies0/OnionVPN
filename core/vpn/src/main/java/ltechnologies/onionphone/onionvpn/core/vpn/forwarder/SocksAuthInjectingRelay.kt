@@ -72,7 +72,7 @@ class SocksAuthInjectingRelay(
         accept.execute {
             Timber.i(
                 "SocksAuthInjectingRelay[$label] listen=$listenPort → " +
-                    "$upstreamHost:${upstreamPort.get()} (NO-AUTH|USERPASS→user=$username)",
+                    "$upstreamHost:${upstreamPort.get()} (NO-AUTH|USERPASS→user=set)",
             )
             while (running.get()) {
                 val client = try {
@@ -149,7 +149,7 @@ class SocksAuthInjectingRelay(
         dest: Dest,
         pipe: ThreadPoolExecutor,
     ) {
-        var upstream: Socket? = null
+        var upstream: SocksUpstream? = null
         try {
             val up = try {
                 Socks5Client(
@@ -173,8 +173,8 @@ class SocksAuthInjectingRelay(
             clientOut.write(byteArrayOf(0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0))
             clientOut.flush()
 
-            val c2u = pipe.submit { copy(client, up) }
-            val u2c = pipe.submit { copy(up, client) }
+            val c2u = pipe.submit { copyClientToUp(client, up) }
+            val u2c = pipe.submit { copyUpToClient(up, client) }
             c2u.get()
             u2c.get()
         } finally {
@@ -182,9 +182,22 @@ class SocksAuthInjectingRelay(
         }
     }
 
-    private fun copy(from: Socket, to: Socket) {
+    private fun copyClientToUp(from: Socket, to: SocksUpstream) {
         val buf = ByteArray(16 * 1024)
         val input = from.getInputStream()
+        val output = to.outputStream
+        while (true) {
+            val n = input.read(buf)
+            if (n < 0) break
+            output.write(buf, 0, n)
+            output.flush()
+        }
+        runCatching { to.shutdownOutput() }
+    }
+
+    private fun copyUpToClient(from: SocksUpstream, to: Socket) {
+        val buf = ByteArray(16 * 1024)
+        val input = from.inputStream
         val output = to.getOutputStream()
         while (true) {
             val n = input.read(buf)

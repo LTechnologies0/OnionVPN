@@ -84,10 +84,17 @@ internal object OvpnIpNat {
             Timber.w("OVPN IFCONFIG NAT skip — no IPv4 in msg (len=%d)", extra.length)
             return
         }
+        val prev = ovpnClientIp.get()
         ovpnClientIp.set(ip)
-        tcpFlows.clear()
-        udpFlows.clear()
-        Timber.i("OVPN IP NAT ready (client IP set, maps cleared)")
+        // Soft reconnect often re-sends the same IFCONFIG — wiping conntrack mid-stream
+        // blackholes live TCP until re-SYN (W5-06 R2). Only clear on IP change.
+        if (prev != ip) {
+            tcpFlows.clear()
+            udpFlows.clear()
+            Timber.i("OVPN IP NAT ready (client IP changed, maps cleared)")
+        } else {
+            Timber.d("OVPN IP NAT IFCONFIG refresh — same client IP, maps kept")
+        }
     }
 
     fun isReady(): Boolean = ovpnClientIp.get() != 0
@@ -105,6 +112,8 @@ internal object OvpnIpNat {
         val ihl = (packet[0].toInt() and 0xf) * 4
         if (length < ihl || ihl < 20) return false
         val src = readIpv4(packet, 12)
+        // Only VpnService client IP (or already-SNATed retries) may enter SoftEther.
+        if (src != vpnClientIp && src != ovpn) return false
         if (src != ovpn) {
             writeIpv4(packet, 12, ovpn)
             fixIpv4HeaderChecksum(packet, ihl)
@@ -286,5 +295,6 @@ internal object OvpnIpNat {
     }
 
     private const val FLOW_TTL_MS = 120_000L
-    const val DATA_PLANE_SILENCE_MS = 20_000L
+    /** Tor RTT can exceed 20s under load — avoid false SoftEther demote (W5-06 R3). */
+    const val DATA_PLANE_SILENCE_MS = 45_000L
 }

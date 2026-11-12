@@ -4,6 +4,7 @@ import java.io.InputStream
 import java.net.Socket
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.random.Random
+import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
 import timber.log.Timber
 
 /**
@@ -27,7 +28,7 @@ internal class TcpTunSession(
     private val onClosed: (TcpTunSession) -> Unit,
 ) {
     private val alive = AtomicBoolean(true)
-    private var socket: Socket? = null
+    private var socket: SocksUpstream? = null
     private var readerThread: Thread? = null
 
     /** Our seq (as "server" toward the app). */
@@ -61,8 +62,8 @@ internal class TcpTunSession(
         if (meta.payloadLength > 0 && established) {
             clientSeq = meta.seq + meta.payloadLength
             try {
-                socket?.getOutputStream()?.write(packet, meta.payloadOffset, meta.payloadLength)
-                socket?.getOutputStream()?.flush()
+                socket?.outputStream?.write(packet, meta.payloadOffset, meta.payloadLength)
+                socket?.outputStream?.flush()
             } catch (e: Exception) {
                 Timber.d(e, "TCP session write to SOCKS failed")
                 close(sendRst = true)
@@ -88,6 +89,7 @@ internal class TcpTunSession(
                     username = socksUser,
                     password = socksPass,
                     protect = protect,
+                    unixPath = TunnelEndpoints.appsSocksUnixPath,
                 ).connect(remoteHost, remotePort)
                 if (!alive.get()) {
                     sock.close()
@@ -98,7 +100,7 @@ internal class TcpTunSession(
                 sendTcp(TcpPacketBuilder.FLAG_SYN or TcpPacketBuilder.FLAG_ACK, payload = Empty)
                 ourSeq += 1
                 established = true
-                startReader(sock.getInputStream())
+                startReader(sock.inputStream)
             } catch (e: Exception) {
                 Timber.d(e, "SOCKS connect failed uid=%d", uid)
                 close(sendRst = true)

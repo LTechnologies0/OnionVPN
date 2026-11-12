@@ -138,11 +138,18 @@ class DnsCryptProcessManager(
         lifecycleMutex.withLock {
             OpTrace.stepSuspending("dnscrypt", "stop") {
                 stopInternal()
-                lastPorts = null
-                lastSocksOverride = null
-                lastSocksUser = null
+                // Keep lastPorts / socks overrides so applyPreferences (onionmasq NEWNYM)
+                // can restart without "no runtime ports". Cleared only on full teardown
+                // via [forgetRuntimePorts].
             }
         }
+    }
+
+    /** Drop cached ports after the tunnel is fully torn down. */
+    fun forgetRuntimePorts() {
+        lastPorts = null
+        lastSocksOverride = null
+        lastSocksUser = null
     }
 
     fun isRunning(): Boolean =
@@ -173,6 +180,16 @@ class DnsCryptProcessManager(
                 if (kotlinEngineActive) {
                     val socksPort = lastSocksOverride ?: ports.torDnsCryptSocksPort
                     kotlinRuntime.onLogLine = onLogLine
+                    if (!kotlinRuntime.isRunning()) {
+                        // NEWNYM stop()+applyPreferences — must rebind UDP/TCP stub.
+                        return@withLock startKotlinEngine(
+                            lastServerName,
+                            ports,
+                            preferences,
+                            lastSocksOverride,
+                            socksUser,
+                        )
+                    }
                     kotlinRuntime.reconfigure(
                         torSocksPort = socksPort,
                         socksUser = socksUser,
@@ -238,15 +255,9 @@ class DnsCryptProcessManager(
         if (ports == null || !isRunning()) {
             return@withContext Result.success(Unit)
         }
+        // Always flush on IsolationToken/epoch rotate — sticky DNS across NEWNYM is a leak.
         val now = System.currentTimeMillis()
-        val prev = lastClearCacheMs.get()
-        if (now - prev < CLEAR_CACHE_COOLDOWN_MS) {
-            Timber.d("DNSCrypt clearQueryCache skipped — cooldown")
-            return@withContext Result.success(Unit)
-        }
-        if (!lastClearCacheMs.compareAndSet(prev, now)) {
-            return@withContext Result.success(Unit)
-        }
+        lastClearCacheMs.set(now)
         if (kotlinEngineActive) {
             kotlinRuntime.clearQueryCache()
             return@withContext Result.success(Unit)

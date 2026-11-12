@@ -118,6 +118,13 @@ object TcpFlowUidIndex {
         return null
     }
 
+    /** Consume newest stamp for IPv4 or IPv6 host (W4-07: no multi-UID peek ride). */
+    fun takeHost(host: String, dstPort: Int): Entry? {
+        parseIpv4(host)?.let { return take(it, dstPort) }
+        if (host.indexOf(':') >= 0) return takeV6(host, dstPort)
+        return null
+    }
+
     fun stats(): String =
         "notes=${notes.get()} takes=${takes.get()} misses=${misses.get()} " +
             "keys=${byDest.size} v6keys=${byDestV6.size}"
@@ -146,6 +153,26 @@ object TcpFlowUidIndex {
             return null
         }
         return peekNewest(q, key, byDestV6)
+    }
+
+    private fun takeV6(host: String, dstPort: Int): Entry? {
+        val key = "$host|$dstPort"
+        val q = byDestV6[key] ?: run {
+            misses.incrementAndGet()
+            return null
+        }
+        val now = System.currentTimeMillis()
+        while (true) {
+            val e = q.pollLast() ?: break
+            if (now - e.atMs <= ENTRY_TTL_MS) {
+                takes.incrementAndGet()
+                if (q.isEmpty()) byDestV6.remove(key, q)
+                return e
+            }
+        }
+        byDestV6.remove(key, q)
+        misses.incrementAndGet()
+        return null
     }
 
     private fun <K> peekNewest(

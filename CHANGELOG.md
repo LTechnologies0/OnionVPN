@@ -4,6 +4,43 @@ All notable changes to OnionVPN are documented here.
 
 ## [Unreleased]
 
+## [0.3.89] — 2026-11-12
+
+### Tor routing / IsolateSOCKSAuth
+- Per-UID / PAC SOCKS require session `-s{hex}`; static `onionvpn`/`stream` removed from onionmasq sidecar.
+- Explicit `uopenvpn`/`popenvpn` allow; sticky OPENVPN circuits preserved across NEWNYM UID churn.
+- Little-t: OpenVPN NO-AUTH → UID-gated `SocksAuthInjectingRelay` into dedicated OPENVPN SessionGroup (`torOpenVpnIsolateSocksPort`).
+- Apps SocksPort on unix (0600) for little-t; sidecar refuses private/CGNAT/Automap CONNECT destinations.
+- PAC auth: no DNSCrypt `resolver` password alias; `uunknown` without `-s` rejected.
+
+### DNSCrypt over Tor
+- TunDnsMux TCP/53 async + Automap/DNSCrypt parity (no TUN stall on stub timeout).
+- kotlin-DNSCrypt: ID-independent cache + TTL; `withTimeout(20s)`; UDP resolve pool; AAAA→NODATA; no PQ-resume across Tor.
+- NEWNYM: preserve runtime ports across `stop()`; kotlin restart via `applyPreferences`; always flush query cache.
+- Bootstrap DoH: shorter timeouts, no custom UA, drop Google endpoint; refuse private/Automap A from RESOLVE/DoH.
+- DnsCryptResolver / DnsHostnameCache: reject Automap-range clearnet A; QNAME+ID match on replies.
+
+### OpenVPN over Tor
+- IFCONFIG → `onNatReady` / publishUpState; SNAT allowlist; socks-auth chmod; management log scrub.
+- SOCKS/PAC plane: `ALLOW_OVPN` → DENY (no SoftEther+Tor dual egress).
+- Unknown NEED-OK → `cancel`; `auth-nocache`; shred `auth-user-pass` / `socks-auth` / wipe `runtime.ovpn` on stop.
+
+### Firewall / LAN / hev
+- Via LAN bind-then-protect dial; hev FromStr JNI; LAN clearnet dial path; Automap hev divert hardening.
+
+## [0.3.88] — 2026-11-11
+
+### Via LAN / firewall
+- Interactive `ALLOW_LAN` plane: bind Wi‑Fi/Eth/USB Network then `protect` (not protect-only).
+- Cake/monerod: exact sibling ports `18080/18081/18089` — no host-wide `destPort=-1`.
+- Always-On × ASK: preserve SESSION on rebound; 5m ASK TTL fail-closed; Activity fallback when notifications denied.
+- Per-tunnel IsolateSOCKSAuth `-s{hex}` session secret; hev yaml via memfd (no durable filesDir password).
+
+### Tor / DNSCrypt / OVPN
+- Arti DisableNetwork via `withTorDowntime`; NEWNYM epoch before Socks resume.
+- kotlin-DNSCrypt AAAA → NODATA; Automap∩LAN refuse-unmapped; mapped-v4 tcp6 UID.
+- Via OVPN UP gated on SNAT ready; mid-flow `coerceLiveOvpn`; scrub auth-user-pass on stop.
+
 ## [0.3.82] — 2026-09-15
 
 ### SoftEther / SOCKS plane fail-closed

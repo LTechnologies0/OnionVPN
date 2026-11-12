@@ -26,7 +26,7 @@ object FirewallRulesCodec {
 
     fun encodeRules(rules: List<FirewallRule>): String {
         val arr = JSONArray()
-        rules.forEach { r ->
+        rules.filterNot { it.isExpired() || it.isPoisonLanAllow() || it.isPoisonEmptyDest() }.forEach { r ->
             arr.put(
                 JSONObject()
                     .put("id", r.id)
@@ -68,21 +68,32 @@ object FirewallRulesCodec {
         return DecodeResult.Ok(rules)
     }
 
-    private fun decodeOne(o: JSONObject): FirewallRule {
+    private fun decodeOne(o: JSONObject): FirewallRule? {
         val expires = if (o.isNull("expiresAtEpochMs")) null else o.getLong("expiresAtEpochMs")
-        return FirewallRule(
+        val destHost = o.optString("destHost").let { if (it == "null") "" else it }
+        val rule = FirewallRule(
             id = o.getString("id"),
             uid = o.getInt("uid"),
-            packageName = o.optString("packageName"),
-            appLabel = o.optString("appLabel"),
-            destHost = o.optString("destHost"),
+            packageName = o.optString("packageName").let { if (it == "null") "" else it },
+            appLabel = o.optString("appLabel").let { if (it == "null") "" else it },
+            destHost = destHost,
             destPort = o.optInt("destPort", -1),
             protocol = o.optInt("protocol", -1),
             verdict = FirewallVerdict.parse(o.getString("verdict")),
             scope = FirewallRuleScope.valueOf(o.getString("scope")),
             expiresAtEpochMs = expires,
             createdAtEpochMs = o.optLong("createdAtEpochMs", 0L),
-            displayHost = o.optString("displayHost"),
+            displayHost = o.optString("displayHost").let { if (it == "null") "" else it },
         )
+        if (rule.isPoisonLanAllow()) {
+            Timber.w("FirewallRulesCodec skip poison ALLOW_LAN id=%s", rule.id)
+            return null
+        }
+        if (rule.isPoisonEmptyDest()) {
+            Timber.w("FirewallRulesCodec skip empty destHost id=%s verdict=%s", rule.id, rule.verdict)
+            return null
+        }
+        if (rule.isExpired()) return null
+        return rule
     }
 }

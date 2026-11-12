@@ -1,8 +1,12 @@
 package ltechnologies.onionphone.onionvpn.core.model
 
 /**
- * Fail-closed network policy for OnionVPN: every clearnet name → DNSCrypt-over-Tor,
- * every `.onion`/`.exit` → Tor Automap + SOCKS5A, every torrifiable TCP → Tor/Arti SOCKS.
+ * Fail-closed network policy for OnionVPN: clearnet names → DNSCrypt-over-Tor,
+ * `.onion`/`.exit` → Tor Automap + SOCKS5A, torrifiable TCP → Tor/Arti SOCKS.
+ *
+ * Exceptions (intentional, not “leaks”): firewall **Via LAN** (RFC1918 on Wi‑Fi/Eth via
+ * [protect]+bind) and **Via OVPN** (SoftEther/OpenVPN-over-Tor data plane). CGNAT /
+ * VpnTun / Automap / docs ranges stay refused for clearnet SOCKS.
  *
  * Host rules follow RFC 1035 / 1123; onion/exit follow Tor address-spec.
  * IP classification follows RFC 1918 / 3927 / 4291 / 5737 / 6598 and Tor Automap pools.
@@ -117,7 +121,8 @@ object TorNetPolicy {
             a == 127 -> return IpClass.Loopback
             a == 10 -> {
                 if (b in 192..255) return IpClass.TorAutomap
-                if (b == 8 && c == 0 && (d == 1 || d == 2)) return IpClass.VpnTun
+                // OnionVPN TUN is 10.8.0.0/24 (TunnelEndpoints.VPN_*) — never Via LAN.
+                if (b == 8 && c == 0) return IpClass.VpnTun
                 return IpClass.PrivateRfc1918
             }
             a == 172 && b in 16..31 -> return IpClass.PrivateRfc1918
@@ -168,6 +173,19 @@ object TorNetPolicy {
     fun isLanRoutableIpv4Literal(hostAddress: String): Boolean {
         val ip = TunnelEndpoints.parseIpv4Literal(hostAddress) ?: return false
         return isLanRoutableIpv4(ip)
+    }
+
+    /**
+     * SOCKS CONNECT IPv4 literal refuse gate (SocksUidBridge.readConnect).
+     * Still blackholes CGNAT / loopback / VpnTun / docs — but **not** RFC1918:
+     * those must reach the firewall Via LAN dial (protect + bind Wi‑Fi).
+     */
+    fun mustRefuseSocksConnectIpv4(ipInt: Int): Boolean =
+        mustBlackholeIpv4Destination(ipInt) && !isLanRoutableIpv4(ipInt)
+
+    fun mustRefuseSocksConnectIpv4Literal(hostAddress: String): Boolean {
+        val ip = TunnelEndpoints.parseIpv4Literal(hostAddress) ?: return false
+        return mustRefuseSocksConnectIpv4(ip)
     }
 
     fun isRfc1123Hostname(hostname: String): Boolean {

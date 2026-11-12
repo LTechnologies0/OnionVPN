@@ -305,6 +305,8 @@ class TorProcessManager(
     ): Result<Unit> {
         OpTrace.debug("tor", "arti.stop_prior")
         stopInternal()
+        // Arti apps SOCKS stays TCP loopback — clear little-t unix path if any.
+        TunnelEndpoints.setAppsSocksUnixPath(null)
         runtimePorts = ports
         return try {
             OpTrace.stepSuspending("tor", "arti.jni_start", ProcessLogLevel.INFO) {
@@ -466,6 +468,8 @@ class TorProcessManager(
         // Onionmasq plane skips tor.start() — keep engine aligned for control/status IO.
         activeEngine = TorEngine.ARTI
         preferences = preferences.copy(torEngine = TorEngine.ARTI)
+        // Sidecar is TCP — never leave a stale little-t apps unix path armed.
+        TunnelEndpoints.setAppsSocksUnixPath(null)
         Timber.i(
             "TorProcessManager attached external ports socks=%d probe=%d dns=%d engine=ARTI",
             ports.torSocksPort,
@@ -631,14 +635,16 @@ class TorProcessManager(
         control.dropGuards()
     }
 
-    /** SETCONF DisableNetwork — Arti: hard restart. */
+    /** SETCONF DisableNetwork — Arti: hard restart under bridge downtime (W4-01/W4-10). */
     suspend fun setDisableNetwork(disabled: Boolean): Result<Unit> = withContext(Dispatchers.IO) {
         if (activeEngine == TorEngine.ARTI) {
             return@withContext if (disabled) {
-                // Soft stop listeners by stopping Arti; caller should re-enable via hard recover.
-                arti.stop()
-                control.resetStatus()
-                Result.success(Unit)
+                // Pause SOCKS bridges first — raw stop left hev dialing a dead SocksPort.
+                withTorDowntime {
+                    arti.stop()
+                    control.resetStatus()
+                    Result.success(Unit)
+                }
             } else {
                 recoverNetworkHard()
             }
@@ -1220,17 +1226,23 @@ class TorProcessManager(
 
     /** Step 2: write torrc from current preferences + ports. */
     private fun writeTorrc(ports: TunnelRuntimePorts) {
+        // Apps SessionGroup on unix socket — closes loopback TCP forge (W5-01 C2).
+        val appsUnix = TorConfigWriter.appsSocksSocketFile(configDirectory.absolutePath)
+        runCatching { if (appsUnix.exists()) appsUnix.delete() }
+        TunnelEndpoints.setAppsSocksUnixPath(appsUnix.absolutePath)
         torrcFile.writeText(
             TorConfigWriter.write(
                 dataDirectory = configDirectory.absolutePath,
                 socksPort = ports.torSocksPort,
                 dnsCryptSocksPort = ports.torDnsCryptSocksPort,
                 probeSocksPort = ports.torProbeSocksPort,
-                openVpnSocksPort = ports.torOpenVpnSocksPort,
+                openVpnSocksPort = ports.torOpenVpnIsolateSocksPort
+                    .takeIf { it > 0 } ?: ports.torOpenVpnSocksPort,
                 httpTunnelPort = ports.torHttpTunnelPort,
                 dnsPort = ports.torDnsPort,
                 preferences = preferences,
                 nativeLibraryDir = nativeLibraryDir.absolutePath,
+                appsSocksUnix = true,
             ),
         )
         if (TorBridgeConfig.isConfigured(preferences.torBridges)) {
@@ -1642,7 +1654,11 @@ class TorProcessManager(
         if (!externalDataPlanePorts) {
             runtimePorts = null
         }
+        TunnelEndpoints.setAppsSocksUnixPath(null)
         runCatching { controlSocketFile.delete() }
+        runCatching {
+            TorConfigWriter.appsSocksSocketFile(configDirectory.absolutePath).delete()
+        }
         MemoryHygiene.afterHeavyWork("tor_stop")
     }
 

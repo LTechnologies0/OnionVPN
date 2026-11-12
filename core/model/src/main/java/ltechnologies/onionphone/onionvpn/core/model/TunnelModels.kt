@@ -218,12 +218,17 @@ object TunnelEndpoints {
      * Global app SOCKS IsolationToken epoch. Bumped on NEWNYM (all planes) so
      * KeepAliveIsolateSOCKSAuth cannot reuse pre-NEWNYM identity.
      *
-     * Passwords stay deterministic (`p{uid}`, `resolver`, `check`) so the onionmasq
-     * SOCKS sidecar allowlist (`socks_auth_ok`) and C Tor IsolateSOCKSAuth agree.
-     * Local forging of `u{uid}/p{uid}` is mitigated by SocksPolicy 127.0.0.1 +
-     * [SocksUidBridge] peer-UID gate — not by password entropy.
+     * Role passwords (`resolver`, `check`, `popenvpn`) stay fixed for the onionmasq
+     * SOCKS sidecar allowlist. Per-UID / PAC tokens use mirrored `u…`/`p…` /
+     * `pac…` form plus a per-tunnel [appSocksSessionSecret] (`-s{hex}`) so
+     * loopback forge of bare `u{uid}/p{uid}` cannot skip TunDnsMux/firewall
+     * (W4-09 / W4-10 #1). Sidecar rejects UID/PAC auth without `-s` and no
+     * longer accepts static `onionvpn`/`stream`.
      */
     private val appSocksNymEpochRef = java.util.concurrent.atomic.AtomicInteger(0)
+    private val appSocksSessionSecretRef = java.util.concurrent.atomic.AtomicReference("")
+    private val appsSocksUnixPathRef = java.util.concurrent.atomic.AtomicReference<String?>(null)
+    private val pacBridgeSecretRef = java.util.concurrent.atomic.AtomicReference("")
 
     var appSocksNymEpoch: Int
         get() = appSocksNymEpochRef.get()
@@ -231,20 +236,72 @@ object TunnelEndpoints {
             appSocksNymEpochRef.set(value)
         }
 
+    /** Non-empty hex when a tunnel session has minted IsolateSOCKSAuth entropy. */
+    val appSocksSessionSecret: String
+        get() = appSocksSessionSecretRef.get()
+
+    /**
+     * Absolute filesystem path to C Tor / kotlin-tor apps SocksPort unix socket
+     * (`0600` under DataDirectory). Null for Arti / onionmasq TCP apps listeners.
+     * When set, [Socks5Client] / bridges dial unix — loopback TCP forge of bare
+     * `u{uid}/p{uid}` cannot reach the apps SessionGroup (W5-01 C2).
+     */
+    val appsSocksUnixPath: String?
+        get() = appsSocksUnixPathRef.get()
+
+    fun setAppsSocksUnixPath(path: String?) {
+        appsSocksUnixPathRef.set(path?.takeIf { it.isNotBlank() })
+    }
+
+    /** Per-tunnel PAC bridge RFC1929 secret (embedded in PAC for browsers that support it). */
+    val pacBridgeSecret: String
+        get() = pacBridgeSecretRef.get()
+
     fun bumpAppSocksNymEpoch(): Int = appSocksNymEpochRef.incrementAndGet()
 
     fun resetAppSocksNymEpoch() {
         appSocksNymEpochRef.set(0)
+        appSocksSessionSecretRef.set("")
+        pacBridgeSecretRef.set("")
+        appsSocksUnixPathRef.set(null)
+    }
+
+    /**
+     * Mint a fresh per-tunnel SOCKS auth tag (16 hex chars). Call on tunnel start
+     * and optionally on NEWNYM so prior forge guesses die with the session.
+     */
+    fun mintSocksSessionSecret(): String {
+        val bytes = ByteArray(8)
+        java.security.SecureRandom().nextBytes(bytes)
+        val secret = bytes.joinToString("") { b -> "%02x".format(b) }
+        appSocksSessionSecretRef.set(secret)
+        return secret
+    }
+
+    /**
+     * Mint PAC-listen USER/PASS (distinct from Tor IsolateSOCKSAuth). Call with
+     * [mintSocksSessionSecret] so PAC body and [DnsCryptSocksBridge] share a nonce.
+     */
+    fun mintPacBridgeSecret(): String {
+        val bytes = ByteArray(8)
+        java.security.SecureRandom().nextBytes(bytes)
+        val secret = bytes.joinToString("") { b -> "%02x".format(b) }
+        pacBridgeSecretRef.set(secret)
+        return secret
     }
 
     fun socksUserForUid(uid: Int, epoch: Int = appSocksNymEpoch): String {
         if (uid < 0) return SOCKS_UNKNOWN_USER
-        return if (epoch > 0) "u$uid-n$epoch" else "u$uid"
+        val base = if (epoch > 0) "u$uid-n$epoch" else "u$uid"
+        val secret = appSocksSessionSecretRef.get()
+        return if (secret.isNotEmpty()) "$base-s$secret" else base
     }
 
     fun socksPassForUid(uid: Int, epoch: Int = appSocksNymEpoch): String {
         if (uid < 0) return SOCKS_UNKNOWN_PASS
-        return if (epoch > 0) "p$uid-n$epoch" else "p$uid"
+        val base = if (epoch > 0) "p$uid-n$epoch" else "p$uid"
+        val secret = appSocksSessionSecretRef.get()
+        return if (secret.isNotEmpty()) "$base-s$secret" else base
     }
 
     /** DNSCrypt SOCKS password (fixed role secret — must match onionmasq allowlist). */
@@ -256,12 +313,13 @@ object TunnelEndpoints {
     /** PAC fallback password (prefer per-UID [socksPassForUid]). */
     fun socksPacPass(): String = SOCKS_PAC_PASS
 
-    /** Parse `u{uid}`, `u{uid}-n{epoch}`, or unknown sentinel. */
+    /** Parse `u{uid}`, `u{uid}-n{epoch}`, `u{uid}-s{secret}`, or unknown sentinel. */
     fun uidFromSocksUser(user: String): Int? {
         if (user == SOCKS_UNKNOWN_USER) return -1
         if (!user.startsWith("u")) return null
         val body = user.removePrefix("u")
-        val uidPart = body.substringBefore("-n")
+        // First path segment is the UID; `-n` / `-s` suffixes follow.
+        val uidPart = body.substringBefore('-')
         return uidPart.toIntOrNull()
     }
 
@@ -311,6 +369,13 @@ object TunnelEndpoints {
     /** IsolateSOCKSAuth fallback when PAC client UID is unknown. Prefer pac{uid}/p{uid}. */
     const val SOCKS_PAC_USER = "pac"
     const val SOCKS_PAC_PASS = "dnscrypt"
+
+    /**
+     * PAC bridge listen-side USER (RFC1929). Password is [pacBridgeSecret] when minted;
+     * browsers that embed `user:pass@` in PAC use this. Chrome may still NO-AUTH —
+     * bridge then relies on UID + firewall (W5-10 R4).
+     */
+    const val SOCKS_PAC_BRIDGE_USER = "pacbridge"
 
     /**
      * Local SOCKS5 in front of Tor apps SocksPort: hev → [SocksUidBridge] → Tor `u{uid}`.

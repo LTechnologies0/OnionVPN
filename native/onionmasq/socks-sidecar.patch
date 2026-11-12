@@ -6,7 +6,7 @@ index 63797e4..83c832d 100644
  
  [dependencies]
  anyhow = "1.0"
-+arti-client = { version = "0.45.0", default-features = false, features = ["tokio", "rustls", "onion-service-client"] }
++arti-client = { version = "0.48.0", default-features = false, features = ["tokio", "rustls", "onion-service-client"] }
  backtrace = "0.3.71"
  lazy_static = "1.4.0"
  onion-tunnel = { path = "../onion-tunnel", version = "0.0.0", features = ["udp-tunnel", "pcap"] }
@@ -16,7 +16,7 @@ index 63797e4..83c832d 100644
 +tokio = { version = "1.37.0", features = ["macros", "rt", "rt-multi-thread", "net", "io-util", "sync"] }
  tokio-stream = "0.1"
 +tokio-util = { version = "0.7.10", features = ["compat"] }
-+tor-rtcompat = { version = "0.45.0" }
++tor-rtcompat = { version = "0.48.0" }
  tracing = "0.1.40"
  # the java native interface
  jni = { version = "0.21", default-features = false }
@@ -690,31 +690,41 @@ index 0000000..7712330
 +
 +fn socks_auth_ok(username: &str, password: &[u8]) -> bool {
 +    // Mirror TunnelEndpoints role secrets (OnionVPN).
-+    // Epoch forms: u{uid}-nN / p{uid}-nN, pac{uid}-nN, dnscrypt-nN (NEWNYM rotate).
++    // Epoch forms: u{uid}-nN-sS / pac{uid}-nN-sS / dnscrypt-nN (NEWNYM rotate).
++    // Static onionvpn/stream removed — apps must use per-UID -s{hex} (W5).
 +    let expected: Option<Vec<u8>> = if username == "probe" {
 +        Some(b"check".to_vec())
 +    } else if username == "dnscrypt" || username.starts_with("dnscrypt-n") {
 +        Some(b"resolver".to_vec())
++    } else if username == "uopenvpn" {
++        // Dedicated OVPN SessionGroup — fixed role (not a forgeable UID).
++        Some(b"popenvpn".to_vec())
++    } else if username == "openvpn" {
++        // Legacy literal kept for docs / older injectors.
++        Some(b"overtor".to_vec())
 +    } else if username == "pac" {
-+        // SOCKS_PAC_PASS historically "dnscrypt"; also accept resolver.
++        // Shared PAC fallback only — prefer pac{uid}-s… below.
 +        return password == b"dnscrypt" || password == b"resolver";
 +    } else if let Some(rest) = username.strip_prefix("pac") {
 +        if rest.is_empty() {
 +            return false;
 +        }
-+        // pac{uid} or pac{uid}-n{epoch} → p{uid} or p{uid}-n{epoch}
++        // Require session -s{hex} (DnsCryptSocksBridge mints with appSocksSessionSecret).
++        if !rest.contains("-s") {
++            return false;
++        }
++        // pac{uid}-sS / pac{uid}-nN-sS → p{uid}-sS / p{uid}-nN-sS
 +        Some(format!("p{rest}").into_bytes())
-+    } else if username == "onionvpn" {
-+        Some(b"stream".to_vec())
-+    } else if username == "openvpn" {
-+        // Prefer TunnelEndpoints uopenvpn/popenvpn (works on older sidecars via u*→p*).
-+        // Literal openvpn/overtor kept for patched builds / docs.
-+        Some(b"overtor".to_vec())
 +    } else if let Some(rest) = username.strip_prefix('u') {
 +        if rest.is_empty() || rest == "unknown" {
 +            return password == b"punknown";
 +        }
-+        // u{uid} or u{uid}-n{epoch} → p{uid} or p{uid}-n{epoch}
++        // Require session -s{hex} so bare u{uid}/p{uid} cannot forge past firewall (W5).
++        // JVM mints appSocksSessionSecret on every tunnel start / NEWNYM.
++        if !rest.contains("-s") {
++            return false;
++        }
++        // u{uid}-sS / u{uid}-nN-sS → mirrored p…
 +        Some(format!("p{rest}").into_bytes())
 +    } else {
 +        None

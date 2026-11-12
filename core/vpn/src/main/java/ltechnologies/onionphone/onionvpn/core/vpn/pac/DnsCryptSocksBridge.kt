@@ -21,6 +21,7 @@ import ltechnologies.onionphone.onionvpn.core.vpn.firewall.ConnectionOwnerResolv
 import ltechnologies.onionphone.onionvpn.core.vpn.firewall.FirewallBridge
 import ltechnologies.onionphone.onionvpn.core.vpn.firewall.SocksConnectPlane
 import ltechnologies.onionphone.onionvpn.core.vpn.forwarder.Socks5Client
+import ltechnologies.onionphone.onionvpn.core.vpn.forwarder.SocksUpstream
 import timber.log.Timber
 
 /**
@@ -127,15 +128,49 @@ class DnsCryptSocksBridge(
             val input = DataInputStream(c.getInputStream())
             val output = DataOutputStream(c.getOutputStream())
             try {
-                // Greeting
+                // Greeting — prefer RFC1929 when PAC embeds user:pass (Firefox);
+                // Chrome still NO-AUTH → UID + firewall remain the gate (W5-10 R4).
                 val ver = input.readUnsignedByte()
                 if (ver != 0x05) throw IOException("not SOCKS5")
                 val nMethods = input.readUnsignedByte()
-                input.skipBytes(nMethods)
-                // No auth — PAC clients rarely send IsolateSOCKSAuth credentials.
-                output.writeByte(0x05)
-                output.writeByte(0x00)
-                output.flush()
+                val methods = ByteArray(nMethods.coerceAtLeast(0).coerceAtMost(255))
+                if (methods.isNotEmpty()) input.readFully(methods)
+                val pacSecret = TunnelEndpoints.pacBridgeSecret
+                val wantUserPass =
+                    pacSecret.isNotEmpty() && methods.any { it.toInt() and 0xFF == AUTH_USER_PASS }
+                if (wantUserPass) {
+                    output.writeByte(0x05)
+                    output.writeByte(AUTH_USER_PASS)
+                    output.flush()
+                    val authVer = input.readUnsignedByte()
+                    if (authVer != 0x01) throw IOException("PAC SOCKS bad auth ver")
+                    val ulen = input.readUnsignedByte()
+                    val user = ByteArray(ulen).also { input.readFully(it) }
+                        .toString(StandardCharsets.UTF_8)
+                    val plen = input.readUnsignedByte()
+                    val pass = ByteArray(plen).also { input.readFully(it) }
+                        .toString(StandardCharsets.UTF_8)
+                    val ok =
+                        user == TunnelEndpoints.SOCKS_PAC_BRIDGE_USER &&
+                            pass == pacSecret
+                    output.writeByte(0x01)
+                    output.writeByte(if (ok) 0x00 else 0x01)
+                    output.flush()
+                    if (!ok) throw IOException("PAC SOCKS user/pass rejected")
+                } else {
+                    // Chrome PAC cannot send USER/PASS — accept NO-AUTH only with UID gate below.
+                    if (methods.isNotEmpty() &&
+                        methods.none { it.toInt() and 0xFF == AUTH_NONE }
+                    ) {
+                        output.writeByte(0x05)
+                        output.writeByte(0xFF)
+                        output.flush()
+                        return
+                    }
+                    output.writeByte(0x05)
+                    output.writeByte(AUTH_NONE)
+                    output.flush()
+                }
 
                 val reqVer = input.readUnsignedByte()
                 val cmd = input.readUnsignedByte()
@@ -185,7 +220,7 @@ class DnsCryptSocksBridge(
                 }
                 val (socksUser, socksPass) = pacSocksAuth(clientUid)
                 val resolvedIp: String
-                val remote: Socket = if (TunnelEndpoints.isOnionLikeHostname(host)) {
+                val remote: SocksUpstream = if (TunnelEndpoints.isOnionLikeHostname(host)) {
                     resolvedIp = ""
                     if (!FirewallBridge.engine.allowSocksConnect(
                             uid = clientUid,
@@ -203,6 +238,7 @@ class DnsCryptSocksBridge(
                         proxyPort = torPort,
                         username = socksUser,
                         password = socksPass,
+                        unixPath = TunnelEndpoints.appsSocksUnixPath,
                     ).connect(host, port)
                 } else {
                     // DNSCrypt path is A-only (like SocksUidBridge pin). IPv6 literals would
@@ -248,6 +284,7 @@ class DnsCryptSocksBridge(
                         proxyPort = torPort,
                         username = socksUser,
                         password = socksPass,
+                        unixPath = TunnelEndpoints.appsSocksUnixPath,
                     ).connect(resolvedIp, port)
                 }
 
@@ -341,10 +378,10 @@ class DnsCryptSocksBridge(
             "interrupted" in msg
     }
 
-    private fun pipe(a: Socket, b: Socket) {
+    private fun pipe(a: Socket, b: SocksUpstream) {
         val t = Thread({
             try {
-                a.getInputStream().copyTo(b.getOutputStream())
+                a.getInputStream().copyTo(b.outputStream)
             } catch (_: Exception) {
             } finally {
                 runCatching { b.shutdownOutput() }
@@ -355,7 +392,7 @@ class DnsCryptSocksBridge(
         t.isDaemon = true
         t.start()
         try {
-            b.getInputStream().copyTo(a.getOutputStream())
+            b.inputStream.copyTo(a.getOutputStream())
         } catch (_: Exception) {
         } finally {
             runCatching { a.shutdownOutput() }
@@ -375,13 +412,21 @@ class DnsCryptSocksBridge(
      */
     private fun pacSocksAuth(uid: Int): Pair<String, String> {
         val epoch = TunnelEndpoints.appSocksNymEpoch
-        val user = if (epoch > 0) "pac$uid-n$epoch" else "pac$uid"
-        // Password mirrors app IsolateSOCKSAuth (`p{uid}` / `p{uid}-nN`) — sidecar allowlist.
-        return user to TunnelEndpoints.socksPassForUid(uid, epoch)
+        val secret = TunnelEndpoints.appSocksSessionSecret
+        // Mirror onionmasq socks_auth_ok: pac{rest} → p{rest} (incl. -n / -s suffixes).
+        val user = buildString {
+            append("pac").append(uid)
+            if (epoch > 0) append("-n").append(epoch)
+            if (secret.isNotEmpty()) append("-s").append(secret)
+        }
+        val pass = "p" + user.removePrefix("pac")
+        return user to pass
     }
 
     companion object {
         private const val CMD_CONNECT = 0x01
+        private const val AUTH_NONE = 0x00
+        private const val AUTH_USER_PASS = 0x02
         private const val ATYP_IPV4 = 0x01
         private const val ATYP_DOMAIN = 0x03
         private const val ATYP_IPV6 = 0x04

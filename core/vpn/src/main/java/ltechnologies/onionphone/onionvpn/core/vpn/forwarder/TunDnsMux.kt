@@ -36,10 +36,12 @@ import timber.log.Timber
  *   (AutomapHostsOnResolve → virtual IPs in [TunnelEndpoints.VIRTUAL_ADDR_NETWORK]/10),
  *   or app-side Automap when [synthesizeOnionAutomap] (Arti has no native Automap).
  * - Non-DNS UDP / ICMP / multicast → blackhole (force apps onto TCP; Tor has no UDP)
- * - IPv4+IPv6 TCP → hev → Tor SOCKS (clearnet IPv6 TCP blackholed except Automap ULA)
- * - IPv4 TCP → firewall check → hev engine (UID stamped into [TcpFlowUidIndex] for SocksUidBridge)
- * - Optional [automapHevFd]: Automap TCP only → secondary hev→[SocksUidBridge]→SOCKS5A
- *   (onionmasq plane: smoltcp never sees the synth IP — needs hostname rewrite)
+ * - IPv4 TCP → firewall → hev→Tor SOCKS, **ALLOW_LAN** → [writeLanTcp]→SocksUidBridge→LanClearnetDial,
+ *   or **ALLOW_OVPN** → SoftEther sink (never RFC1918)
+ * - Clearnet IPv6 TCP blackholed except Automap ULA (no Via LAN for IPv6 yet)
+ * - UID stamped into [TcpFlowUidIndex] for SocksUidBridge IsolateSOCKSAuth
+ * - Optional [automapHevFd]: Automap (+ ONIONMASQ Via LAN) → hev→[SocksUidBridge] SOCKS5A / clearnet dial
+ *   (onionmasq primary is Arti — never write RFC1918 into smoltcp)
  *
  * DoS / ARM notes:
  * - DNS work uses a **bounded** pool + queue (never unbounded LinkedBlockingQueue).
@@ -113,6 +115,18 @@ class TunDnsMux(
     ).apply {
         allowCoreThreadTimeOut(true)
     }
+    /** Separate from dnsExecutor — DNS 25s sockets must not AbortPolicy-drop LAN UID stamps (B08/B10). */
+    private val stampExecutor = ThreadPoolExecutor(
+        1,
+        2,
+        30L,
+        TimeUnit.SECONDS,
+        ArrayBlockingQueue(64),
+        { r -> Thread(r, "onionvpn-uid-stamp").apply { isDaemon = true } },
+        ThreadPoolExecutor.AbortPolicy(),
+    ).apply {
+        allowCoreThreadTimeOut(true)
+    }
     private var tunEmptyReadStreak = 0
     private var hevEmptyReadStreak = 0
 
@@ -156,7 +170,27 @@ class TunDnsMux(
                             if (!FirewallBridge.engine.allowOutbound(buf, n)) {
                                 // Drop
                             } else {
-                                handleTcpDnsPacket(buf, n, localTunOut)
+                                // SYN-ACK stays on TUN reader; payload query offloaded so a
+                                // 25s stub stall cannot freeze hev/onionmasq forwards (DNS agent).
+                                val meta = TcpPacketBuilder.parseTcpMeta(buf, n)
+                                if (meta?.synOnly == true || meta?.rst == true || meta?.fin == true) {
+                                    handleTcpDnsPacket(buf, n, localTunOut)
+                                } else {
+                                    val packet = borrowPacket(buf, n)
+                                    try {
+                                        dnsExecutor.execute {
+                                            try {
+                                                if (generation.get() == gen) {
+                                                    handleTcpDnsPacket(packet, n, localTunOut)
+                                                }
+                                            } finally {
+                                                recyclePacket(packet)
+                                            }
+                                        }
+                                    } catch (_: RejectedExecutionException) {
+                                        recyclePacket(packet)
+                                    }
+                                }
                             }
                         }
                         divertDnsToDnsCrypt && LeakPacketFilter.isDnsUdpPort53(buf, n) -> {
@@ -215,13 +249,31 @@ class TunDnsMux(
                             } else {
                                 when (val route = FirewallBridge.engine.outboundRoute(buf, n)) {
                                     FirewallVerdict.DENY -> {
-                                        // Drop
+                                        // LAN ASK/UID-miss: RST so Cake re-SYNs after Via LAN answer
+                                        // (silent drop leaves half-open until app timeout).
+                                        if (isRfc1918LanDestination(buf, n)) {
+                                            TcpRstUnreachable.buildForBlackholedTcp(buf, n)?.let { pkt ->
+                                                synchronized(tunWriteLock) {
+                                                    if (running.get() && generation.get() == gen) {
+                                                        localTunOut.write(pkt, 0, pkt.size)
+                                                    }
+                                                }
+                                            }
+                                        }
                                     }
                                     FirewallVerdict.ALLOW_OVPN -> {
                                         // SoftEther cannot SOCKS5A Automap/.onion — always Tor path.
                                         // SoftEther also cannot reach the user's LAN — never OVPN→LAN.
                                         if (isRfc1918LanDestination(buf, n)) {
                                             Timber.w("ALLOW_OVPN drop — LAN dest cannot use SoftEther")
+                                            // RST like DENY so apps re-SYN after Via LAN answer (B04).
+                                            TcpRstUnreachable.buildForBlackholedTcp(buf, n)?.let { pkt ->
+                                                synchronized(tunWriteLock) {
+                                                    if (running.get() && generation.get() == gen) {
+                                                        localTunOut.write(pkt, 0, pkt.size)
+                                                    }
+                                                }
+                                            }
                                         } else if (isAutomapDestination(buf, n)) {
                                             Timber.w("ALLOW_OVPN→Tor — Automap dest cannot use SoftEther")
                                             stampTcpUid(buf, n)
@@ -235,21 +287,42 @@ class TunDnsMux(
                                             } else {
                                                 // Do not mid-flow flip to Tor — same 5-tuple would
                                                 // SYN→Tor then later OVPN after NAT recovers.
+                                                // RST so apps re-SYN after SoftEther recovers (W5-06 R1).
                                                 Timber.w(
                                                     "ALLOW_OVPN drop — OVPN data plane unavailable",
                                                 )
+                                                TcpRstUnreachable.buildForBlackholedTcp(buf, n)?.let { pkt ->
+                                                    synchronized(tunWriteLock) {
+                                                        if (running.get() && generation.get() == gen) {
+                                                            localTunOut.write(pkt, 0, pkt.size)
+                                                        }
+                                                    }
+                                                }
                                             }
                                         }
                                     }
                                     FirewallVerdict.ALLOW_LAN -> {
-                                        // hev → SocksUidBridge dials protect()'d clearnet (RFC1918).
-                                        stampTcpUid(buf, n)
-                                        writeTorTcp(localHevOut, localAutomapOut, buf, n)
+                                        // Defense-in-depth: never forward non-RFC1918 as Via LAN.
+                                        if (!isRfc1918LanDestination(buf, n)) {
+                                            Timber.w("ALLOW_LAN drop — dest not RFC1918")
+                                        } else {
+                                            stampTcpUid(buf, n)
+                                            // Onionmasq primary fd is Arti — LAN must hit
+                                            // automap hev→SocksUidBridge→LanClearnetDial.
+                                            writeLanTcp(localHevOut, localAutomapOut, buf, n)
+                                        }
                                     }
                                     FirewallVerdict.ALLOW_TOR -> {
                                         // Never torrify RFC1918 — exits cannot reach LAN.
                                         if (isRfc1918LanDestination(buf, n)) {
                                             Timber.w("ALLOW_TOR drop — LAN dest cannot use Tor SOCKS")
+                                            TcpRstUnreachable.buildForBlackholedTcp(buf, n)?.let { pkt ->
+                                                synchronized(tunWriteLock) {
+                                                    if (running.get() && generation.get() == gen) {
+                                                        localTunOut.write(pkt, 0, pkt.size)
+                                                    }
+                                                }
+                                            }
                                         } else {
                                             stampTcpUid(buf, n)
                                             writeTorTcp(localHevOut, localAutomapOut, buf, n)
@@ -363,6 +436,7 @@ class TunDnsMux(
         generation.incrementAndGet()
         if (wasRunning) {
             dnsExecutor.shutdownNow()
+            stampExecutor.shutdownNow()
         }
         runCatching { tunIn?.close() }
         runCatching { hevIn?.close() }
@@ -410,9 +484,15 @@ class TunDnsMux(
                     Timber.w("DNS executor did not terminate cleanly")
                 }
             }
+            runCatching {
+                if (!stampExecutor.awaitTermination(1, TimeUnit.SECONDS)) {
+                    Timber.w("UID stamp executor did not terminate cleanly")
+                }
+            }
         } else {
-            // start() never ran — still shut down the idle pool so FDs/threads release.
+            // start() never ran — still shut down the idle pools so FDs/threads release.
             runCatching { dnsExecutor.shutdownNow() }
+            runCatching { stampExecutor.shutdownNow() }
         }
         MemoryHygiene.afterHeavyWork("tundnsmux_stop")
     }
@@ -456,6 +536,33 @@ class TunDnsMux(
         writeHev(hevOut, buf, n)
     }
 
+    /**
+     * Via LAN: always land on a hev that fronts [SocksUidBridge] (protect+bind dial).
+     * HEV_SOCKS: primary hev is that bridge. ONIONMASQ: primary is Arti — divert to
+     * [automapHevFd] (same SocksUidBridge) so RFC1918 never enters smoltcp/Tor.
+     */
+    private fun writeLanTcp(
+        hevOut: FileOutputStream,
+        automapOut: FileOutputStream?,
+        buf: ByteArray,
+        n: Int,
+    ) {
+        // Onionmasq wired automapHevFd: never fall back to primary (Arti) — that re-breaks C2.
+        if (automapHevFd != null) {
+            val out = automapOut
+            if (out == null) {
+                Timber.w("ALLOW_LAN drop — automap hev plane unavailable (onionmasq)")
+                return
+            }
+            synchronized(automapWriteLock) {
+                if (!running.get()) return
+                out.write(buf, 0, n)
+            }
+            return
+        }
+        writeHev(hevOut, buf, n)
+    }
+
     private fun isAutomapDestination(buf: ByteArray, n: Int): Boolean {
         val info = IpPacketParser.parse(buf, n) ?: return false
         return TunnelEndpoints.isAutomapVirtual(info.dstIp)
@@ -475,8 +582,10 @@ class TunDnsMux(
         } else {
             TcpFlowUidIndex.hasRecent(info.dstIpInt, info.dstPort)
         }
-        // Always re-stamp SYNs (owner UID may have been missed on the first race).
+        // Mid-flow: keep first stamp. LAN SYN: engine already noted UID before ALLOW_LAN —
+        // a hot-path re-resolve miss must not leave SocksUidBridge without a stamp.
         if (!info.isTcpSyn && recent) return
+        if (info.isTcpSyn && recent && isRfc1918LanDestination(buf, n)) return
         val uid = ownerResolver.resolveUid(info)
         if (ConnectionOwnerResolver.isValidUid(uid)) {
             TcpFlowUidIndex.note(info, uid)
@@ -485,15 +594,20 @@ class TunDnsMux(
         // Kernel often lacks the socket on the first TUN SYN — retry off the reader thread.
         if (!info.isTcpSyn || !running.get()) return
         try {
-            dnsExecutor.execute {
+            stampExecutor.execute {
                 if (!running.get()) return@execute
-                val retried = ownerResolver.resolveUidWithRetry(info)
+                val lan = TorNetPolicy.isLanRoutableIpv4Literal(info.dstIp)
+                val retried = if (lan) {
+                    ownerResolver.resolveUidWithRetry(info, attempts = 24, parkNs = 5_000_000L)
+                } else {
+                    ownerResolver.resolveUidWithRetry(info)
+                }
                 if (ConnectionOwnerResolver.isValidUid(retried)) {
                     TcpFlowUidIndex.note(info, retried)
                 }
             }
         } catch (_: RejectedExecutionException) {
-            // Pool saturated — SocksUidBridge still waits / uses last-uid fallback.
+            // Stamp pool saturated — SocksUidBridge still waits / consumeStamp path.
         }
     }
 
@@ -620,8 +734,8 @@ class TunDnsMux(
     }
 
     /**
-     * TCP/53 → DNSCrypt (RFC 1035 length-prefixed). IPv4 only — IPv6 TCP/53 is dropped
-     * so Happy Eyeballs falls back to diverted UDP/53.
+     * TCP/53 → DNSCrypt or Automap (RFC 1035 length-prefixed). IPv4 only — IPv6 TCP/53
+     * is dropped so Happy Eyeballs falls back to diverted UDP/53.
      */
     private fun handleTcpDnsPacket(packet: ByteArray, length: Int, tunOut: FileOutputStream) {
         val version = (packet[0].toInt() ushr 4) and 0x0f
@@ -659,7 +773,29 @@ class TunDnsMux(
             (packet[payloadOff + 1].toInt() and 0xff)
         if (msgLen < 12 || payloadOff + 2 + msgLen > length) return
         val dns = packet.copyOfRange(payloadOff + 2, payloadOff + 2 + msgLen)
-        val replyDns = queryDnsCryptUdp(dns) ?: return
+        val parsed = DnsPacketParser.parse(dns, 0, dns.size) ?: return
+        val route = TorNetPolicy.classifyDnsQuery(parsed.qname)
+        val replyDns: ByteArray = when (route) {
+            TorNetPolicy.DnsRoute.Drop -> return
+            TorNetPolicy.DnsRoute.TorAutomap -> {
+                if (synthesizeOnionAutomap) {
+                    val host = parsed.qname ?: return
+                    when (parsed.qtype) {
+                        DnsOnionAutomapReply.TYPE_A -> {
+                            val virtIp = OnionAutomapAllocator.ipv4ForHostname(host)
+                            DnsOnionAutomapReply.buildAResponse(dns, 0, dns.size, virtIp)
+                        }
+                        else -> DnsOnionAutomapReply.buildNoDataResponse(dns, 0, dns.size)
+                    } ?: return
+                } else if (torDnsPort > 0) {
+                    queryUpstreamDnsUdp(dns, torDnsAddress, torDnsPort) ?: return
+                } else {
+                    return
+                }
+            }
+            TorNetPolicy.DnsRoute.DnsCryptOverTor ->
+                queryUpstreamDnsUdp(dns, dnsCryptAddress, dnsCryptPort) ?: return
+        }
         val framed = ByteArray(2 + replyDns.size)
         framed[0] = (replyDns.size ushr 8).toByte()
         framed[1] = replyDns.size.toByte()
@@ -685,15 +821,38 @@ class TunDnsMux(
         }
     }
 
-    private fun queryDnsCryptUdp(query: ByteArray): ByteArray? {
+    /** UDP DNS upstream with ID match (+ QR) — shared by TCP/53 Automap and DNSCrypt paths. */
+    private fun queryUpstreamDnsUdp(
+        query: ByteArray,
+        host: InetAddress,
+        port: Int,
+    ): ByteArray? {
+        if (query.size < 12 || port <= 0) return null
+        val wantId0 = query[0]
+        val wantId1 = query[1]
         return runCatching {
             DatagramSocket(0, InetAddress.getByName(TunnelEndpoints.LOOPBACK)).use { socket ->
                 socket.soTimeout = DNS_TIMEOUT_MS
-                socket.send(DatagramPacket(query, query.size, dnsCryptAddress, dnsCryptPort))
+                socket.send(DatagramPacket(query, query.size, host, port))
                 val buf = ByteArray(DNS_RESPONSE_CAP)
-                val resp = DatagramPacket(buf, buf.size)
-                socket.receive(resp)
-                buf.copyOf(resp.length)
+                val deadline = System.currentTimeMillis() + DNS_TIMEOUT_MS
+                while (System.currentTimeMillis() < deadline) {
+                    val remaining = (deadline - System.currentTimeMillis()).toInt().coerceAtLeast(1)
+                    socket.soTimeout = remaining
+                    val resp = DatagramPacket(buf, buf.size)
+                    try {
+                        socket.receive(resp)
+                    } catch (_: java.net.SocketTimeoutException) {
+                        break
+                    }
+                    if (resp.length < 12) continue
+                    // Match DNS ID — ignore late/spurious replies (W5-05).
+                    if (buf[0] != wantId0 || buf[1] != wantId1) continue
+                    val flags = ((buf[2].toInt() and 0xff) shl 8) or (buf[3].toInt() and 0xff)
+                    if (flags and 0x8000 == 0) continue // QR
+                    return@use buf.copyOf(resp.length)
+                }
+                null
             }
         }.getOrNull()
     }

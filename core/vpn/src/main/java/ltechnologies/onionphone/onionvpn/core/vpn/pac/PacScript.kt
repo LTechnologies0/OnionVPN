@@ -10,6 +10,10 @@ import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
  *
  * The PAC **URL** stays fixed; [bridgeSocksPort] is fixed ([TunnelEndpoints.PAC_BRIDGE_SOCKS_PORT]).
  *
+ * When [TunnelEndpoints.pacBridgeSecret] is minted, the SOCKS URL embeds
+ * `pacbridge:<secret>@` for browsers that support RFC1929 in PAC (Firefox). Chrome
+ * ignores credentials and NO-AUTHs; the bridge still gates by peer UID + firewall.
+ *
  * Automap `10.192.0.0/10` must **not** return DIRECT (would fight onion SOCKS5A).
  */
 object PacScript {
@@ -36,11 +40,19 @@ object PacScript {
             }
         }
 
-        val chain = "SOCKS5 $bridgeSocksHost:$bridgeSocksPort; SOCKS $bridgeSocksHost:$bridgeSocksPort"
+        val secret = TunnelEndpoints.pacBridgeSecret
+        val authority =
+            if (secret.isNotEmpty()) {
+                "${TunnelEndpoints.SOCKS_PAC_BRIDGE_USER}:$secret@$bridgeSocksHost:$bridgeSocksPort"
+            } else {
+                "$bridgeSocksHost:$bridgeSocksPort"
+            }
+        val chain = "SOCKS5 $authority; SOCKS $authority"
         return """
             |// OnionVPN PAC — stable URL; SOCKS = DNSCrypt→Tor bridge (not Tor DNS).
             |// Name resolution: DNSCrypt stub → A record → Tor SocksPort CONNECT by IP.
             |// .onion / .exit: bridge passes hostname to Tor SOCKS5A (no DNSCrypt).
+            |// Auth: pacbridge session secret when minted (Firefox); Chrome uses NO-AUTH+UID.
             |function isTorAutomap(host) {
             |  // VirtualAddrNetwork 10.192.0.0/10 → 10.192–10.255
             |  return shExpMatch(host, "10.19[2-9].*") ||

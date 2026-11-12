@@ -8,8 +8,16 @@ import org.junit.Test
 class CircuitLifecycleStickyAuthTest {
     @Test
     fun uidToken_isSticky() {
+        TunnelEndpoints.resetAppSocksNymEpoch()
         val user = TunnelEndpoints.socksUserForUid(10123)
         assertTrue(CircuitLifecycleManager.isStickySocksAuth(user))
+        TunnelEndpoints.mintSocksSessionSecret()
+        assertTrue(
+            CircuitLifecycleManager.isStickySocksAuth(
+                TunnelEndpoints.socksUserForUid(10123),
+            ),
+        )
+        TunnelEndpoints.resetAppSocksNymEpoch()
     }
 
     @Test

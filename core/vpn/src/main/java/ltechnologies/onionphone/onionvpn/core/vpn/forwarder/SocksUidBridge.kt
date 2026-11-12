@@ -21,7 +21,6 @@ import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.locks.LockSupport
-import java.net.InetSocketAddress
 import ltechnologies.onionphone.onionvpn.core.model.FirewallVerdict
 import ltechnologies.onionphone.onionvpn.core.model.TorNetPolicy
 import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
@@ -55,7 +54,8 @@ class SocksUidBridge(
     private val protectSocket: ((Socket) -> Boolean)? = null,
     private val onFatal: ((Throwable) -> Unit)? = null,
 ) {
-    private val ownerResolver = ConnectionOwnerResolver(context)
+    private val appContext = context.applicationContext
+    private val ownerResolver = ConnectionOwnerResolver(appContext)
     private val running = AtomicBoolean(false)
     private val torSocksPort = AtomicInteger(0)
     private val dnsCryptPort = AtomicInteger(0)
@@ -67,6 +67,8 @@ class SocksUidBridge(
     private val torConnectSlots = Semaphore(MAX_INFLIGHT_CONNECT)
     private val denyLogSample = AtomicLong(0)
     private val pipeSlots = Semaphore(MAX_PIPE_HALF_SLOTS)
+    /** Cap in-flight LAN dials so Cake storms do not pin all handshake workers (W4-07 F7). */
+    private val lanDialSlots = Semaphore(MAX_LAN_DIALS)
 
     val isRunning: Boolean get() = running.get()
     val boundPort: Int get() = listenPort
@@ -180,6 +182,8 @@ class SocksUidBridge(
                     host = host,
                     port = port,
                     retries = if (lanDestEarly) UID_RETRY_LAN else UID_RETRY,
+                    // Always consume: clearnet peek merged IsolateSOCKSAuth across UIDs (W4-07 F1).
+                    consumeStamp = true,
                 )
                 if (!ConnectionOwnerResolver.isValidUid(uid)) {
                     // Fail-closed: shared uunknown would merge distinct apps (parity with PAC).
@@ -212,37 +216,52 @@ class SocksUidBridge(
                             reply(output, 0x02)
                             return
                         }
-                        if (!pipeSlots.tryAcquire(2)) {
-                            VpnForwarderDebug.socksLog { "SocksUidBridge pipe pool full — reject LAN" }
+                        // Dial BEFORE pipeSlots — holding 2 slots across ≤30s LAN dial
+                        // starved Tor pipes under Cake reconnect storms (B08).
+                        if (!lanDialSlots.tryAcquire()) {
+                            VpnForwarderDebug.socksLog { "SocksUidBridge LAN dial backlog full" }
                             reply(output, 0x01)
                             return
                         }
                         val upstream = try {
-                            dialLanProtected(socksHost, port)
+                            try {
+                                dialLanProtected(socksHost, port)
+                            } finally {
+                                lanDialSlots.release()
+                            }
                         } catch (e: Exception) {
-                            pipeSlots.release(2)
-                            // Host unreachable / protect fail — SOCKS host unreachable (not auth).
                             VpnForwarderDebug.socksLog(e) { "SocksUidBridge LAN dial failed" }
                             reply(output, 0x04)
+                            return
+                        }
+                        if (!pipeSlots.tryAcquire(2)) {
+                            runCatching { upstream.close() }
+                            VpnForwarderDebug.socksLog { "SocksUidBridge pipe pool full — reject LAN" }
+                            reply(output, 0x01)
                             return
                         }
                         client.soTimeout = 0
                         upstream.soTimeout = 0
                         reply(output, 0x00)
                         Timber.i("SocksUidBridge uid=%d LAN ok", uid)
-                        if (!startPipe(client, upstream, slotsAcquired = true)) {
-                            runCatching { upstream.close() }
+                        val lanUp = SocksUpstream.tcp(upstream)
+                        if (!startPipe(client, lanUp, slotsAcquired = true)) {
+                            runCatching { lanUp.close() }
                             return
                         }
                         handedOff = true
                         return
                     }
-                    FirewallVerdict.ALLOW_TOR,
-                    FirewallVerdict.ALLOW_OVPN,
-                    -> {
+                    FirewallVerdict.ALLOW_OVPN -> {
+                        // SoftEther is TUN-only — never invent Tor for Via OVPN (dual egress).
+                        Timber.w("SocksUidBridge refuse ALLOW_OVPN on SOCKS plane")
+                        reply(output, 0x02)
+                        return
+                    }
+                    FirewallVerdict.ALLOW_TOR -> {
                         if (lanDest) {
-                            // Tor exits / SoftEther cannot reach the user's LAN.
-                            Timber.w("SocksUidBridge refuse Tor/OVPN to RFC1918")
+                            // Tor exits cannot reach the user's LAN.
+                            Timber.w("SocksUidBridge refuse Tor to RFC1918")
                             reply(output, 0x02)
                             return
                         }
@@ -263,14 +282,8 @@ class SocksUidBridge(
                     reply(output, 0x01)
                     return
                 }
-                // Reserve pipe threads BEFORE Tor CONNECT + SOCKS success — otherwise we
-                // reply 0x00 to hev, then fail startPipe and RST mid-TLS (Speedtest SSL timeout).
-                if (!pipeSlots.tryAcquire(2)) {
-                    torConnectSlots.release()
-                    VpnForwarderDebug.socksLog { "SocksUidBridge pipe pool full — reject" }
-                    reply(output, 0x01)
-                    return
-                }
+                // Handshake under torConnectSlots only — do not pin pipeSlots for ≤120s
+                // cold circuits (W4-07 F4). Acquire pipes after SOCKS success, before 0x00.
                 val upstream = try {
                     try {
                         Socks5Client(
@@ -281,13 +294,20 @@ class SocksUidBridge(
                             // Signal aborts TLS long before Tor's 120s SocksTimeout; free workers.
                             handshakeTimeoutMs = BRIDGE_HANDSHAKE_MS,
                             protect = protectSocket,
+                            // LITTLE_T/kotlin-tor: unix apps SocksPort (W5-01 C2).
+                            unixPath = TunnelEndpoints.appsSocksUnixPath,
                         ).connect(socksHost, port)
                     } finally {
                         torConnectSlots.release()
                     }
                 } catch (e: Exception) {
-                    pipeSlots.release(2)
                     throw e
+                }
+                if (!pipeSlots.tryAcquire(2)) {
+                    runCatching { upstream.close() }
+                    VpnForwarderDebug.socksLog { "SocksUidBridge pipe pool full — reject post-Tor" }
+                    reply(output, 0x01)
+                    return
                 }
                 // Clear read deadline for the bidirectional pipe (Tor cells can idle >60s).
                 client.soTimeout = 0
@@ -436,51 +456,43 @@ class SocksUidBridge(
     }
 
     /**
-     * Dial RFC1918 on the underlying network (Wi‑Fi/Ethernet) — never through the TUN.
+     * Dial RFC1918 on Wi‑Fi/Ethernet (never cellular, never TUN).
      * Fail-closed if [protectSocket] is missing or returns false.
-     * One retry: Android sometimes returns false from protect() under VPN churn.
+     * [LanClearnetDial] bindSocket's to the LAN uplink so protect() alone cannot
+     * send Cake→192.168.x out the cellular default route (0 hits on the node).
      */
     private fun dialLanProtected(host: String, port: Int): Socket {
         val protect = protectSocket
             ?: throw IOException("LAN dial refused — protectSocket not wired")
-        var last: Exception? = null
-        repeat(2) { attempt ->
-            val upstream = Socket()
-            try {
-                upstream.tcpNoDelay = true
-                if (!protect(upstream)) {
-                    runCatching { upstream.close() }
-                    throw IOException("LAN dial refused — VpnService.protect failed")
-                }
-                upstream.connect(InetSocketAddress(host, port), LAN_CONNECT_TIMEOUT_MS)
-                return upstream
-            } catch (e: Exception) {
-                last = e
-                runCatching { upstream.close() }
-                if (attempt == 0) {
-                    LockSupport.parkNanos(LAN_DIAL_RETRY_PARK_NS)
-                }
-            }
-        }
-        throw last ?: IOException("LAN dial failed")
+        return LanClearnetDial.connect(
+            context = appContext,
+            protect = protect,
+            host = host,
+            port = port,
+            timeoutMs = LAN_CONNECT_TIMEOUT_MS,
+        )
     }
 
     private fun resolveUidForConnect(
         host: String,
         port: Int,
         retries: Int = UID_RETRY,
+        consumeStamp: Boolean = false,
     ): Int {
-        // Peek (non-consuming): parallel streams to the same dest must not steal the stamp.
-        // Peer UID gate above blocks foreign processes from using a stolen stamp.
-        TcpFlowUidIndex.peekHost(host, port)?.uid?.let { uid ->
-            if (ConnectionOwnerResolver.isValidUid(uid)) return uid
+        // Always prefer take when consumeStamp — multi-UID peek merged Tor circuits (W4-07 F1/F5).
+        fun lookup(): Int? {
+            val entry = if (consumeStamp) {
+                TcpFlowUidIndex.takeHost(host, port)
+            } else {
+                TcpFlowUidIndex.peekHost(host, port)
+            }
+            val uid = entry?.uid ?: return null
+            return uid.takeIf { ConnectionOwnerResolver.isValidUid(it) }
         }
-        // Retry: SYN stamp may race hev's SOCKS open (async owner-uid resolve).
+        lookup()?.let { return it }
         repeat(retries.coerceAtLeast(0)) {
             LockSupport.parkNanos(UID_PARK_NS)
-            TcpFlowUidIndex.peekHost(host, port)?.uid?.let { uid ->
-                if (ConnectionOwnerResolver.isValidUid(uid)) return uid
-            }
+            lookup()?.let { return it }
         }
         return Process.INVALID_UID
     }
@@ -497,12 +509,8 @@ class SocksUidBridge(
             DnsHostnameCache.lookup(host)?.let { name ->
                 if (TunnelEndpoints.isOnionLikeHostname(name)) return name
             }
-            repeat(AUTOMAP_RETRY) {
-                LockSupport.parkNanos(AUTOMAP_PARK_NS)
-                DnsHostnameCache.lookup(host)?.let { name ->
-                    if (TunnelEndpoints.isOnionLikeHostname(name)) return name
-                }
-            }
+            // Unmapped Automap IP (incl. real LAN ∩ 10.192/10): refuse immediately —
+            // do not park ~200ms (W4-10 #12b / FIXES M5). Next CONNECT after DNS fill retries.
             return null
         }
         // Already an IPv4 literal from hev — keep it (DNSCrypt A-only path).
@@ -518,10 +526,16 @@ class SocksUidBridge(
         }
         if (TunnelEndpoints.isOnionLikeHostname(host)) return host
         // Hostname CONNECT — pin to torrified A-record (cache or DNSCrypt stub).
-        DnsHostnameCache.ipv4ForHostname(host)?.let { return it }
+        // Reject refuse-class cache hits (stale CGNAT/docs) so live resolve can recover.
+        fun cachedPin(): String? {
+            val v4 = DnsHostnameCache.ipv4ForHostname(host) ?: return null
+            val ipInt = TunnelEndpoints.parseIpv4Literal(v4) ?: return null
+            return if (TorNetPolicy.mustRefuseSocksConnectIpv4(ipInt)) null else v4
+        }
+        cachedPin()?.let { return it }
         repeat(DNS_REWRITE_RETRY) {
             LockSupport.parkNanos(DNS_REWRITE_PARK_NS)
-            DnsHostnameCache.ipv4ForHostname(host)?.let { return it }
+            cachedPin()?.let { return it }
         }
         return pinClearnetViaDnsCrypt(host)
     }
@@ -540,13 +554,16 @@ class SocksUidBridge(
                 hostname = hostname,
                 dnsCryptHost = TunnelEndpoints.LOOPBACK,
                 dnsCryptPort = dnsPort,
+                allowLanRoutable = true,
             )
             val v4 = ip.hostAddress ?: return null
             if (TunnelEndpoints.parseIpv4Literal(v4) == null) return null
+            // Refuse CGNAT/loopback/VpnTun/docs. Allow RFC1918 A so hostname→LAN
+            // can hit firewallSocksRoute / Via LAN (PAC plane keeps full blackhole).
             TunnelEndpoints.parseIpv4Literal(v4)?.let { ipInt ->
-                if (TorNetPolicy.mustBlackholeIpv4Destination(ipInt)) {
+                if (TorNetPolicy.mustRefuseSocksConnectIpv4(ipInt)) {
                     VpnForwarderDebug.socksLog {
-                        "SocksUidBridge DNSCrypt A blackholed (rebinding/LAN)"
+                        "SocksUidBridge DNSCrypt A blackholed (rebinding/private)"
                     }
                     return null
                 }
@@ -602,9 +619,9 @@ class SocksUidBridge(
             runCatching { reply(output, 0x01) }
             return null
         }
-        // Never SOCKS-CONNECT Automap/literal into clearnet — rewrite or refuse.
+        // CGNAT / loopback / VpnTun / docs — refuse. RFC1918 passes for Via LAN dial.
         val ipv4 = TunnelEndpoints.parseIpv4Literal(host)
-        if (ipv4 != null && TorNetPolicy.mustBlackholeIpv4Destination(ipv4)) {
+        if (ipv4 != null && TorNetPolicy.mustRefuseSocksConnectIpv4(ipv4)) {
             runCatching { reply(output, 0x02) }
             return null
         }
@@ -627,7 +644,7 @@ class SocksUidBridge(
      */
     private fun startPipe(
         client: Socket,
-        upstream: Socket,
+        upstream: SocksUpstream,
         slotsAcquired: Boolean = false,
     ): Boolean {
         upstream.tcpNoDelay = true
@@ -652,7 +669,7 @@ class SocksUidBridge(
                 try {
                     copyStream(
                         client.getInputStream(),
-                        upstream.getOutputStream(),
+                        upstream.outputStream,
                         label = "c→t",
                         startedAtNs = pipeStartedAt,
                     )
@@ -667,7 +684,7 @@ class SocksUidBridge(
             pipeExecutor.execute {
                 try {
                     copyStream(
-                        upstream.getInputStream(),
+                        upstream.inputStream,
                         client.getOutputStream(),
                         label = "t→c",
                         startedAtNs = pipeStartedAt,
@@ -764,11 +781,12 @@ class SocksUidBridge(
         private const val MAX_PIPE_THREADS = 256
         /** Two slots per CONNECT (each direction). */
         private const val MAX_PIPE_HALF_SLOTS = 512
+        /** Concurrent clearnet-LAN dials (protect+bind+connect ≤15s each). */
+        private const val MAX_LAN_DIALS = 16
         /** Match C Tor SocksTimeout (120s) — Arti cold circuits regularly exceed 25s. */
         private const val BRIDGE_HANDSHAKE_MS = 120_000
         /** Local LAN node (e.g. Cake Wallet → 192.168.x.x) should answer quickly. */
         private const val LAN_CONNECT_TIMEOUT_MS = 15_000
-        private const val LAN_DIAL_RETRY_PARK_NS = 50_000_000L // 50ms between protect/connect tries
         private val ipv4Scratch = ThreadLocal.withInitial { ByteArray(4) }
         private val replyAddrScratch = ThreadLocal.withInitial { ByteArray(4) }
     }

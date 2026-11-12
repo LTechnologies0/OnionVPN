@@ -35,7 +35,8 @@ class SocksDnsBootstrapRelayTest {
             hostnameResolver = { host ->
                 hits.incrementAndGet()
                 assertEquals("example.com", host)
-                "203.0.113.10"
+                // Globally routable — docs/TEST-NET are blackholed by bootstrap filter.
+                "93.184.216.34"
             },
         )
         relay.start()
@@ -58,7 +59,7 @@ class SocksDnsBootstrapRelayTest {
                 // QR bit set
                 assertTrue((resp[2].toInt() and 0x80) != 0)
                 val parsed = DnsPacketParser.parse(resp, 0, resp.size)
-                assertEquals(listOf("203.0.113.10"), parsed!!.aRecords)
+                assertEquals(listOf("93.184.216.34"), parsed!!.aRecords)
             }
             assertTrue(hits.get() >= 1)
         } finally {

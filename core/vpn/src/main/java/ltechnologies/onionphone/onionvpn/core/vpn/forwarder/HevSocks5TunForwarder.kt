@@ -42,6 +42,7 @@ class HevSocks5TunForwarder(
     private var tunDup: ParcelFileDescriptor? = null
     private var dnsMux: TunDnsMux? = null
     private var uidBridge: SocksUidBridge? = null
+    private var hevConfigHandle: HevConfigMaterializer.Handle? = null
 
     override fun start(
         tunFd: ParcelFileDescriptor,
@@ -98,29 +99,56 @@ class HevSocks5TunForwarder(
 
             val bridgeHost = TunnelEndpoints.LOOPBACK
             val bridgePort = TunnelEndpoints.SOCKS_UID_BRIDGE_PORT
-            val job = scope.launch {
-                val configFile = File(context.filesDir, "hev-socks5-tunnel.yaml")
-                configFile.writeText(
-                    buildConfig(bridgeHost, bridgePort, hevPass, useMapDns = useMapDns),
+            val yaml = buildConfig(bridgeHost, bridgePort, hevPass, useMapDns = useMapDns)
+            Timber.i(
+                "Starting hev-socks5-tunnel (mux/dgram) on fd=${hevEnd.fd} " +
+                    "bridge=$bridgeHost:$bridgePort torSocks=$torSocksPort " +
+                    "dnscrypt=$dnsCryptPort torDns=$torDnsPort mapdns=$useMapDns divertDns=$divertDns",
+            )
+            // Prefer main_from_str (no /proc fd with password). Fall back to memfd path Start.
+            val fromStrOk = hev.sockstun.TProxyService.isFromStrAvailable()
+            if (!fromStrOk) {
+                val configHandle = HevConfigMaterializer.materialize(
+                    yaml = yaml,
+                    cacheDir = File(context.cacheDir, "hev"),
+                    nameHint = "hev-socks5",
                 )
-                Timber.i(
-                    "Starting hev-socks5-tunnel (mux/dgram) on fd=${hevEnd.fd} " +
-                        "bridge=$bridgeHost:$bridgePort torSocks=$torSocksPort " +
-                        "dnscrypt=$dnsCryptPort torDns=$torDnsPort mapdns=$useMapDns divertDns=$divertDns",
-                )
-                try {
-                    hev.sockstun.TProxyService.TProxyStartService(configFile.absolutePath, hevEnd.fd)
-                } catch (error: Exception) {
-                    Timber.e(error, "hev-socks5-tunnel (mux) exited")
-                    onFatal?.invoke(
-                        TunnelFailure.ForwarderDead(
-                            "hev-socks5-tunnel exited: ${error.message}",
-                            error,
-                        ),
-                    )
-                }
+                hevConfigHandle = configHandle
             }
-            worker.set(job)
+            // Start exclusive BEFORE mux — refuse must not arm TunDnsMux (W4-05).
+            if (!HevTProxyGate.startExclusive(this@HevSocks5TunForwarder) {
+                    if (fromStrOk) {
+                        val rc = hev.sockstun.TProxyService.startFromStr(yaml, hevEnd.fd)
+                        if (rc != 0) {
+                            Timber.w("hev FromStr rc=%d — falling back to path Start", rc)
+                            val configHandle = HevConfigMaterializer.materialize(
+                                yaml = yaml,
+                                cacheDir = File(context.cacheDir, "hev"),
+                                nameHint = "hev-socks5",
+                            )
+                            hevConfigHandle = configHandle
+                            hev.sockstun.TProxyService.TProxyStartService(
+                                configHandle.path,
+                                hevEnd.fd,
+                            )
+                        }
+                    } else {
+                        hev.sockstun.TProxyService.TProxyStartService(
+                            hevConfigHandle!!.path,
+                            hevEnd.fd,
+                        )
+                    }
+                }
+            ) {
+                throw TunnelFailure.ForwarderDead(
+                    "hev-socks5-tunnel Start refused — TProxy already owned",
+                )
+            }
+            try {
+                Thread.sleep(75)
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+            }
 
             val mux = TunDnsMux(
                 context = context,
@@ -147,6 +175,9 @@ class HevSocks5TunForwarder(
         }
     }
 
+    // Note: hev worker is process-global; death is observed via stalled traffic / rebind,
+    // not a Kotlin Job join (JNI Start returns immediately after pthread_create).
+
     /**
      * Pause (port=0) or restore upstream Tor SocksPort without tearing down hev.
      * Used during Tor DisableNetwork / Arti restart so CONNECT never hits a dead Tor.
@@ -159,11 +190,13 @@ class HevSocks5TunForwarder(
         OpTrace.debug("hev", "stop")
         dnsMux?.stop()
         dnsMux = null
-        try {
-            hev.sockstun.TProxyService.TProxyStopService()
-        } catch (error: Exception) {
-            OpTrace.warn("hev", "Failed to stop hev-socks5-tunnel", error)
-            Timber.w(error, "Failed to stop hev-socks5-tunnel")
+        HevTProxyGate.stopIfOwner(this) {
+            try {
+                hev.sockstun.TProxyService.TProxyStopService()
+            } catch (error: Exception) {
+                OpTrace.warn("hev", "Failed to stop hev-socks5-tunnel", error)
+                Timber.w(error, "Failed to stop hev-socks5-tunnel")
+            }
         }
         worker.getAndSet(null)?.cancel()
         supervisor.cancelChildren()
@@ -171,6 +204,10 @@ class HevSocks5TunForwarder(
         uidBridge = null
         tunDup?.close()
         tunDup = null
+        hevConfigHandle?.close()
+        hevConfigHandle = null
+        // Legacy durable path scrub (pre-memfd installs).
+        runCatching { File(context.filesDir, "hev-socks5-tunnel.yaml").delete() }
     }
 
     private fun buildConfig(

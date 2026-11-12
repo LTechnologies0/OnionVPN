@@ -75,8 +75,10 @@ class ConnectionOwnerResolver(context: Context) {
                 @Suppress("NewApi")
                 connectivity.getConnectionOwnerUid(OsConstants.IPPROTO_TCP, peer, local)
             } catch (error: SecurityException) {
-                Timber.w(error, "getConnectionOwnerUid denied for PAC client")
-                return Process.INVALID_UID
+                // OEM "VPN not active owner" during Blocking↔Connected — still try /proc
+                // below (same as TUN resolveUid). Do not abort the whole function here.
+                Timber.w(error, "getConnectionOwnerUid denied for PAC client — will try /proc")
+                Process.INVALID_UID
             } catch (error: Exception) {
                 Timber.w(error, "getConnectionOwnerUid failed for PAC client")
                 Process.INVALID_UID
@@ -194,7 +196,7 @@ class ConnectionOwnerResolver(context: Context) {
         if (!file.canRead()) return Process.INVALID_UID
         val remoteHex = ipv4PortHex(info.dstIpInt, info.dstPort)
         val localHex = ipv4PortHex(info.srcIpInt, info.srcPort)
-        return try {
+        val fromTcp = try {
             file.bufferedReader().useLines { lines ->
                 lines.drop(1).forEach { line ->
                     val parts = line.trim().split(Regex("\\s+"))
@@ -213,6 +215,53 @@ class ConnectionOwnerResolver(context: Context) {
             Timber.w(error, "proc net uid lookup failed")
             Process.INVALID_UID
         }
+        if (isValidUid(fromTcp)) return fromTcp
+        // Waydroid/OEM dual-stack: IPv4 flows often only appear as ::ffff: mapped in tcp6.
+        return resolveProcNetMappedV4(info)
+    }
+
+    /** IPv4-mapped IPv6 entries in `/proc/net/tcp6` (W4-06 / W4-10 #12a). */
+    private fun resolveProcNetMappedV4(info: IpPacketInfo): Int {
+        if (info.protocol != IpPacketParser.PROTO_TCP && info.protocol != IpPacketParser.PROTO_UDP) {
+            return Process.INVALID_UID
+        }
+        val file = when (info.protocol) {
+            IpPacketParser.PROTO_TCP -> File("/proc/net/tcp6")
+            else -> File("/proc/net/udp6")
+        }
+        if (!file.canRead()) return Process.INVALID_UID
+        val remoteHex = ipv4MappedV6PortHex(info.dstIpInt, info.dstPort)
+        val localHex = ipv4MappedV6PortHex(info.srcIpInt, info.srcPort)
+        return try {
+            file.bufferedReader().useLines { lines ->
+                lines.drop(1).forEach { line ->
+                    val parts = line.trim().split(Regex("\\s+"))
+                    if (parts.size < 8) return@forEach
+                    val local = parts[1]
+                    val remote = parts[2]
+                    if (remote.equals(remoteHex, ignoreCase = true) &&
+                        (local.equals(localHex, ignoreCase = true) || info.isUdp)
+                    ) {
+                        return@useLines parts[7].toIntOrNull() ?: Process.INVALID_UID
+                    }
+                }
+                Process.INVALID_UID
+            }
+        } catch (error: Exception) {
+            Timber.w(error, "proc net6 mapped-v4 uid lookup failed")
+            Process.INVALID_UID
+        }
+    }
+
+    private fun ipv4MappedV6PortHex(ip: Int, port: Int): String {
+        val bytes = ByteArray(16)
+        bytes[10] = 0xff.toByte()
+        bytes[11] = 0xff.toByte()
+        bytes[12] = ((ip ushr 24) and 0xff).toByte()
+        bytes[13] = ((ip ushr 16) and 0xff).toByte()
+        bytes[14] = ((ip ushr 8) and 0xff).toByte()
+        bytes[15] = (ip and 0xff).toByte()
+        return procNetIpv6PortHex(bytes, port)
     }
 
     /** IPv6 proc fallback when API 29+ owner lookup misses (Waydroid). */

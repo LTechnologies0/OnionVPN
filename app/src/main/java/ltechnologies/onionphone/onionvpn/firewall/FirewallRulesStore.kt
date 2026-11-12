@@ -47,14 +47,27 @@ class FirewallRulesStore @Inject constructor(
 
     suspend fun load() {
         val prefs = context.firewallDataStore.data.first()
-        _rules.value = FirewallRulesCodec.decodeRules(prefs[Keys.rulesJson].orEmpty())
-            .rules
-            .filterNot { it.isExpired() }
+        val decoded = FirewallRulesCodec.decodeRules(prefs[Keys.rulesJson].orEmpty()).rules
+        // Drop expired + poison ALLOW_LAN (empty / non-RFC1918 dest). SESSION must not
+        // resurrect across process death (UI: "until VPN stops") — purge from disk too.
+        val kept = decoded.filterNot {
+            it.isExpired() ||
+                it.isPoisonLanAllow() ||
+                it.isPoisonEmptyDest() ||
+                it.scope == FirewallRuleScope.SESSION
+        }
+        if (kept.size != decoded.size) {
+            context.firewallDataStore.edit { p ->
+                p[Keys.rulesJson] = FirewallRulesCodec.encodeRules(kept)
+            }
+        }
+        _rules.value = kept
         _journal.value = decodeJournal(prefs[Keys.journalJson].orEmpty())
         Timber.i(
-            "FirewallRulesStore load rules=%d journal=%d",
+            "FirewallRulesStore load rules=%d journal=%d scrubbed=%d",
             _rules.value.size,
             _journal.value.size,
+            decoded.size - kept.size,
         )
     }
 
@@ -65,15 +78,28 @@ class FirewallRulesStore @Inject constructor(
                 Timber.e("Firewall rule upsert aborted — stored list failed to decode")
                 return@edit
             }
-            val current = decoded.rules.filterNot {
-                it.uid == rule.uid &&
-                    it.destHost == rule.destHost &&
-                    it.destPort == rule.destPort &&
-                    it.protocol == rule.protocol
+            // Host-wide LAN (destPort=-1): replace EVERY prior rule for uid+host so
+            // stale per-port rows cannot outscore the new -1 rule after DataStore reload.
+            if (rule.isPoisonLanAllow() || rule.isPoisonEmptyDest()) {
+                Timber.e("Firewall rule upsert refused poison rule dest_len=%d", rule.destHost.length)
+                return@edit
+            }
+            val hostWide = rule.destPort < 0
+            val current = decoded.rules.filterNot { existing ->
+                existing.isPoisonLanAllow() ||
+                    existing.isPoisonEmptyDest() ||
+                    (
+                        existing.uid == rule.uid &&
+                            existing.destHost.equals(rule.destHost, ignoreCase = true) &&
+                            (hostWide || existing.destPort == rule.destPort) &&
+                            (hostWide || existing.protocol == rule.protocol)
+                        )
             }
             val next = current + rule
             prefs[Keys.rulesJson] = FirewallRulesCodec.encodeRules(next)
-            _rules.value = next.filterNot { it.isExpired() }
+            _rules.value = next.filterNot {
+                it.isExpired() || it.isPoisonLanAllow() || it.isPoisonEmptyDest()
+            }
         }
         Timber.d(
             "Firewall rule upsert uid=%d dest_len=%d port=%d verdict=%s scope=%s",

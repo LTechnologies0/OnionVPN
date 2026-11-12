@@ -53,8 +53,9 @@ on Arti+onionmasq will get SOCKS auth failure (`0x01`) / `.onion` CONNECT failur
 
 SOCKS sidecar auth allowlist (must match `TunnelEndpoints`):
 `probe`/`check`, `dnscrypt`|`dnscrypt-nN`/`resolver`, `pac`/`dnscrypt`,
-`pac{uid}`|`pac{uid}-nN`/`p{uid}`|`p{uid}-nN`, `u{uid}`|`u{uid}-nN`/`p{uid}`|`p{uid}-nN`,
-`onionvpn`/`stream`, `uopenvpn`/`popenvpn` (OpenVPN-over-Tor; also `openvpn`/`overtor` after patch rebuild).
+`pac{uid}-…-sS`/`p{uid}-…-sS` (session `-s` required), `u{uid}-…-sS`/`p{uid}-…-sS`
+(session `-s` required), `uopenvpn`/`popenvpn` (OpenVPN-over-Tor; also
+`openvpn`/`overtor`). Static `onionvpn`/`stream` is rejected.
 
 `safe-uninit-jni.patch` converts **all** probe/stop/config/command JNI entry points
 to `try_get()` (no-op / 0 / Java exception) when `init()` has not run. Upstream

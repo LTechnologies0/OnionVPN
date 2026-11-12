@@ -6,10 +6,12 @@ Report vulnerabilities privately via GitHub **Security → Advisories → New dr
 
 ## Scope
 
-- Traffic leak outside Tor while Connected
+- Unintended traffic outside Tor while Connected (clearnet / cellular / CGNAT)
 - Kill-switch bypass in Blocking state
 - DNS bypass of DNSCrypt / TunDnsMux path
 - Credential or keystore exposure in CI or repo
+
+**Not in scope as “leaks” (product features):** firewall **Via LAN** (RFC1918 on a bound Wi‑Fi/Ethernet `Network` only) and **Via OVPN** (encapsulated over Tor). Mis-routing those planes (e.g. LAN over cellular, OVPN to RFC1918) *is* in scope.
 
 ## CVE tracking
 

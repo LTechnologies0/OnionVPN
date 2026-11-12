@@ -142,6 +142,8 @@ class TunnelForegroundService : Service() {
     private var torNativePackageRebindJob: Job? = null
     /** Backoff retries when Always-On / Private Space unlock leaves us in Blocking. */
     @Volatile private var alwaysOnRecoveryAttempt: Int = 0
+    /** When true, next [runStartSequence] keeps SESSION firewall rules (Always-On rebound). */
+    @Volatile private var preserveFirewallSessionOnStart: Boolean = false
     private var blockingRecoveryJob: Job? = null
 
     private fun isOnionmasqPlane(): Boolean =
@@ -690,6 +692,16 @@ class TunnelForegroundService : Service() {
                             if (org.torproject.onionmasq.OnionMasq.isInitialized() &&
                                 org.torproject.onionmasq.OnionMasq.isRunning()
                             ) {
+                                // Pause bridges + DNSCrypt + bump IsolationToken BEFORE refresh
+                                // so KeepAlive / dnscrypt-n* cannot stick pre-NEWNYM (W4-10 #9 / W5-07 R3).
+                                OnionVpnService.setTorSocksUpstream(0)
+                                pacServer.updateUpstream(0, runtimePorts?.dnsCryptListenPort ?: 0)
+                                runCatching { dnsCrypt.stop() }
+                                    .onFailure { Timber.w(it, "DNSCrypt pause for onionmasq NEWNYM") }
+                                TunnelEndpoints.mintSocksSessionSecret()
+                                TunnelEndpoints.mintPacBridgeSecret()
+                                val epoch = TunnelEndpoints.bumpAppSocksNymEpoch()
+                                onionmasqDnsNymEpoch = epoch
                                 val refreshed = runCatching {
                                     org.torproject.onionmasq.OnionMasq.refreshCircuits()
                                 }
@@ -698,18 +710,11 @@ class TunnelForegroundService : Service() {
                                     Timber.i("New identity via onionmasq refreshCircuits()")
                                     DnsHostnameCache.clear()
                                     OnionAutomapAllocator.clear()
-                                    // Sidecar IsolationTokens are sticky per username —
-                                    // rotate app + DNSCrypt tokens (KeepAliveIsolateSOCKSAuth).
-                                    val epoch = TunnelEndpoints.bumpAppSocksNymEpoch()
-                                    onionmasqDnsNymEpoch = epoch
                                     val ports = runtimePorts
                                     val sidecar = ltechnologies.onionphone.onionvpn.core.vpn.onionmasq
                                         .OnionmasqSocksSidecar.socksPortOrZero()
                                     val dnsUser = TunnelEndpoints.dnsCryptSocksUser(epoch)
                                     if (ports != null && sidecar > 0) {
-                                        // Circuits already rotated — never let bind/DNSCrypt
-                                        // failure flip NEWNYM to Result.failure / leave epoch
-                                        // bumped with no IsolationToken rewrite attempt logged.
                                         runCatching {
                                             ensureSocksDnsBootstrapRelay(
                                                 listenPort = ports.torDnsPort,
@@ -728,11 +733,18 @@ class TunnelForegroundService : Service() {
                                         }.onFailure {
                                             Timber.w(it, "DNSCrypt NEWNYM token rotate failed")
                                         }
+                                        OnionVpnService.setTorSocksUpstream(sidecar)
+                                        pacServer.updateUpstream(sidecar, ports.dnsCryptListenPort)
                                     } else {
                                         dnsCrypt.clearQueryCache()
                                     }
                                     Result.success(Unit)
                                 } else {
+                                    // Restore sidecar even on failure so plane is not left paused.
+                                    ltechnologies.onionphone.onionvpn.core.vpn.onionmasq
+                                        .OnionmasqSocksSidecar.socksPortOrZero()
+                                        .takeIf { it > 0 }
+                                        ?.let { OnionVpnService.setTorSocksUpstream(it) }
                                     // Count failed attempts toward rate limit to avoid hammering.
                                     lastOnionmasqNewNymMs = System.currentTimeMillis()
                                     val err = refreshed.exceptionOrNull()
@@ -745,48 +757,60 @@ class TunnelForegroundService : Service() {
                                 Result.failure(IllegalStateException("onionmasq not running"))
                             }
                         } else {
-                            val nym = tor.newNym()
-                            if (nym.isSuccess) {
-                                // C Tor KeepAliveIsolateSOCKSAuth sticks on u{uid} until
-                                // username rotates — bump epoch on every successful NEWNYM.
-                                // Rewrite DNSCrypt IsolationToken (`dnscrypt-nN`). Recreate
-                                // SocksDnsBootstrapRelay only where it owns :torDnsPort (Arti);
-                                // little-t DNSPort already binds that port.
-                                val epoch = TunnelEndpoints.bumpAppSocksNymEpoch()
-                                val ports = runtimePorts
-                                val dnsUser = TunnelEndpoints.dnsCryptSocksUser(epoch)
-                                if (ports != null) {
-                                    runCatching {
-                                        if (preferences.torEngine == TorEngine.ARTI) {
-                                            val dnsUdpReady =
-                                                ltechnologies.onionphone.onionvpn.core.tor.lifecycle
-                                                    .TorReadiness
-                                                    .isDnsPortReady(ports.torDnsPort, timeoutMs = 1_000)
-                                            ensureSocksDnsBootstrapRelay(
-                                                listenPort = ports.torDnsPort,
-                                                socksPort = ports.torDnsCryptSocksPort,
-                                                socksUser = dnsUser,
-                                                socksPass = TunnelEndpoints.socksDnsCryptPass(),
-                                                bindUdp = !dnsUdpReady,
-                                                useSocksResolve = true,
-                                                hostnameResolver = { host ->
-                                                    org.torproject.arti.ArtiControlNative
-                                                        .resolveHostname(host)
-                                                },
-                                            )
-                                        }
-                                        dnsCrypt.applyPreferences(
-                                            preferences.dnsCryptServerName,
-                                            preferences,
-                                            socksUserOverride = dnsUser,
-                                        ).getOrThrow()
-                                    }.onFailure {
-                                        Timber.w(it, "DNSCrypt NEWNYM token rotate failed")
+                            // KeepAliveIsolateSOCKSAuth sticks until username rotates —
+                            // mint/bump + pause bridges BEFORE tor.newNym() so Arti
+                            // downtime unpause never resumes pre-epoch tokens (W5-07 R1/R2).
+                            val portsBefore = runtimePorts
+                            OnionVpnService.setTorSocksUpstream(0)
+                            pacServer.updateUpstream(0, portsBefore?.dnsCryptListenPort ?: 0)
+                            TunnelEndpoints.mintSocksSessionSecret()
+                            TunnelEndpoints.mintPacBridgeSecret()
+                            val epoch = TunnelEndpoints.bumpAppSocksNymEpoch()
+                            val dnsUser = TunnelEndpoints.dnsCryptSocksUser(epoch)
+                            if (portsBefore != null) {
+                                runCatching {
+                                    if (preferences.torEngine == TorEngine.ARTI) {
+                                        val dnsUdpReady =
+                                            ltechnologies.onionphone.onionvpn.core.tor.lifecycle
+                                                .TorReadiness
+                                                .isDnsPortReady(portsBefore.torDnsPort, timeoutMs = 1_000)
+                                        ensureSocksDnsBootstrapRelay(
+                                            listenPort = portsBefore.torDnsPort,
+                                            socksPort = portsBefore.torDnsCryptSocksPort,
+                                            socksUser = dnsUser,
+                                            socksPass = TunnelEndpoints.socksDnsCryptPass(),
+                                            bindUdp = !dnsUdpReady,
+                                            useSocksResolve = true,
+                                            hostnameResolver = { host ->
+                                                org.torproject.arti.ArtiControlNative
+                                                    .resolveHostname(host)
+                                            },
+                                        )
                                     }
+                                    dnsCrypt.applyPreferences(
+                                        preferences.dnsCryptServerName,
+                                        preferences,
+                                        socksUserOverride = dnsUser,
+                                    ).getOrThrow()
+                                }.onFailure {
+                                    Timber.w(it, "DNSCrypt pre-NEWNYM token rotate failed")
                                 }
-                                if (preferences.torEngine.usesLittleTProcess) {
-                                    lastLittleTNewNymMs = System.currentTimeMillis()
-                                }
+                            }
+                            val nym = tor.newNym()
+                            val portsAfter = runtimePorts ?: portsBefore
+                            if (portsAfter != null) {
+                                OnionVpnService.setTorSocksUpstream(portsAfter.torSocksPort)
+                                pacServer.updateUpstream(
+                                    portsAfter.torSocksPort,
+                                    portsAfter.dnsCryptListenPort,
+                                )
+                            }
+                            if (nym.isSuccess && preferences.torEngine.usesLittleTProcess) {
+                                lastLittleTNewNymMs = System.currentTimeMillis()
+                            }
+                            if (nym.isFailure && portsAfter != null) {
+                                // Epoch already advanced — keep new tokens; just restore plane.
+                                Timber.w(nym.exceptionOrNull(), "NEWNYM failed after token rotate")
                             }
                             nym
                         }
@@ -953,6 +977,8 @@ class TunnelForegroundService : Service() {
                             return@withLock
                         }
                         alwaysOnRecoveryAttempt = 0
+                        // Keep SESSION answers across sticky Always-On restart (W4-10 #7).
+                        preserveFirewallSessionOnStart = true
                         tunnelJob = scope.launch {
                             teardownOnce.set(false)
                             preferences = preferencesStore.preferences.first()
@@ -1070,7 +1096,18 @@ class TunnelForegroundService : Service() {
             }.onFailure { Timber.w(it, "persist firewallEnabled=true failed") }
         }
         DiagnosticsGate.setNoLogsEnabled(preferences.noLogsEnabled)
-        firewallEngine.clearSessionRules()
+        // Always-On rebound must keep SESSION firewall answers (W4-10 #7) — otherwise
+        // headless ASK storms after sticky VPN restart. User/start still clears SESSION.
+        if (preserveFirewallSessionOnStart) {
+            preserveFirewallSessionOnStart = false
+            Timber.i("Preserving firewall SESSION rules across Always-On rebound")
+        } else {
+            firewallEngine.clearSessionRules()
+        }
+        // Per-tunnel IsolateSOCKSAuth entropy — closes loopback u{uid}/p{uid} forge (W4-10 #1).
+        TunnelEndpoints.mintSocksSessionSecret()
+        // PAC bridge RFC1929 nonce (Firefox PAC user:pass@; Chrome stays NO-AUTH+UID).
+        TunnelEndpoints.mintPacBridgeSecret()
         // Cancel Tor-bound downloads before we tear down / recycle SOCKS ports.
         domainReputation.onTorUnavailable()
 
@@ -1177,7 +1214,12 @@ class TunnelForegroundService : Service() {
                 return
             }
             domainReputation.onTorReady()
-            if (preferences.torEngine == TorEngine.ARTI) {
+            if (preferences.torEngine == TorEngine.LITTLE_T) {
+                // OpenVPN NO-AUTH → inject uopenvpn into Tor OPENVPN SessionGroup (UID gate).
+                OpTrace.step("tunnel", "little_t_openvpn_socks_guard") {
+                    artiSocksRoleMux.start(ports, applicationContext, littleTOpenVpn = true)
+                }
+            } else if (preferences.torEngine == TorEngine.ARTI) {
                 OpTrace.step("tunnel", "arti_socks_role_mux") {
                     artiSocksRoleMux.start(ports, applicationContext)
                 }
@@ -1748,6 +1790,9 @@ class TunnelForegroundService : Service() {
                 lifecycleMutex.withLock {
                     if (_snapshot.value.phase != TunnelPhase.Blocking) return@withLock
                     if (tunnelJob?.isActive == true) return@withLock
+                    if (fromAlwaysOn || OnionVpnService.vpnAlwaysOn.value) {
+                        preserveFirewallSessionOnStart = true
+                    }
                     tunnelJob = scope.launch {
                         teardownOnce.set(false)
                         preferences = preferencesStore.preferences.first()
@@ -1768,10 +1813,18 @@ class TunnelForegroundService : Service() {
 
     private fun hasValidatedNonVpnUplink(): Boolean {
         val cm = getSystemService(android.net.ConnectivityManager::class.java) ?: return false
-        val net = cm.activeNetwork ?: return false
-        val caps = cm.getNetworkCapabilities(net) ?: return false
-        return caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_VALIDATED) &&
-            !caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN)
+        // Under Blocking TUN, activeNetwork is often the VPN itself — scan allNetworks (W5-08).
+        for (net in cm.allNetworks) {
+            val caps = cm.getNetworkCapabilities(net) ?: continue
+            if (caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN)) continue
+            if (!caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_NOT_VPN)) {
+                continue
+            }
+            if (caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_VALIDATED)) {
+                return true
+            }
+        }
+        return false
     }
 
     private suspend fun runStopSequence(userInitiated: Boolean) {
@@ -1829,6 +1882,7 @@ class TunnelForegroundService : Service() {
         vpnBridge.destroy()
         vpnBridge.waitUntilDown()
         dnsCrypt.stop()
+        dnsCrypt.forgetRuntimePorts()
         stopSocksDnsBootstrapRelay()
         onionmasqDnsNymEpoch = 0
         TunnelEndpoints.resetAppSocksNymEpoch()
@@ -2010,8 +2064,13 @@ class TunnelForegroundService : Service() {
             while (isActive) {
                 delay(VALIDATION_INTERVAL_MS)
                 if (_snapshot.value.phase != TunnelPhase.Connected) continue
-                if (tor.isInMaintenance || OnionVpnService.vpnRebinding.value) {
-                    Timber.i("Periodic validation deferred — Tor maintenance / VPN rebind")
+                if (tor.isInMaintenance ||
+                    identityRefreshing ||
+                    OnionVpnService.vpnRebinding.value
+                ) {
+                    Timber.i(
+                        "Periodic validation deferred — Tor maintenance / NEWNYM / VPN rebind",
+                    )
                     continue
                 }
                 val ports = runtimePorts ?: continue

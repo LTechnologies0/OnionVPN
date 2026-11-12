@@ -217,6 +217,13 @@ class OpenVpnOverTorManager(
         val userPassFile = if (authUser.isNotEmpty() || authPassword.isNotEmpty()) {
             File(profileDir, "auth-user-pass.txt").also {
                 it.writeText("${authUser}\n${authPassword}\n")
+                // Credentials on disk only while OpenVPN runs — owner-only (W4-09).
+                runCatching {
+                    it.setReadable(false, false)
+                    it.setReadable(true, true)
+                    it.setWritable(false, false)
+                    it.setWritable(true, true)
+                }
             }
         } else {
             File(profileDir, "auth-user-pass.txt").delete()
@@ -261,6 +268,10 @@ class OpenVpnOverTorManager(
                     Timber.i("OpenVPN control not ready (%s) — Via OVPN down until CONNECTED", reason)
                     publishUpState("control not CONNECTED ($reason)")
                 }
+            },
+            onNatReady = {
+                if (!isCurrentSession(sid)) return@OpenVpnAndroidManagement
+                publishUpState("IFCONFIG SNAT ready")
             },
             onFatal = { msg ->
                 if (!isCurrentSession(sid) || !running.get()) return@OpenVpnAndroidManagement
@@ -349,6 +360,15 @@ class OpenVpnOverTorManager(
         runCatching { androidMgmt?.stop() }
         androidMgmt = null
         destroyProcess(processRef.getAndSet(null))
+        // Never leave credentials / pinned remotes on disk after stop (W4-09).
+        shredSecretFile(File(profileDir, "auth-user-pass.txt"))
+        shredSecretFile(File(profileDir, "socks-auth.txt"))
+        runCatching {
+            if (runtimeConfigFile.isFile) {
+                runtimeConfigFile.writeText("# stopped\n")
+                runtimeConfigFile.delete()
+            }
+        }
         if (_status.value.phase != OpenVpnPhase.Idle) {
             _status.value = OpenVpnStatus(OpenVpnPhase.Idle, "stopped")
         }
@@ -525,7 +545,9 @@ class OpenVpnOverTorManager(
         val control = controlConnected.get()
         val data = dataPlaneReady.get()
         val healthy = dataPlaneHealthy.get()
-        val up = control && data && healthy
+        // Gate Via OVPN on SNAT ready — zero-SNAT must not look UP (W4-03).
+        val snatReady = OvpnIpNat.isReady()
+        val up = control && data && healthy && snatReady
         setUpFlag(up)
         _status.value = when {
             up -> OpenVpnStatus(OpenVpnPhase.Up, detail)
@@ -718,6 +740,18 @@ class OpenVpnOverTorManager(
         setUpFlag(false)
         FirewallBridge.ovpnPacketSink = null
         return Result.failure(cause ?: IllegalStateException(msg))
+    }
+
+    /** Overwrite then delete — reduce credential residue after crash/stop. */
+    private fun shredSecretFile(file: File) {
+        runCatching {
+            if (!file.isFile) return
+            val len = file.length().coerceAtMost(64 * 1024L).toInt().coerceAtLeast(0)
+            if (len > 0) {
+                file.writeBytes(ByteArray(len))
+            }
+            file.delete()
+        }
     }
 
     /**

@@ -7,6 +7,7 @@ import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.Semaphore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -16,6 +17,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeout
 import ltechnologies.onionphone.onionvpn.core.dnscrypt.config.DnsCryptConfigWriter
 import ltechnologies.onionphone.onionvpn.core.dnscrypt.config.DnsCryptResolverPlan
 import ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints
@@ -43,6 +45,10 @@ internal class KotlinDnsCryptRuntime {
     private var blockedSuffixes: List<String> = emptyList()
     private val queryCache = KotlinDnsCryptQueryCache()
     private var lastParams: SessionParams? = null
+    /** Cap concurrent TCP/53 handlers — unbounded launch was a DoS vector (W5-05). */
+    private val tcpSlots = Semaphore(16)
+    /** Cap concurrent UDP resolve workers — receive loop must never block on Tor exchange. */
+    private val udpSlots = Semaphore(32)
 
     var onLogLine: ((String) -> Unit)? = null
 
@@ -80,16 +86,21 @@ internal class KotlinDnsCryptRuntime {
                 while (isActive && running.get()) {
                     val packet = DatagramPacket(buf, buf.size)
                     runCatching { socket.receive(packet) }.onFailure { continue }
+                    if (!udpSlots.tryAcquire()) continue
                     val query = packet.data.copyOf(packet.length)
-                    val reply = runCatching { resolveRaw(query) }.getOrNull() ?: continue
-                    socket.send(
-                        DatagramPacket(
-                            reply,
-                            reply.size,
-                            packet.address,
-                            packet.port,
-                        ),
-                    )
+                    val peerAddr = packet.address
+                    val peerPort = packet.port
+                    launch {
+                        try {
+                            val reply = runCatching { resolveRaw(query) }.getOrNull() ?: return@launch
+                            if (!running.get()) return@launch
+                            runCatching {
+                                socket.send(DatagramPacket(reply, reply.size, peerAddr, peerPort))
+                            }
+                        } finally {
+                            udpSlots.release()
+                        }
+                    }
                 }
             }
         }
@@ -98,7 +109,17 @@ internal class KotlinDnsCryptRuntime {
                 onLogLine?.invoke("[INFO] kotlin-DNSCrypt TCP listening on $listenPort")
                 while (isActive && running.get()) {
                     val client = runCatching { server.accept() }.getOrNull() ?: continue
-                    launch { handleTcpClient(client) }
+                    if (!tcpSlots.tryAcquire()) {
+                        runCatching { client.close() }
+                        continue
+                    }
+                    launch {
+                        try {
+                            handleTcpClient(client)
+                        } finally {
+                            tcpSlots.release()
+                        }
+                    }
                 }
             }
         }
@@ -112,6 +133,7 @@ internal class KotlinDnsCryptRuntime {
     ) {
         queryCache.clear()
         sessionMutex.withLock {
+            session?.discardPqTicket()
             session?.close()
             session = null
             openSessionLocked(torSocksPort, socksUser, serverName, preferences)
@@ -225,11 +247,13 @@ internal class KotlinDnsCryptRuntime {
         ipv4Only = true,
     )
 
+    @Suppress("UNUSED_PARAMETER")
     private fun sessionOptions(preferences: TunnelPreferences): SessionOptions =
         SessionOptions(
             forceTcp = true,
             ephemeralKeys = true,
-            allowPqResumeWhenAnonymized = preferences.dnsCryptAnonymized,
+            // Never PQ-resume across Tor circuits — links pre/post NEWNYM identity.
+            allowPqResumeWhenAnonymized = false,
         )
 
     /** One relay per session — same role as native `via=['*']` (any compatible relay). */
@@ -247,10 +271,17 @@ internal class KotlinDnsCryptRuntime {
         if (isBlocked(query)) {
             return buildRefusedResponse(query)
         }
+        // Parity with native dnscrypt-proxy block_ipv6=true — AAAA → NODATA (W4-02/W4-10 #11).
+        if (isAaaaQuery(query)) {
+            return buildNodataResponse(query)
+        }
         queryCache.get(query)?.let { return it }
         val active = sessionMutex.withLock { session }
             ?: error("kotlin-DNSCrypt session not open")
-        val reply = active.exchange(query)
+        // Match native dnscrypt-proxy timeout=20000; must stay < TunDnsMux DNS_TIMEOUT (25s).
+        val reply = withTimeout(QUERY_TIMEOUT_MS) {
+            active.exchange(query)
+        }
         queryCache.put(query, reply)
         return reply
     }
@@ -295,6 +326,13 @@ internal class KotlinDnsCryptRuntime {
         }
     }
 
+    private fun isAaaaQuery(query: ByteArray): Boolean {
+        val typeOff = qnameEndIndex(query) ?: return false
+        if (typeOff + 4 > query.size) return false
+        val type = ((query[typeOff].toInt() and 0xff) shl 8) or (query[typeOff + 1].toInt() and 0xff)
+        return type == 28 // AAAA
+    }
+
     private fun extractQname(query: ByteArray): String? {
         if (query.size < 13) return null
         var idx = 12
@@ -311,11 +349,44 @@ internal class KotlinDnsCryptRuntime {
         return labels.joinToString(".")
     }
 
+    /** Index of QTYPE (first byte after terminating 0 of QNAME). */
+    private fun qnameEndIndex(query: ByteArray): Int? {
+        if (query.size < 13) return null
+        var idx = 12
+        while (idx < query.size) {
+            val len = query[idx].toInt() and 0xff
+            if (len == 0) return idx + 1
+            if (len > 63) return null
+            idx += 1 + len
+        }
+        return null
+    }
+
     private fun buildRefusedResponse(query: ByteArray): ByteArray {
         if (query.size < 12) return query
         val out = query.copyOf()
-        out[2] = (out[2].toInt() or 0x02).toByte()
-        out[3] = (out[3].toInt() or 0x05).toByte()
+        out[2] = (out[2].toInt() or 0x80).toByte() // QR
+        out[3] = (out[3].toInt() and 0xf0 or 0x05).toByte() // RCODE=REFUSED
         return out
+    }
+
+    private fun buildNodataResponse(query: ByteArray): ByteArray {
+        if (query.size < 12) return query
+        val out = query.copyOf(query.size.coerceAtLeast(12))
+        out[2] = (out[2].toInt() or 0x80).toByte() // QR
+        out[3] = (out[3].toInt() and 0xf0).toByte() // RCODE=NOERROR
+        // ANCOUNT/NSCOUNT/ARCOUNT = 0
+        out[6] = 0
+        out[7] = 0
+        out[8] = 0
+        out[9] = 0
+        out[10] = 0
+        out[11] = 0
+        return out
+    }
+
+    companion object {
+        /** Parity with DnsCryptConfigWriter `timeout = 20000`. */
+        private const val QUERY_TIMEOUT_MS = 20_000L
     }
 }

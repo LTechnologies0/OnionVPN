@@ -56,6 +56,13 @@ object OpenVpnConfigWriter {
             socksAuthFile.writeText(
                 "${TunnelEndpoints.SOCKS_OPENVPN_USER}\n${TunnelEndpoints.SOCKS_OPENVPN_PASS}\n",
             )
+            // Owner-only while process runs (parity auth-user-pass; W5 OVPN H5).
+            runCatching {
+                socksAuthFile.setReadable(false, false)
+                socksAuthFile.setReadable(true, true)
+                socksAuthFile.setWritable(false, false)
+                socksAuthFile.setWritable(true, true)
+            }
         }
         val socksLine = "socks-proxy ${TunnelEndpoints.LOOPBACK} $socksPort"
 
@@ -109,6 +116,8 @@ object OpenVpnConfigWriter {
         )
         if (authUserPassFile != null) {
             lines += "auth-user-pass ${authUserPassFile.absolutePath}"
+            // Do not keep credentials in process memory after auth (disk file shredded on stop).
+            lines += "auth-nocache"
         }
         // Many free .ovpn exports ship <ca> without remote-cert-tls → OpenVPN warns
         // and skips server-cert verification. Enable when a CA is present and no

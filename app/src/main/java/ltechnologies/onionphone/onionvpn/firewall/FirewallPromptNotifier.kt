@@ -131,11 +131,25 @@ internal class FirewallPromptNotifier(
         } else {
             builder.setSmallIcon(R.drawable.ic_vpn_notification)
         }
+        val nmCompat = NotificationManagerCompat.from(appContext)
+        if (!nmCompat.areNotificationsEnabled()) {
+            Timber.w("Firewall prompt notifications disabled — launching Activity")
+            launchPromptActivity(info.requestId)
+            return
+        }
         try {
-            NotificationManagerCompat.from(appContext).notify(NOTIFICATION_ID, builder.build())
+            nmCompat.notify(NOTIFICATION_ID, builder.build())
         } catch (error: SecurityException) {
             Timber.w(error, "Firewall prompt notification blocked (POST_NOTIFICATIONS?)")
+            launchPromptActivity(info.requestId)
         }
+    }
+
+    /** Always-On / denied-notif fallback so ASK is not silent forever (W4-10 #7). */
+    private fun launchPromptActivity(requestId: String) {
+        runCatching {
+            appContext.startActivity(detailIntent(requestId))
+        }.onFailure { Timber.w(it, "FirewallPromptActivity launch failed") }
     }
 
     fun cancel() {

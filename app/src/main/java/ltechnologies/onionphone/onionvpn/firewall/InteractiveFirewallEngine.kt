@@ -9,7 +9,6 @@ import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
-import java.util.concurrent.locks.LockSupport
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.CoroutineScope
@@ -41,6 +40,7 @@ import ltechnologies.onionphone.onionvpn.core.vpn.firewall.IpPacketInfo
 import ltechnologies.onionphone.onionvpn.core.vpn.firewall.IpPacketParser
 import ltechnologies.onionphone.onionvpn.core.vpn.firewall.PacketFirewall
 import ltechnologies.onionphone.onionvpn.core.vpn.firewall.SocksConnectPlane
+import ltechnologies.onionphone.onionvpn.core.vpn.forwarder.TcpFlowUidIndex
 import ltechnologies.onionphone.onionvpn.prefs.TunnelPreferencesStore
 import ltechnologies.onionphone.onionvpn.firewall.engine.FirewallCacheKeys
 import ltechnologies.onionphone.onionvpn.firewall.engine.FirewallRuleMatcher
@@ -53,7 +53,7 @@ import timber.log.Timber
  *
  * Prompt model:
  * - FIFO queue, one visible prompt at a time
- * - No timeouts — wait until the user answers (or session clears)
+ * - ASK TTL ([ASK_TTL_MS]) → fail-closed DENY if unanswered (Always-On headless)
  * - Packets for a queued/active key are dropped until a verdict exists
  *
  * Decision pipeline: flow cache → rules → decision cache → ASK/DENY/ALLOW.
@@ -79,6 +79,12 @@ class InteractiveFirewallEngine @Inject constructor(
     private val rules = AtomicReference<List<FirewallRule>>(emptyList())
 
     private val caches = FirewallVerdictCaches()
+
+    /** TEMPORARY expiry runnables — cancelled on stop/session clear (B07). */
+    private val tempExpiryRunnables = ConcurrentHashMap.newKeySet<Runnable>()
+
+    /** Active ASK TTL — fail-closed DENY if the user never answers (W4-10 #7). */
+    private val askTtlRunnables = ConcurrentHashMap<String, Runnable>()
 
     /** ruleKey → queued or active prompt (dedupe). */
     private val pendingByKey = ConcurrentHashMap<String, QueuedPrompt>()
@@ -113,6 +119,33 @@ class InteractiveFirewallEngine @Inject constructor(
         FirewallBridge.resolveSocksClientUid = null
         FirewallBridge.onAutomapRemap = null
         FirewallBridge.deferRfc1918LanToFirewall = false
+        cancelTempExpiryCallbacks()
+    }
+
+    private fun cancelTempExpiryCallbacks() {
+        for (r in tempExpiryRunnables) {
+            mainHandler.removeCallbacks(r)
+        }
+        tempExpiryRunnables.clear()
+        for ((_, r) in askTtlRunnables) {
+            mainHandler.removeCallbacks(r)
+        }
+        askTtlRunnables.clear()
+    }
+
+    private fun cancelAskTtl(requestId: String) {
+        askTtlRunnables.remove(requestId)?.let { mainHandler.removeCallbacks(it) }
+    }
+
+    private fun armAskTtl(requestId: String) {
+        cancelAskTtl(requestId)
+        val expiry = Runnable {
+            askTtlRunnables.remove(requestId)
+            Timber.w("Firewall ASK TTL expired id=%s — fail-closed DENY", requestId)
+            answerPrompt(requestId, FirewallVerdict.DENY, FirewallRuleScope.SESSION)
+        }
+        askTtlRunnables[requestId] = expiry
+        mainHandler.postDelayed(expiry, ASK_TTL_MS)
     }
 
     fun start() {
@@ -148,19 +181,27 @@ class InteractiveFirewallEngine @Inject constructor(
         }
         scope.launch {
             rulesStore.load()
-            _journal.value = rulesStore.persistedJournal.value
             // Seed prefs before first packet so firewallEnabled isn't stuck on default false.
-            runCatching {
-                val initial = coerceFirewallPrefs(preferencesStore.preferences.first())
-                preferences.set(initial)
-                syncLanDeferFlag(initial)
+            val initial = runCatching {
+                coerceFirewallPrefs(preferencesStore.preferences.first())
+            }.getOrElse { TunnelPreferences() }
+            preferences.set(initial)
+            syncLanDeferFlag(initial)
+            // Boot with noLogs must not resurrect Timeline IPs/hosts (W4-04).
+            if (initial.noLogsEnabled) {
+                _journal.value = emptyList()
+                runCatching { rulesStore.clearJournal() }
+            } else {
+                _journal.value = rulesStore.persistedJournal.value
             }
             var lastDefault = preferences.get().firewallDefaultAction
             var lastNoLogs = preferences.get().noLogsEnabled
+            var lastFirewallEnabled = preferences.get().firewallEnabled
             preferencesStore.preferences.collect { raw ->
                 val next = coerceFirewallPrefs(raw)
                 val prevDefault = lastDefault
                 val prevNoLogs = lastNoLogs
+                val prevFw = lastFirewallEnabled
                 preferences.set(next)
                 syncLanDeferFlag(next)
                 if (next.noLogsEnabled && !prevNoLogs) {
@@ -169,6 +210,16 @@ class InteractiveFirewallEngine @Inject constructor(
                     runCatching { rulesStore.clearJournal() }
                 } else {
                     lastNoLogs = next.noLogsEnabled
+                }
+                // OFF→ON (or reverse) must not reuse ALLOW_LAN stickies from the prior mode.
+                if (next.firewallEnabled != prevFw) {
+                    lastFirewallEnabled = next.firewallEnabled
+                    caches.clearAll()
+                    Timber.i(
+                        "Firewall enabled %s → %s — cleared sticky verdict caches",
+                        prevFw,
+                        next.firewallEnabled,
+                    )
                 }
                 // Sticky ALLOW_OVPN flow cache survives Settings default flips and keeps
                 // peer RST pollution on Tor-path browsers until tunnel restart.
@@ -191,18 +242,36 @@ class InteractiveFirewallEngine @Inject constructor(
         scope.launch {
             var previousActive = emptyList<FirewallRule>()
             rulesStore.rules.collect { list ->
-                val active = list.filterNot { it.isExpired() }
-                // Dropped SESSION/PERMANENT must clear sticky caches. TEMPORARY must not
-                // invalidateDestination (wipes sibling ports) — scheduled forgetFlow handles it.
+                val fromStore = list.filterNot {
+                    it.isExpired() || it.isPoisonLanAllow() || it.isPoisonEmptyDest()
+                }
+                // Merge: keep in-memory rules whose upsert has not yet appeared in DataStore
+                // (answerPrompt installs host-wide before async upsert — blind set clobbered
+                // Via LAN mid-answer, B01 H2).
+                val merged = rules.updateAndGet { mem ->
+                    val storeIds = fromStore.map { it.id }.toHashSet()
+                    val inFlight = mem.filter {
+                        it.id !in storeIds &&
+                            !it.isExpired() &&
+                            !it.isPoisonLanAllow() &&
+                            !it.isPoisonEmptyDest()
+                    }
+                    fromStore + inFlight
+                }
                 for (old in previousActive) {
-                    if (active.none { it.id == old.id } &&
+                    if (merged.none { it.id == old.id } &&
                         old.scope != FirewallRuleScope.TEMPORARY
                     ) {
-                        caches.invalidateDestination(old.destHost)
+                        // Only invalidate when merged list no longer covers this dest at all.
+                        val stillCovered = merged.any {
+                            it.destHost.equals(old.destHost, ignoreCase = true)
+                        }
+                        if (!stillCovered) {
+                            caches.invalidateDestination(old.destHost)
+                        }
                     }
                 }
-                previousActive = active
-                rules.set(active)
+                previousActive = merged
             }
         }
     }
@@ -232,28 +301,52 @@ class InteractiveFirewallEngine @Inject constructor(
 
     /** Arm LeakPacketFilter RFC1918 TCP defer when interactive routing is possible. */
     private fun syncLanDeferFlag(prefs: TunnelPreferences) {
+        // Never re-arm after stop() while prefs collectors keep emitting (B06).
         FirewallBridge.deferRfc1918LanToFirewall =
-            prefs.firewallEnabled || prefs.openVpnOverTorEnabled
+            sessionActive.get() && (prefs.firewallEnabled || prefs.openVpnOverTorEnabled)
     }
 
     private fun isLanMatchDest(dest: String): Boolean =
         TorNetPolicy.isLanRoutableIpv4Literal(dest)
 
+    /** Stamp UID only for ALLOW_LAN SYNs — never on ASK/DENY (stamp-theft window). */
+    private fun stampLanAllowUid(
+        info: IpPacketInfo,
+        uid: Int,
+        verdict: FirewallVerdict,
+        lanPacket: Boolean,
+    ) {
+        if (verdict == FirewallVerdict.ALLOW_LAN && info.isTcpSyn && lanPacket) {
+            TcpFlowUidIndex.note(info, uid)
+        }
+    }
+
     /**
      * Tor exits and SoftEther cannot reach the user's LAN — only Via LAN / Deny.
+     * Non-LAN destinations must never keep ALLOW_LAN (poison rule / sticky).
      */
     private fun lanCoerce(v: FirewallVerdict, lanDest: Boolean): FirewallVerdict {
-        if (!lanDest) return v
+        if (!lanDest) {
+            return if (v == FirewallVerdict.ALLOW_LAN) FirewallVerdict.DENY else v
+        }
         return when (v) {
             FirewallVerdict.ALLOW_LAN, FirewallVerdict.DENY -> v
             FirewallVerdict.ALLOW_TOR, FirewallVerdict.ALLOW_OVPN -> FirewallVerdict.DENY
         }
     }
 
+    /** Tor/OVPN rules on RFC1918 must not sticky-DENY — fall through to Via LAN ASK. */
+    private fun lanIgnoresTorOvpnRule(verdict: FirewallVerdict, lanDest: Boolean): Boolean =
+        lanDest &&
+            (verdict == FirewallVerdict.ALLOW_TOR || verdict == FirewallVerdict.ALLOW_OVPN)
+
     fun clearSessionRules() {
+        // Sync memory immediately — async store alone left SESSION ALLOW sticky (W5-03 H2).
+        rules.updateAndGet { list -> list.filterNot { it.scope == FirewallRuleScope.SESSION } }
         scope.launch {
             rulesStore.removeWhere { it.scope == FirewallRuleScope.SESSION }
         }
+        cancelTempExpiryCallbacks()
         caches.clearAll()
         synchronized(queueLock) {
             waitQueue.clear()
@@ -283,7 +376,9 @@ class InteractiveFirewallEngine @Inject constructor(
 
         // UDP/53 → TunDnsMux → DNSCrypt/Tor DNSPort (any resolver IP pinned into TUN).
         // Honor DENY rules only — never ASK (prompts would blackhole working DNS while Tor is fine).
+        // RFC1918 DNS must not ALLOW_TOR (mux silent-drops TOR+LAN — FIXES M4).
         if (info.protocol == IpPacketParser.PROTO_UDP && info.dstPort == 53) {
+            if (lanPacket) return FirewallVerdict.DENY
             val uid = ownerResolver.resolveUid(info)
             if (uid == ownUid) return FirewallVerdict.ALLOW_TOR
             if (ConnectionOwnerResolver.isValidUid(uid)) {
@@ -295,17 +390,26 @@ class InteractiveFirewallEngine @Inject constructor(
 
         val tupleKey = FirewallCacheKeys.tupleFlowKey(info)
         if (info.isTcp && !info.isTcpSyn) {
-            // Live plane was stamped at SYN — never re-coerce (would OVPN↔Tor flip mid-TCP).
-            caches.flowCache[tupleKey]?.let { return it }
+            // Live plane was stamped at SYN — never re-coerce Tor↔OVPN mid-TCP.
+            // LAN stickies still lanCoerce so stale ALLOW_OVPN/TOR cannot silent-drop.
+            caches.flowCache[tupleKey]?.let { cached ->
+                // Mid-flow must still demote ALLOW_OVPN when SoftEther SNAT is down (W4-03).
+                return when {
+                    lanPacket -> lanCoerce(cached, lanDest = true)
+                    else -> coerceLiveOvpn(cached, prefs)
+                }
+            }
         }
 
-        // Resolve UID before uid-scoped caches — 5-tuple-only keys poisoned UNKNOWN→real UID races.
-        val uid = if (info.isTcpSyn) {
-            ownerResolver.resolveUidWithRetry(info)
-        } else {
-            ownerResolver.resolveUid(info)
+        // Hot path = TunDnsMux sole TUN reader — NEVER park (LAN used to wait ~120ms/SYN
+        // and stall the whole VPN plane). Single-shot only; SocksUidBridge / mux stamp
+        // retry off-thread recover the SYN→UID race.
+        val uid = ownerResolver.resolveUid(info)
+        // Own UID is VpnService-disallowed; rare TUN hits must never ALLOW_TOR RFC1918
+        // (TunDnsMux drops that → silent blackhole). Align with socksConnectRoute.
+        if (uid == ownUid) {
+            return if (lanPacket) FirewallVerdict.DENY else FirewallVerdict.ALLOW_TOR
         }
-        if (uid == ownUid) return FirewallVerdict.ALLOW_TOR
 
         // SYN without owner: fail-closed. HEV CONNECT also refuses without a UID stamp
         // (parity with PAC — no uunknown merge / shared IsolateSOCKSAuth token).
@@ -322,8 +426,18 @@ class InteractiveFirewallEngine @Inject constructor(
             return FirewallVerdict.DENY
         }
 
+        // Do NOT stamp UID on ASK/DENY SYNs — dest-only peek would let another app
+        // ride a Via LAN rule (A03/A10). Stamp only when returning ALLOW_LAN below.
+
         val flowKey = FirewallCacheKeys.flowKey(uid, info)
-        caches.flowCache[flowKey]?.let { return it }
+        caches.flowCache[flowKey]?.let { v ->
+            val live = when {
+                lanPacket -> lanCoerce(v, lanDest = true)
+                else -> coerceLiveOvpn(v, prefs)
+            }
+            stampLanAllowUid(info, uid, live, lanPacket)
+            return live
+        }
 
         val matchDest = matchDestination(info)
         if (matchDest == null) {
@@ -369,19 +483,23 @@ class InteractiveFirewallEngine @Inject constructor(
         }
 
         val matching = findRule(uid, matchDest, info)
-        if (matching != null) {
+        if (matching != null && !lanIgnoresTorOvpnRule(matching.verdict, lanDest)) {
             val intent = stickyIntent(lanCoerce(matching.verdict, lanDest), matchDest, info)
             val live = coerceLiveOvpn(intent, prefs)
             rememberPacketFlow(flowKey, live, matchDest, info)
+            stampLanAllowUid(info, uid, live, lanPacket)
             return live
         }
 
         val rk = FirewallCacheKeys.decisionKey(uid, matchDest, info)
         caches.decisionCache[rk]?.let { cached ->
-            val intent = stickyIntent(lanCoerce(cached, lanDest), matchDest, info)
-            val live = coerceLiveOvpn(intent, prefs)
-            rememberPacketFlow(flowKey, live, matchDest, info)
-            return live
+            if (!lanIgnoresTorOvpnRule(cached, lanDest)) {
+                val intent = stickyIntent(lanCoerce(cached, lanDest), matchDest, info)
+                val live = coerceLiveOvpn(intent, prefs)
+                rememberPacketFlow(flowKey, live, matchDest, info)
+                stampLanAllowUid(info, uid, live, lanPacket)
+                return live
+            }
         }
 
         val pendingKey = FirewallCacheKeys.ruleKey(uid, matchDest, info.dstPort, info.protocol)
@@ -391,33 +509,11 @@ class InteractiveFirewallEngine @Inject constructor(
 
         val app = resolveApp(uid)
         val dpi = ApplicationLayerDetector.classify(packet, length, info)
-        // RFC1918: never auto Via Tor / Via OVPN — always ASK (or DENY default).
+        // RFC1918: never auto Via Tor / Via OVPN / silent default-DENY.
+        // Even firewallDefaultAction=DENY must ASK for LAN — otherwise Cake→node is
+        // unreachable without a way to pick Via LAN (kill-switch stays for clearnet).
         if (lanDest) {
-            return when (prefs.firewallDefaultAction) {
-                FirewallDefaultAction.DENY -> {
-                    caches.rememberDecision(
-                        rk,
-                        flowKey,
-                        FirewallVerdict.DENY,
-                        matchDest,
-                        FirewallCacheKeys.tupleFlowKey(info),
-                    )
-                    appendJournal(
-                        uid = uid,
-                        app = app,
-                        info = info,
-                        verdict = FirewallVerdict.DENY,
-                        scope = FirewallRuleScope.SESSION,
-                        note = dpiJournalNote("default deny (LAN)", dpi),
-                        protocolLabel = dpi.label,
-                    )
-                    FirewallVerdict.DENY
-                }
-                FirewallDefaultAction.ALLOW,
-                FirewallDefaultAction.ALLOW_OVPN,
-                FirewallDefaultAction.ASK,
-                -> enqueuePrompt(uid, app, info, flowKey, pendingKey, rk, dpi, matchDest)
-            }
+            return enqueuePrompt(uid, app, info, flowKey, pendingKey, rk, dpi, matchDest)
         }
         return when (prefs.firewallDefaultAction) {
             FirewallDefaultAction.ALLOW -> {
@@ -507,7 +603,7 @@ class InteractiveFirewallEngine @Inject constructor(
         caches.flowCache[flowKey]?.let { return lanCoerce(coerceSocksVerdict(it), lanDest) }
 
         val matching = findRule(uid, matchDest, destPort, protocol)
-        if (matching != null) {
+        if (matching != null && !lanIgnoresTorOvpnRule(matching.verdict, lanDest)) {
             val v = lanCoerce(coerceSocksVerdict(matching.verdict), lanDest)
             caches.rememberFlow(flowKey, v, matchDest)
             return v
@@ -515,9 +611,11 @@ class InteractiveFirewallEngine @Inject constructor(
 
         val rk = FirewallCacheKeys.socksDecisionKey(uid, matchDest, destPort, protocol)
         caches.decisionCache[rk]?.let { v ->
-            val coerced = lanCoerce(coerceSocksVerdict(v), lanDest)
-            caches.rememberFlow(flowKey, coerced, matchDest)
-            return coerced
+            if (!lanIgnoresTorOvpnRule(v, lanDest)) {
+                val coerced = lanCoerce(coerceSocksVerdict(v), lanDest)
+                caches.rememberFlow(flowKey, coerced, matchDest)
+                return coerced
+            }
         }
 
         val pendingKey = FirewallCacheKeys.ruleKey(uid, matchDest, destPort, protocol)
@@ -536,41 +634,21 @@ class InteractiveFirewallEngine @Inject constructor(
                 SocksConnectPlane.HEV_UID_BRIDGE -> "via hev UID SOCKS bridge"
             },
         )
+        // Same as TUN: unruled LAN always ASK (never inherit clearnet default DENY).
         if (lanDest) {
-            return when (prefs.firewallDefaultAction) {
-                FirewallDefaultAction.DENY -> {
-                    caches.rememberDecision(rk, flowKey, FirewallVerdict.DENY, matchDest)
-                    appendJournal(
-                        uid = uid,
-                        app = app,
-                        destIp = ip.ifBlank { matchDest },
-                        destHost = displayHost,
-                        threatCategory = domainReputation.classify(displayHost),
-                        destPort = destPort,
-                        protocolLabel = dpi.label,
-                        verdict = FirewallVerdict.DENY,
-                        ruleScope = FirewallRuleScope.SESSION,
-                        note = dpiJournalNote("default deny (LAN)", dpi),
-                    )
-                    FirewallVerdict.DENY
-                }
-                FirewallDefaultAction.ALLOW,
-                FirewallDefaultAction.ALLOW_OVPN,
-                FirewallDefaultAction.ASK,
-                -> enqueueSocksPrompt(
-                    uid = uid,
-                    app = app,
-                    matchDest = matchDest,
-                    destIp = ip.ifBlank { matchDest },
-                    destHost = displayHost,
-                    destPort = destPort,
-                    flowKey = flowKey,
-                    ruleKey = pendingKey,
-                    decisionKey = rk,
-                    dpi = dpi,
-                    lanDestination = true,
-                )
-            }
+            return enqueueSocksPrompt(
+                uid = uid,
+                app = app,
+                matchDest = matchDest,
+                destIp = ip.ifBlank { matchDest },
+                destHost = displayHost,
+                destPort = destPort,
+                flowKey = flowKey,
+                ruleKey = pendingKey,
+                decisionKey = rk,
+                dpi = dpi,
+                lanDestination = true,
+            )
         }
         return when (prefs.firewallDefaultAction) {
             FirewallDefaultAction.ALLOW -> {
@@ -673,8 +751,8 @@ class InteractiveFirewallEngine @Inject constructor(
     }
 
     /**
-     * Enqueue a prompt (FIFO). No timeout — stays until [answerPrompt] or [clearSessionRules].
-     * Returns false (drop packet) always for ASK until a later SYN hits a cached ALLOW.
+     * Enqueue a prompt (FIFO). Unanswered prompts expire after [ASK_TTL_MS] → DENY.
+     * Returns DENY for ASK until a later SYN hits a cached ALLOW.
      */
     private fun enqueuePrompt(
         uid: Int,
@@ -755,7 +833,10 @@ class InteractiveFirewallEngine @Inject constructor(
             _pendingPrompt.value = next.request
             publishQueueDepthLocked()
             val shown = next.request
-            mainHandler.post { promptNotifier.show(shown) }
+            mainHandler.post {
+                promptNotifier.show(shown)
+                armAskTtl(shown.requestId)
+            }
             return
         }
         publishQueueDepthLocked()
@@ -766,8 +847,11 @@ class InteractiveFirewallEngine @Inject constructor(
         verdict: FirewallVerdict,
         ruleScope: FirewallRuleScope,
     ) {
+        cancelAskTtl(requestId)
         val prefs = preferences.get()
         val answered: QueuedPrompt
+        // Keep pending until rule+sticky are installed so LAN RST re-SYNs hit findRule
+        // (or still-pending DENY) instead of a second ASK (B01).
         synchronized(queueLock) {
             val current = active
             if (current == null || current.request.requestId != requestId) {
@@ -775,10 +859,6 @@ class InteractiveFirewallEngine @Inject constructor(
                 return
             }
             answered = current
-            pendingByKey.remove(answered.ruleKey, answered)
-            active = null
-            _pendingPrompt.value = null
-            publishQueueDepthLocked()
         }
         // Persist user intent after requestId match. SoftEther down → live coerce only.
         // SOCKS/PAC and Automap/.onion never store ALLOW_OVPN.
@@ -811,22 +891,24 @@ class InteractiveFirewallEngine @Inject constructor(
             }
             else -> verdict
         }
-        // Cake Wallet / monerod often use several ports on the same LAN IP (RPC 18081,
-        // ZMQ 18089, …). Via LAN / Deny must cover the whole host, not a single port.
-        val lanHostWide = lanDest &&
-            (effective == FirewallVerdict.ALLOW_LAN || effective == FirewallVerdict.DENY)
-        if (lanHostWide) {
-            // Drop sibling-port ASK prompts before promote (else 18089 pops up after 18081).
+        // Exact port by default (LAN SSRF). Cake/monerod multi-port: install sibling
+        // exact-port rules (18080/18081/18089) — never destPort=-1 wildcards (W5-10 R3).
+        val answeredPort = answered.request.destPort
+        val cakeSiblingPorts = if (
+            lanDest &&
+            (effective == FirewallVerdict.ALLOW_LAN || effective == FirewallVerdict.DENY) &&
+            answeredPort in LAN_CAKE_PORTS
+        ) {
+            LAN_CAKE_PORTS
+        } else {
+            null
+        }
+        if (cakeSiblingPorts != null) {
             cancelLanHostPrompts(
                 uid = answered.request.uid,
                 lanHost = answered.matchDest,
                 exceptRequestId = answered.request.requestId,
             )
-        }
-        // Cancel current notification before promoting the next head of queue.
-        promptNotifier.cancel()
-        synchronized(queueLock) {
-            promoteLocked()
         }
 
         val expires = if (ruleScope == FirewallRuleScope.TEMPORARY) {
@@ -841,27 +923,49 @@ class InteractiveFirewallEngine @Inject constructor(
             appLabel = answered.request.appLabel,
             // Automap: match .onion hostname; clearnet: match packet IP.
             destHost = answered.matchDest,
-            destPort = if (lanHostWide) -1 else answered.request.destPort,
-            protocol = if (lanHostWide) -1 else answered.request.protocol,
+            destPort = answered.request.destPort,
+            protocol = answered.request.protocol,
             verdict = effective,
             scope = ruleScope,
             expiresAtEpochMs = expires,
             displayHost = answered.request.destHost.orEmpty(),
         )
-        scope.launch { rulesStore.upsert(rule) }
-        rules.updateAndGet { list ->
-            list.filterNot { existing ->
-                if (lanHostWide) {
-                    // Replace every prior rule for this app→LAN IP (all ports).
-                    existing.uid == rule.uid &&
-                        existing.destHost.equals(rule.destHost, ignoreCase = true)
-                } else {
-                    existing.uid == rule.uid &&
-                        existing.destHost == rule.destHost &&
-                        existing.destPort == rule.destPort &&
-                        existing.protocol == rule.protocol
+        if (rule.isPoisonLanAllow() || rule.isPoisonEmptyDest()) {
+            Timber.e("Refusing to persist poison rule dest_len=%d", rule.destHost.length)
+            synchronized(queueLock) {
+                if (active === answered) {
+                    pendingByKey.remove(answered.ruleKey, answered)
+                    active = null
+                    _pendingPrompt.value = null
+                    publishQueueDepthLocked()
+                    promoteLocked()
                 }
-            } + rule
+            }
+            promptNotifier.cancel()
+            return
+        }
+        val siblingRules = cakeSiblingPorts?.mapNotNull { port ->
+            if (port == rule.destPort) return@mapNotNull null
+            rule.copy(
+                id = UUID.randomUUID().toString(),
+                destPort = port,
+                protocol = IpPacketParser.PROTO_TCP,
+            )
+        }.orEmpty()
+        scope.launch {
+            rulesStore.upsert(rule)
+            for (sib in siblingRules) {
+                rulesStore.upsert(sib)
+            }
+        }
+        rules.updateAndGet { list ->
+            val siblingPorts = siblingRules.map { it.destPort }.toSet() + rule.destPort
+            list.filterNot { existing ->
+                existing.uid == rule.uid &&
+                    existing.destHost.equals(rule.destHost, ignoreCase = true) &&
+                    existing.destPort in siblingPorts &&
+                    existing.protocol == rule.protocol
+            } + rule + siblingRules
         }
         // TEMPORARY must not sticky decisionCache: rules StateFlow only emits on upsert/remove,
         // so wall-clock expiry never hits the collect invalidate — answers would outlive the rule.
@@ -869,18 +973,20 @@ class InteractiveFirewallEngine @Inject constructor(
         val live = coerceLiveOvpn(effective, prefs)
         if (ruleScope == FirewallRuleScope.TEMPORARY) {
             caches.rememberFlow(answered.flowKey, live, answered.matchDest, answered.tupleKey)
-            val flowKeyToDrop = answered.flowKey
-            val tupleKeyToDrop = answered.tupleKey
+            val destToInvalidate = answered.matchDest
             val delayMs = ((expires ?: 0L) - System.currentTimeMillis()).coerceAtLeast(0L)
-            mainHandler.postDelayed({
-                // Only this TCP flow (+ SYN tuple alias) — not whole dest.
-                caches.forgetFlow(flowKeyToDrop, tupleKeyToDrop)
+            lateinit var expiry: Runnable
+            expiry = Runnable {
+                tempExpiryRunnables.remove(expiry)
+                // Always invalidate dest — sibling 5-tuples pin ALLOW_LAN across TEMP TTL (B07).
+                caches.invalidateDestination(destToInvalidate)
                 rules.updateAndGet { list -> list.filterNot { it.isExpired() } }
                 scope.launch { rulesStore.removeWhere { it.isExpired() } }
-            }, delayMs)
+            }
+            tempExpiryRunnables.add(expiry)
+            mainHandler.postDelayed(expiry, delayMs)
         } else {
-            // Drop stale per-port DENY/ALLOW stickies so sibling LAN ports hit the new host rule.
-            if (lanHostWide) {
+            if (cakeSiblingPorts != null) {
                 caches.invalidateDestination(answered.matchDest)
                 caches.invalidateDestination(answered.request.destIp)
             }
@@ -891,18 +997,19 @@ class InteractiveFirewallEngine @Inject constructor(
                 answered.matchDest,
                 answered.tupleKey,
             )
-            // Sticky SOCKS re-check (hev CONNECT) — TUN decisionKey is namespaced separately.
-            if (lanHostWide) {
+            // SOCKS-plane stickies for answered + Cake sibling exact ports (findRule covers TUN).
+            val stickyPorts = cakeSiblingPorts ?: setOf(answered.request.destPort)
+            for (port in stickyPorts) {
                 val socksRk = FirewallCacheKeys.socksDecisionKey(
                     answered.request.uid,
                     answered.matchDest,
-                    answered.request.destPort,
+                    port,
                     IpPacketParser.PROTO_TCP,
                 )
                 val socksFk = FirewallCacheKeys.socksFlowKey(
                     answered.request.uid,
                     answered.matchDest,
-                    answered.request.destPort,
+                    port,
                 )
                 caches.rememberDecision(socksRk, socksFk, effective, answered.matchDest)
             }
@@ -943,6 +1050,17 @@ class InteractiveFirewallEngine @Inject constructor(
             ruleScope = ruleScope,
             note = if (dpiNote != null) "$note · $dpiNote" else note,
         )
+        // Rule+sticky live — now drop pending so re-SYN hits findRule / decisionCache.
+        promptNotifier.cancel()
+        synchronized(queueLock) {
+            if (active === answered || active?.request?.requestId == requestId) {
+                pendingByKey.remove(answered.ruleKey, answered)
+                active = null
+                _pendingPrompt.value = null
+                publishQueueDepthLocked()
+                promoteLocked()
+            }
+        }
     }
 
     fun deleteRule(id: String) {
@@ -986,8 +1104,9 @@ class InteractiveFirewallEngine @Inject constructor(
                 r.verdict == FirewallVerdict.ALLOW_OVPN && r.scope in scopes
             }
         }
-        caches.clearAll()
-        Timber.i("Cleared Via OVPN rules scopes=%s + sticky caches", scopes)
+        // Only scrub OVPN stickies — clearAll() used to kill Via LAN mid-flows (B04).
+        caches.clearVerdict(FirewallVerdict.ALLOW_OVPN)
+        Timber.i("Cleared Via OVPN rules scopes=%s + OVPN sticky caches", scopes)
     }
 
     fun rulesFlow(): StateFlow<List<FirewallRule>> = rulesStore.rules
@@ -1023,15 +1142,8 @@ class InteractiveFirewallEngine @Inject constructor(
         DnsHostnameCache.lookup(ip)?.let { host ->
             if (TunnelEndpoints.isOnionLikeHostname(host)) return host
         }
-        // SYN only: park briefly for TunDnsMux synth / DNSPort Automap cache fill.
-        if (info.isTcpSyn) {
-            repeat(AUTOMAP_HOST_RETRY) {
-                LockSupport.parkNanos(AUTOMAP_HOST_PARK_NS)
-                DnsHostnameCache.lookup(ip)?.let { host ->
-                    if (TunnelEndpoints.isOnionLikeHostname(host)) return host
-                }
-            }
-        }
+        // Never park the TUN reader waiting for Automap cache — miss → DENY this SYN;
+        // next SYN after DNS fill succeeds (SocksUidBridge also retries Automap rewrite).
         return null
     }
 
@@ -1198,13 +1310,14 @@ class InteractiveFirewallEngine @Inject constructor(
 
 
     /**
-     * PAC / hev SOCKS cannot encapsulate OVPN-over-Tor.
-     * Demote ALLOW_OVPN → Tor on this plane (never DENY): otherwise OVPN-down /
-     * TunDnsMux demote / default-Allow-via-OVPN SYN→hev still hits SOCKS re-check and
-     * clients see net::ERR_CONNECTION_RESET.
+     * PAC / hev SOCKS cannot encapsulate SoftEther. Demoting ALLOW_OVPN → Tor
+     * created dual egress (TUN SoftEther + SOCKS Tor exit). Fail-closed: DENY
+     * on the SOCKS plane so Via OVPN stays SoftEther-only on TUN.
      */
-    private fun coerceSocksVerdict(v: FirewallVerdict): FirewallVerdict =
-        if (v == FirewallVerdict.ALLOW_OVPN) FirewallVerdict.ALLOW_TOR else v
+    private fun coerceSocksVerdict(v: FirewallVerdict): FirewallVerdict {
+        if (v != FirewallVerdict.ALLOW_OVPN) return v
+        return FirewallVerdict.DENY
+    }
 
     /**
      * Demote ALLOW_OVPN → Tor for Automap/.onion (SoftEther cannot SOCKS5A).
@@ -1283,20 +1396,25 @@ class InteractiveFirewallEngine @Inject constructor(
      * "Via OVPN" appears on an already-visible prompt (race with async CONNECTED).
      */
     fun refreshActivePromptForOvpn() {
-        if (!ovpnRouteAvailable()) return
+        val up = ovpnRouteAvailable()
+        if (!up) {
+            // SoftEther demote: drop live OVPN stickies so mux doesn't silent-drop mid-flow.
+            caches.clearVerdict(FirewallVerdict.ALLOW_OVPN)
+        }
         val shown = synchronized(queueLock) { active?.request } ?: return
-        if (shown.socksPlane) return
+        if (shown.socksPlane || shown.lanDestination) return
         mainHandler.post { promptNotifier.show(shown) }
-        Timber.i("Firewall prompt refreshed — Via OVPN now available")
+        Timber.i("Firewall prompt refreshed — Via OVPN available=%s", up)
     }
 
     companion object {
         private const val MAX_JOURNAL = 200
         private const val JOURNAL_CHANNEL_CAP = 64
         private const val MAX_QUEUE = 64
-        /** Match SocksUidBridge Automap wait (~200ms) for DNS→cache races. */
-        private const val AUTOMAP_HOST_RETRY = 40
-        private const val AUTOMAP_HOST_PARK_NS = 5_000_000L
+        /** Unanswered ASK → DENY (Always-On / denied notifications). */
+        private const val ASK_TTL_MS = 5 * 60_000L
+        /** Cake Wallet / monerod multi-port LAN (RPC + ZMQ) — exact sibling ports, not -1. */
+        private val LAN_CAKE_PORTS = setOf(18080, 18081, 18089)
     }
 }
 

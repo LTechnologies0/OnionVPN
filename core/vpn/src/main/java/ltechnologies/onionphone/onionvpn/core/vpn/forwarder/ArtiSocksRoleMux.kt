@@ -33,9 +33,41 @@ class ArtiSocksRoleMux {
 
     /**
      * @param appContext application context (never a half-constructed Service).
+     * @param littleTOpenVpn when true, only the OVPN auth inject runs:
+     *   listen=[torOpenVpnSocksPort] → Tor SessionGroup OPENVPN at
+     *   [torOpenVpnIsolateSocksPort] (UID gate). DNSCrypt/probe stay Tor-native.
      */
-    fun start(ports: TunnelRuntimePorts, appContext: Context? = null) {
+    fun start(
+        ports: TunnelRuntimePorts,
+        appContext: Context? = null,
+        littleTOpenVpn: Boolean = false,
+    ) {
         ownerResolver = appContext?.applicationContext?.let { ConnectionOwnerResolver(it) }
+        if (littleTOpenVpn) {
+            val isolate = ports.torOpenVpnIsolateSocksPort
+            val listen = ports.torOpenVpnSocksPort
+            if (isolate <= 0 || listen <= 0 || isolate == listen) {
+                Timber.w("ArtiSocksRoleMux little-t OVPN: invalid isolate/listen — skip")
+                return
+            }
+            dnsCryptRelay?.stop()
+            probeRelay?.stop()
+            dnsCryptRelay = null
+            probeRelay = null
+            openVpnRelay = syncAuthRelay(
+                current = openVpnRelay,
+                want = true,
+                listen = listen,
+                upstream = isolate,
+            )
+            Timber.i(
+                "ArtiSocksRoleMux little-t OVPN listen=%d → isolate=%d peerGate=%s",
+                listen,
+                isolate,
+                ownerResolver != null,
+            )
+            return
+        }
         if (ports.torDnsCryptSocksPort == ports.torSocksPort &&
             ports.torProbeSocksPort == ports.torSocksPort &&
             ports.torOpenVpnSocksPort == ports.torSocksPort
@@ -145,24 +177,11 @@ class ArtiSocksRoleMux {
 
     private fun isTrustedPeer(client: Socket): Boolean {
         val peerAddr = (client.remoteSocketAddress as? InetSocketAddress)?.address
-        // Role mux binds loopback only — other UIDs cannot dial our 127.0.0.1 listeners.
-        // When getConnectionOwnerUid/proc miss (Waydroid), fail-open for loopback peers.
-        if (peerAddr?.isLoopbackAddress == true) {
-            val resolver = ownerResolver ?: return true
-            val peer = resolver.resolveAcceptedClientUid(client)
-            if (ConnectionOwnerResolver.isValidUid(peer)) {
-                return peer == ownUid
-            }
-            // Pre-Q: getConnectionOwnerUid often missing. API ≥ Q: fail-closed so a
-            // foreign UID cannot dial the OVPN NO-AUTH role port.
-            return android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.Q
-        }
-        val resolver = ownerResolver ?: return true
+        // Role ports use fixed APK secrets — UID miss must fail-closed (W5-01 H4).
+        val resolver = ownerResolver ?: return false
         val peer = resolver.resolveAcceptedClientUid(client)
-        if (!ConnectionOwnerResolver.isValidUid(peer)) {
-            // Pre-Q: getConnectionOwnerUid unavailable. API ≥ Q: fail-closed on miss.
-            return android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.Q
-        }
+        if (!ConnectionOwnerResolver.isValidUid(peer)) return false
+        if (peerAddr?.isLoopbackAddress != true && peer != ownUid) return false
         return peer == ownUid
     }
 }

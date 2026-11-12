@@ -22,17 +22,27 @@ import timber.log.Timber
 object DnsCryptResolver {
     private val queryId = AtomicInteger(1)
 
+    /**
+     * @param allowLanRoutable when true (hev Via LAN only), accept RFC1918 A answers.
+     *   PAC must keep false — private A via PAC is rebinding/SSRF.
+     */
     fun resolveIpv4(
         hostname: String,
         dnsCryptHost: String,
         dnsCryptPort: Int,
         timeoutMs: Int = 8_000,
+        allowLanRoutable: Boolean = false,
     ): InetAddress {
         val host = TorNetPolicy.normalizeHostname(hostname)
         if (host.isEmpty()) throw IllegalArgumentException("empty hostname")
-        // Literal IPv4 — never CONNECT to blackholed destinations via PAC.
+        // Literal IPv4 — PAC blackholes all private; hev may allow RFC1918 for Via LAN.
         TunnelEndpoints.parseIpv4Literal(host)?.let { ipInt ->
-            if (TorNetPolicy.mustBlackholeIpv4Destination(ipInt)) {
+            val refuse = if (allowLanRoutable) {
+                TorNetPolicy.mustRefuseSocksConnectIpv4(ipInt)
+            } else {
+                TorNetPolicy.mustBlackholeIpv4Destination(ipInt)
+            }
+            if (refuse) {
                 throw UnknownHostException("DNSCrypt: blackholed literal $host")
             }
             return InetAddress.getByName(host)
@@ -43,7 +53,6 @@ object DnsCryptResolver {
         val qid = queryId.getAndIncrement() and 0xffff
         val query = buildQuery(qid, host)
         DatagramSocket(0, InetAddress.getByName("127.0.0.1")).use { socket ->
-            socket.soTimeout = timeoutMs
             socket.send(
                 DatagramPacket(
                     query,
@@ -53,10 +62,39 @@ object DnsCryptResolver {
                 ),
             )
             val buf = ByteArray(2048)
-            val resp = DatagramPacket(buf, buf.size)
-            socket.receive(resp)
-            return parseARecord(buf, resp.length, qid)
-                ?: throw UnknownHostException("DNSCrypt: no routable A for $host")
+            val deadline = System.currentTimeMillis() + timeoutMs.coerceAtLeast(500)
+            var lastMismatch = false
+            while (System.currentTimeMillis() < deadline) {
+                val remaining = (deadline - System.currentTimeMillis()).toInt().coerceAtLeast(1)
+                socket.soTimeout = remaining
+                val resp = DatagramPacket(buf, buf.size)
+                try {
+                    socket.receive(resp)
+                } catch (_: java.net.SocketTimeoutException) {
+                    break
+                }
+                if (resp.length < 12) continue
+                val gotId = ((buf[0].toInt() and 0xff) shl 8) or (buf[1].toInt() and 0xff)
+                if (gotId != qid) {
+                    lastMismatch = true
+                    Timber.d("DNSCrypt reply id mismatch expect=$qid got=$gotId — skip stale")
+                    continue
+                }
+                val flags = ((buf[2].toInt() and 0xff) shl 8) or (buf[3].toInt() and 0xff)
+                if (flags and 0x8000 == 0) continue // QR
+                // QNAME must echo the request (stale loopback replies).
+                val parsed = ltechnologies.onionphone.onionvpn.core.vpn.dns.DnsPacketParser
+                    .parse(buf, 0, resp.length)
+                val rn = parsed?.qname?.lowercase()?.trimEnd('.')
+                if (!rn.isNullOrEmpty() && rn != host) {
+                    Timber.d("DNSCrypt QNAME mismatch expect=$host got=$rn — skip")
+                    continue
+                }
+                return parseARecord(buf, resp.length, qid, allowLanRoutable)
+                    ?: throw UnknownHostException("DNSCrypt: no routable A for $host")
+            }
+            val why = if (lastMismatch) "id mismatch/timeout" else "timeout"
+            throw UnknownHostException("DNSCrypt: $why for $host")
         }
     }
 
@@ -82,7 +120,12 @@ object DnsCryptResolver {
         return out.toByteArray()
     }
 
-    private fun parseARecord(buf: ByteArray, length: Int, expectId: Int): InetAddress? {
+    private fun parseARecord(
+        buf: ByteArray,
+        length: Int,
+        expectId: Int,
+        allowLanRoutable: Boolean = false,
+    ): InetAddress? {
         if (length < 12) return null
         val input = DataInputStream(ByteArrayInputStream(buf, 0, length))
         val id = input.readUnsignedShort()
@@ -96,6 +139,9 @@ object DnsCryptResolver {
         input.readUnsignedShort() // NS
         input.readUnsignedShort() // AR
         repeat(qd) { skipName(input); input.skipBytes(4) }
+        // Prefer globally routable A over RFC1918 when allowLanRoutable (W4-02: rebinding
+        // private-first must not pin Via LAN). Fall back to first acceptable LAN A.
+        var lanFallback: InetAddress? = null
         repeat(an) {
             skipName(input)
             val type = input.readUnsignedShort()
@@ -109,8 +155,22 @@ object DnsCryptResolver {
                     ((addr[1].toInt() and 0xff) shl 16) or
                     ((addr[2].toInt() and 0xff) shl 8) or
                     (addr[3].toInt() and 0xff)
-                if (TorNetPolicy.mustBlackholeIpv4Destination(ipInt)) {
-                    Timber.d("DNSCrypt A blackholed — skip (rebinding/LAN)")
+                // Automap virtuals are onion-only — never accept as clearnet DNSCrypt A.
+                if (TunnelEndpoints.isAutomapVirtualIpv4(ipInt)) {
+                    Timber.d("DNSCrypt A in Automap range — reject (hijack)")
+                    return@repeat
+                }
+                val refuse = if (allowLanRoutable) {
+                    TorNetPolicy.mustRefuseSocksConnectIpv4(ipInt)
+                } else {
+                    TorNetPolicy.mustBlackholeIpv4Destination(ipInt)
+                }
+                if (refuse) {
+                    Timber.d("DNSCrypt A blackholed — skip (rebinding/private)")
+                } else if (allowLanRoutable && TorNetPolicy.isLanRoutableIpv4(ipInt)) {
+                    if (lanFallback == null) {
+                        lanFallback = InetAddress.getByAddress(addr.copyOf())
+                    }
                 } else {
                     return InetAddress.getByAddress(addr)
                 }
@@ -118,7 +178,7 @@ object DnsCryptResolver {
                 input.skipBytes(rdLen)
             }
         }
-        return null
+        return lanFallback
     }
 
     private fun skipName(input: DataInputStream) {

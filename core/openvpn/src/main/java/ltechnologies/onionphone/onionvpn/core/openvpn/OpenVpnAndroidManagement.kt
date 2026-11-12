@@ -43,6 +43,8 @@ internal class OpenVpnAndroidManagement(
      * across soft-restarts (`persist-tun`).
      */
     private val onControlNotReady: (String) -> Unit = {},
+    /** Fired after IFCONFIG sets [OvpnIpNat] so Via OVPN can go up without waiting for control flap. */
+    private val onNatReady: () -> Unit = {},
     private val onFatal: (String) -> Unit,
     private val authUser: String = "",
     private val authPassword: String = "",
@@ -238,14 +240,16 @@ internal class OpenVpnAndroidManagement(
             // OpenVPN-assigned client IP (VpnService stays 10.8.0.2).
             "IFCONFIG" -> {
                 OvpnIpNat.setFromIfconfigMsg(extra)
+                onNatReady()
                 writeCmd(sock, "needok 'IFCONFIG' ok\n")
             }
             "IFCONFIG6", "ROUTE", "ROUTE6",
             "DNSSERVER", "DNS6SERVER", "DNSDOMAIN",
             -> writeCmd(sock, "needok '$needed' ok\n")
             else -> {
-                Timber.w("OVPN unknown NEED-OK %s — ack", needed)
-                writeCmd(sock, "needok '$needed' ok\n")
+                // Fail-closed: unknown management opcodes must not be auto-acked.
+                Timber.w("OVPN unknown NEED-OK %s — cancel", needed)
+                writeCmd(sock, "needok '$needed' cancel\n")
             }
         }
     }

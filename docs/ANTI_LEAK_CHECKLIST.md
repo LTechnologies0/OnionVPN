@@ -272,7 +272,7 @@ Generated from source enumeration — do not invent IDs without evidence paths.
 | AL-263 | mapped-OnionVPN | `TunDnsMux.handleDnsQuery` | DNS response ID match | AntiLeakMappedTest | Pass |
 | AL-264 | mapped-OnionVPN | `TorProcessManager.downloadGeoIp` | GeoIP never NO_PROXY | AntiLeakMappedTest | Pass |
 | AL-265 | mapped-OnionVPN | `Socks5Client` | protect fail-closed off-loopback | AntiLeakMappedTest | Pass |
-| AL-266 | mapped-OnionVPN | `InteractiveFirewallEngine` | mid-flow fail-open after SYN gate | AntiLeakMappedTest | Pass |
+| AL-266 | mapped-OnionVPN | `InteractiveFirewallEngine` | mid-flow Tor-default only after SYN gate; ALLOW_LAN sticky kept; OVPN without stamp → DENY | AntiLeakMappedTest | Pass |
 | AL-267 | socket-hygiene | `TunDnsMux DnsScratch` | DatagramSocket bind 127.0.0.1 | AntiLeakSocketTest | Pass |
 | AL-268 | socket-hygiene | `SocksUidBridge` | listen 127.0.0.1 only | AntiLeakSocketTest | Pass |
 | AL-269 | socket-hygiene | `SocksPolicy` | accept 127.0.0.1 reject * | AntiLeakSocketTest | Pass |
@@ -350,6 +350,15 @@ Generated from source enumeration — do not invent IDs without evidence paths.
 | AL-341 | dnscrypt | `DnsCryptConfigWriter` | optional `[anonymized_dns]` + relays source | AntiLeakDnsCryptAnonymizedTest | Pass |
 | AL-342 | android | `TunnelPreferences.requireOsLockdown` | Connected fails without lockdown when pref on | source invariant | Pass |
 | AL-343 | fgs | `AndroidManifest` | dual specialUse: coordinator + VpnService | source invariant | Pass |
+| AL-344 | via-lan | `LanClearnetDial` | bind LAN Network then protect; refuse non-RFC1918 | source invariant | Pass |
+| AL-345 | via-lan | `InteractiveFirewallEngine` | ALLOW_LAN only for RFC1918; Cake sibling exact ports (no destPort=-1) | source invariant | Pass |
+| AL-346 | via-lan | `TunDnsMux.writeLanTcp` | LAN TCP via hev/automap hev → SocksUidBridge clearnet dial | source invariant | Pass |
+| AL-347 | via-lan | `TorNetPolicy.mustRefuseSocksConnectIpv4` | Automap∩LAN / blackhole refuse on SOCKS CONNECT | source invariant | Pass |
+| AL-348 | socks-auth | `TunnelEndpoints.mintSocksSessionSecret` | per-tunnel `-s{hex}` IsolateSOCKSAuth on app tokens | source invariant | Pass |
+| AL-349 | socks-unix | `TorConfigWriter.appsSocksUnix` | little-t apps SocksPort `unix:apps_socks.sock` (no TCP forge) | TorConfigWriterTest | Pass |
+| AL-350 | pac-auth | `TunnelEndpoints.mintPacBridgeSecret` | PAC embeds `pacbridge:secret@` when minted | PacScriptTest | Pass |
+| AL-351 | hev-fromstr | `TProxyService.startFromStr` | hev config via `main_from_str` (no password path) | source invariant | Pass |
+| AL-352 | shared-hev | `HevTProxyGate` + `TunDnsMux.automapHevFd` | ONIONMASQ Automap+ALLOW_LAN share one TProxy (no dual-Start) | source invariant | Pass |
 
-**Total: 344** — **Pass: 344** — **Fail: 0** (Pass = automated test and/or verified source invariant).
+**Total: 353** — **Pass: 353** — **Fail: 0** (Pass = automated test and/or verified source invariant). Via LAN AL-344–348; unix/PAC/hev AL-349–352.
 

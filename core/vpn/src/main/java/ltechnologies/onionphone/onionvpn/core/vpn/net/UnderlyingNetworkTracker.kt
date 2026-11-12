@@ -10,6 +10,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import androidx.core.content.getSystemService
+import ltechnologies.onionphone.onionvpn.core.vpn.forwarder.LanClearnetDial
 import timber.log.Timber
 
 /**
@@ -31,6 +32,8 @@ class UnderlyingNetworkTracker(
     private val onUnderlyingChanged: (() -> Unit)? = null,
 ) {
     private var callback: ConnectivityManager.NetworkCallback? = null
+    private var lanCallback: ConnectivityManager.NetworkCallback? = null
+    private var extraLanCallbacks: List<ConnectivityManager.NetworkCallback> = emptyList()
     private val mainHandler = Handler(Looper.getMainLooper())
     private var pendingPublish: Runnable? = null
     @Volatile private var lastPublishedNetId: Long? = null
@@ -53,12 +56,51 @@ class UnderlyingNetworkTracker(
                 networkCapabilities: NetworkCapabilities,
             ) = schedulePublish(cm)
         }
+        // Via LAN: Wi‑Fi/Eth/USB without requiring INTERNET/VALIDATED (OEM captive / VPN-up).
+        val lanWifi = NetworkRequest.Builder()
+            .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+            .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+            .build()
+        val lanEth = NetworkRequest.Builder()
+            .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+            .addTransportType(NetworkCapabilities.TRANSPORT_ETHERNET)
+            .build()
+        val lanCbs = mutableListOf<ConnectivityManager.NetworkCallback>()
+        fun lanCb(): ConnectivityManager.NetworkCallback =
+            object : ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: Network) = refreshLanCache(cm)
+                override fun onLost(network: Network) = refreshLanCache(cm)
+                override fun onCapabilitiesChanged(
+                    network: Network,
+                    networkCapabilities: NetworkCapabilities,
+                ) = refreshLanCache(cm)
+            }
         try {
             cm.registerNetworkCallback(request, cb)
             callback = cb
+            runCatching {
+                val wifiCb = lanCb()
+                cm.registerNetworkCallback(lanWifi, wifiCb)
+                lanCbs += wifiCb
+                val ethCb = lanCb()
+                cm.registerNetworkCallback(lanEth, ethCb)
+                lanCbs += ethCb
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    val usbReq = NetworkRequest.Builder()
+                        .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+                        .addTransportType(NetworkCapabilities.TRANSPORT_USB)
+                        .build()
+                    val usbCb = lanCb()
+                    cm.registerNetworkCallback(usbReq, usbCb)
+                    lanCbs += usbCb
+                }
+                lanCallback = wifiCb // primary for stop(); extras cleared below
+                extraLanCallbacks = lanCbs.filter { it !== wifiCb }
+            }.onFailure { Timber.w(it, "LAN uplink NetworkCallback failed") }
             // Bind underlying net only — do NOT notify Tor. forceNotify used to fire
             // DisableNetwork bounce on every VPN-up and kill live SOCKS/DNS mid-bootstrap.
             publish(cm, notifyTor = false)
+            refreshLanCache(cm)
             Timber.i("UnderlyingNetworkTracker started (debounce=${DEBOUNCE_MS}ms)")
         } catch (error: Exception) {
             Timber.e(error, "Failed to register underlying NetworkCallback")
@@ -72,10 +114,23 @@ class UnderlyingNetworkTracker(
         callback?.let { cb ->
             runCatching { cm?.unregisterNetworkCallback(cb) }
         }
+        lanCallback?.let { cb ->
+            runCatching { cm?.unregisterNetworkCallback(cb) }
+        }
+        for (extra in extraLanCallbacks) {
+            runCatching { cm?.unregisterNetworkCallback(extra) }
+        }
         callback = null
+        lanCallback = null
+        extraLanCallbacks = emptyList()
         lastPublishedNetId = null
+        LanClearnetDial.noteLanUplink(null)
         // Teardown: release preference so system default applies again.
         runCatching { vpnService.setUnderlyingNetworks(null) }
+    }
+
+    private fun refreshLanCache(cm: ConnectivityManager) {
+        LanClearnetDial.noteLanUplink(LanClearnetDial.selectLanUplink(cm))
     }
 
     private fun schedulePublish(cm: ConnectivityManager) {

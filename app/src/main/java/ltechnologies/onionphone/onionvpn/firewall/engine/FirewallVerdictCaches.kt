@@ -152,12 +152,40 @@ internal class FirewallVerdictCaches {
             }
         }
         if (decisionCache.size > MAX_DECISION_CACHE) {
-            val it3 = decisionCache.keys.iterator()
+            // Mirror flow trim: never evict ALLOW_OVPN / ALLOW_LAN / DENY (mid-flow LAN
+            // otherwise DENY after Tor decision flood — FIXES M1 / B08#7).
+            val it3 = decisionCache.entries.iterator()
             while (it3.hasNext() && n < DECISION_TRIM_BUDGET * 3) {
-                val k = it3.next()
-                removeDecisionKey(k)
+                val e = it3.next()
+                if (e.value == FirewallVerdict.ALLOW_OVPN ||
+                    e.value == FirewallVerdict.ALLOW_LAN ||
+                    e.value == FirewallVerdict.DENY
+                ) {
+                    continue
+                }
+                removeDecisionKey(e.key)
                 it3.remove()
                 n++
+            }
+        }
+    }
+
+    /** Drop sticky entries whose verdict matches (e.g. clear Via OVPN without wiping LAN). */
+    fun clearVerdict(verdict: FirewallVerdict) {
+        val flowIt = flowCache.entries.iterator()
+        while (flowIt.hasNext()) {
+            val e = flowIt.next()
+            if (e.value == verdict) {
+                removeFlowKey(e.key)
+                flowIt.remove()
+            }
+        }
+        val decIt = decisionCache.entries.iterator()
+        while (decIt.hasNext()) {
+            val e = decIt.next()
+            if (e.value == verdict) {
+                removeDecisionKey(e.key)
+                decIt.remove()
             }
         }
     }

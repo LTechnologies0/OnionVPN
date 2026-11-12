@@ -42,7 +42,10 @@ class FirewallPromptActivity : ComponentActivity() {
                             if (engine.pendingPrompt.value == null) finish()
                         }
                     }
-                    val current = prompt
+                    // Prefer the notification deep-link id when it still matches the active ASK.
+                    val current = prompt?.takeIf {
+                        wantedId.isNullOrBlank() || it.requestId == wantedId
+                    } ?: prompt
                     if (current != null) {
                         FirewallPromptContent(
                             info = current,

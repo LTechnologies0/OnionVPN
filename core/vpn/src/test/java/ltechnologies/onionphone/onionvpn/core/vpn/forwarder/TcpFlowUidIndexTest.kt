@@ -47,6 +47,18 @@ class TcpFlowUidIndexTest {
         assertEquals(99, e!!.uid)
     }
 
+    @Test
+    fun takeHostSeparatesMultiUidSameDest() {
+        TcpFlowUidIndex.note(info(srcPort = 40000, dstIp = 0x08080808, dstPort = 443), uid = 10100)
+        TcpFlowUidIndex.note(info(srcPort = 40001, dstIp = 0x08080808, dstPort = 443), uid = 10200)
+        // Peek would return 10200 twice; takeHost must give distinct UIDs (W4-07 F1).
+        val first = TcpFlowUidIndex.takeHost("8.8.8.8", 443)
+        val second = TcpFlowUidIndex.takeHost("8.8.8.8", 443)
+        assertEquals(10200, first!!.uid)
+        assertEquals(10100, second!!.uid)
+        assertNull(TcpFlowUidIndex.takeHost("8.8.8.8", 443))
+    }
+
     private fun info(
         srcPort: Int = 12345,
         dstIp: Int = 0x08080808,

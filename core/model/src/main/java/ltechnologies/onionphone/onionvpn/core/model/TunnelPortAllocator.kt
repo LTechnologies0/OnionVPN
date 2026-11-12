@@ -35,11 +35,16 @@ object TunnelPortAllocator {
         val dnsCryptSocks = allocateTcpPort(used)
         val probeSocks = allocateTcpPort(used)
         val openVpnSocks = allocateTcpPort(used)
+        // Little-t: Tor binds OPENVPN SessionGroup here; Java SocksAuthInjectingRelay
+        // listens on [torOpenVpnSocksPort] and injects uopenvpn (OpenVPN is NO-AUTH).
+        // Arti/onionmasq: unused (relay upstream = apps/sidecar socks).
+        val openVpnIsolate = allocateTcpPort(used)
         return TunnelRuntimePorts(
             torSocksPort = socks,
             torDnsCryptSocksPort = dnsCryptSocks,
             torProbeSocksPort = probeSocks,
             torOpenVpnSocksPort = openVpnSocks,
+            torOpenVpnIsolateSocksPort = openVpnIsolate,
             torHttpTunnelPort = allocateTcpPort(used),
             torDnsPort = allocateUdpPort(used),
             dnsCryptListenPort = allocateTcpUdpPort(used),
@@ -100,8 +105,17 @@ data class TunnelRuntimePorts(
     val torDnsCryptSocksPort: Int,
     /** Tor SocksPort for OnionVPN validation probes only (no app circuit sharing). */
     val torProbeSocksPort: Int,
-    /** Tor SocksPort for OpenVPN-over-Tor control channel only. */
+    /**
+     * Port OpenVPN dials (NO-AUTH). Always a Java [SocksAuthInjectingRelay] listen
+     * that injects IsolateSOCKSAuth toward [torOpenVpnIsolateSocksPort] (little-t)
+     * or [torSocksPort] (Arti / onionmasq sidecar).
+     */
     val torOpenVpnSocksPort: Int,
+    /**
+     * Little-t Tor SOCKSPort SessionGroup OPENVPN (auth required for isolation).
+     * Unused on Arti/onionmasq (relay upstream is the single Tor SOCKS).
+     */
+    val torOpenVpnIsolateSocksPort: Int = 0,
     /** Tor HTTPTunnelPort slot (allocated but unused — HTTPTunnelPort 0; PAC bridge only). */
     val torHttpTunnelPort: Int,
     val torDnsPort: Int,

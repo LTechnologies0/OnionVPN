@@ -53,6 +53,18 @@ class TorStatusListParserTest {
         assertEquals("dnscrypt-n2", TunnelEndpoints.dnsCryptSocksUser(2))
         assertEquals(TunnelEndpoints.SOCKS_DNSCRYPT_PASS, TunnelEndpoints.socksDnsCryptPass())
         assertEquals(TunnelEndpoints.SOCKS_PROBE_PASS, TunnelEndpoints.socksProbePass())
+        val secret = TunnelEndpoints.mintSocksSessionSecret()
+        assertEquals("u10087-s$secret", TunnelEndpoints.socksUserForUid(10087))
+        assertEquals("p10087-s$secret", TunnelEndpoints.socksPassForUid(10087))
+        assertEquals("u10087-n2-s$secret", TunnelEndpoints.socksUserForUid(10087, epoch = 2))
+        assertEquals(10087, TunnelEndpoints.uidFromSocksUser("u10087-s$secret"))
+        assertEquals(10087, TunnelEndpoints.uidFromSocksUser("u10087-n2-s$secret"))
+        // Mirrored bodies — onionmasq socks_auth_ok u*/p* contract.
+        val user = TunnelEndpoints.socksUserForUid(42, epoch = 1)
+        val pass = TunnelEndpoints.socksPassForUid(42, epoch = 1)
+        assertEquals(user.removePrefix("u"), pass.removePrefix("p"))
+        TunnelEndpoints.resetAppSocksNymEpoch()
+        assertEquals("u42", TunnelEndpoints.socksUserForUid(42))
     }
 
     @Test

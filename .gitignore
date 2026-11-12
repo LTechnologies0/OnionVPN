@@ -34,3 +34,5 @@ third_party/arti-mobile-ex/README.md
 # Full onionmasq clone / local symlink — build via native/onionmasq/; ship .so in jniLibs
 third_party/onionmasq
 third_party/onionmasq/
+third_party/onionmasq-src/
+third_party/onionmasq-src

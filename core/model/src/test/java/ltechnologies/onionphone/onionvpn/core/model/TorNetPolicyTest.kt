@@ -102,9 +102,24 @@ class TorNetPolicyTest {
         assertTrue(TorNetPolicy.isLanRoutableIpv4Literal("172.16.0.1"))
         assertFalse(TorNetPolicy.isLanRoutableIpv4Literal("100.64.0.1")) // CGNAT
         assertFalse(TorNetPolicy.isLanRoutableIpv4Literal("10.8.0.2")) // VpnTun
+        assertFalse(TorNetPolicy.isLanRoutableIpv4Literal("10.8.0.50")) // VpnTun /24
         assertFalse(TorNetPolicy.isLanRoutableIpv4Literal("10.192.0.42")) // Automap
         assertFalse(TorNetPolicy.isLanRoutableIpv4Literal("127.0.0.1"))
         assertFalse(TorNetPolicy.isLanRoutableIpv4Literal("8.8.8.8"))
+        assertEquals(TorNetPolicy.IpClass.VpnTun, TorNetPolicy.classifyIpv4Literal("10.8.0.50"))
+    }
+
+    @Test
+    fun socksConnectRefuse_allowsRfc1918_refusesOtherBlackholes() {
+        // Via LAN path: SocksUidBridge.readConnect must NOT refuse RFC1918 literals.
+        assertFalse(TorNetPolicy.mustRefuseSocksConnectIpv4Literal("192.168.0.186"))
+        assertFalse(TorNetPolicy.mustRefuseSocksConnectIpv4Literal("10.0.0.1"))
+        assertFalse(TorNetPolicy.mustRefuseSocksConnectIpv4Literal("172.16.0.1"))
+        assertFalse(TorNetPolicy.mustRefuseSocksConnectIpv4Literal("8.8.8.8"))
+        assertTrue(TorNetPolicy.mustRefuseSocksConnectIpv4Literal("100.64.0.1")) // CGNAT
+        assertTrue(TorNetPolicy.mustRefuseSocksConnectIpv4Literal("127.0.0.1"))
+        assertTrue(TorNetPolicy.mustRefuseSocksConnectIpv4Literal("10.8.0.2")) // VpnTun
+        assertTrue(TorNetPolicy.mustRefuseSocksConnectIpv4Literal("192.0.2.1")) // docs
     }
 
     @Test

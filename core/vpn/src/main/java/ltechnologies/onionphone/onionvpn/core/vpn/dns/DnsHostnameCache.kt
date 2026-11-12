@@ -26,13 +26,25 @@ object DnsHostnameCache {
         if (!TorNetPolicy.isValidDnsHostname(host)) return
         if (!TorNetPolicy.isValidDnsAddressRecord(ip) && !TunnelEndpoints.isAutomapVirtual(ip)) return
         if (looksLikeIp(host)) return
+        // Clearnet A in VirtualAddrNetwork must never overwrite onion Automap (hijack).
+        if (TunnelEndpoints.isAutomapVirtual(ip) && !TunnelEndpoints.isOnionLikeHostname(host)) {
+            return
+        }
         val previous = ipToHost.put(ip, host)
         if (previous != null && previous != host && TunnelEndpoints.isAutomapVirtual(ip)) {
             FirewallBridge.onAutomapRemap?.invoke(ip, previous, host)
         }
-        // Prefer first IPv4 A for clearnet pin; ignore AAAA / Automap virtuals here.
-        if (TunnelEndpoints.parseIpv4Literal(ip) != null && !TunnelEndpoints.isAutomapVirtual(ip)) {
-            hostToIpv4.putIfAbsent(host, ip)
+        // Pin IPv4 for SOCKS rewrite — never CGNAT/loopback/VpnTun/docs.
+        // Prefer globally routable over RFC1918 (rebinding: private-first must not stick).
+        TunnelEndpoints.parseIpv4Literal(ip)?.let { ipInt ->
+            if (TunnelEndpoints.isAutomapVirtual(ip)) return@let
+            if (TorNetPolicy.mustRefuseSocksConnectIpv4(ipInt)) return@let
+            val existing = hostToIpv4[host]
+            when {
+                existing == null -> hostToIpv4[host] = ip
+                TorNetPolicy.isLanRoutableIpv4Literal(existing) &&
+                    !TorNetPolicy.isLanRoutableIpv4(ipInt) -> hostToIpv4[host] = ip
+            }
         }
         if (previous == null) {
             val n = sizeApprox.incrementAndGet()

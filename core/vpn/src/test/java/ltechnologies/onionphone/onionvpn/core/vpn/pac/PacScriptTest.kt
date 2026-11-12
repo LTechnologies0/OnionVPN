@@ -8,11 +8,26 @@ import org.junit.Test
 class PacScriptTest {
     @Test
     fun live_pointsAtDnsCryptBridge_notRawTor() {
+        TunnelEndpoints.resetAppSocksNymEpoch()
         val pac = PacScript.build(bridgeUp = true)
         assertTrue(pac.contains("SOCKS5 127.0.0.1:${TunnelEndpoints.PAC_BRIDGE_SOCKS_PORT}"))
         assertTrue(pac.contains("DNSCrypt"))
         assertFalse(pac.contains("HTTPTunnelPort"))
         assertFalse(pac.contains("dnsResolve("))
+    }
+
+    @Test
+    fun live_embedsPacBridgeSecretWhenMinted() {
+        TunnelEndpoints.resetAppSocksNymEpoch()
+        val secret = TunnelEndpoints.mintPacBridgeSecret()
+        val pac = PacScript.build(bridgeUp = true)
+        assertTrue(
+            pac.contains(
+                "SOCKS5 ${TunnelEndpoints.SOCKS_PAC_BRIDGE_USER}:$secret@127.0.0.1:" +
+                    "${TunnelEndpoints.PAC_BRIDGE_SOCKS_PORT}",
+            ),
+        )
+        TunnelEndpoints.resetAppSocksNymEpoch()
     }
 
     @Test

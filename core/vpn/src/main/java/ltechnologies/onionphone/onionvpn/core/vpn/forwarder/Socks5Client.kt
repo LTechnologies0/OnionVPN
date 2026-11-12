@@ -1,8 +1,13 @@
 package ltechnologies.onionphone.onionvpn.core.vpn.forwarder
 
+import android.net.LocalSocket
+import android.net.LocalSocketAddress
+import java.io.Closeable
 import java.io.DataInputStream
 import java.io.DataOutputStream
 import java.io.IOException
+import java.io.InputStream
+import java.io.OutputStream
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.Socket
@@ -20,10 +25,13 @@ import timber.log.Timber
  *
  * Also supports Tor’s SOCKS `RESOLVE` (0xF0) extension used by C Tor / Arti /
  * onionmasq sidecar (`TorClient::resolve`).
+ *
+ * When [unixPath] (or [TunnelEndpoints.appsSocksUnixPath]) is set, dials a
+ * filesystem unix SocksPort — closes loopback TCP forge of the apps SessionGroup.
  */
 class Socks5Client(
-    private val proxyHost: String,
-    private val proxyPort: Int,
+    private val proxyHost: String = TunnelEndpoints.LOOPBACK,
+    private val proxyPort: Int = 0,
     private val username: String,
     private val password: String,
     private val connectTimeoutMs: Int = 20_000,
@@ -34,22 +42,41 @@ class Socks5Client(
      */
     private val handshakeTimeoutMs: Int = 120_000,
     private val protect: ((Socket) -> Boolean)? = null,
+    /**
+     * Absolute path to Tor apps SocksPort unix socket; null → TCP [proxyHost]:[proxyPort].
+     * Callers of role ports (DNSCrypt/probe/OVPN) must leave this null — only apps
+     * SessionGroup uses unix under little-t (W5-01 C2).
+     */
+    private val unixPath: String? = null,
 ) {
-    fun connect(destHost: String, destPort: Int): Socket {
+    fun connect(destHost: String, destPort: Int): SocksUpstream {
         Timber.v("SOCKS5 CONNECT via socks dest_len=%d port=%d", destHost.length, destPort)
-        val socket = openAuthedSocket()
-        val input = DataInputStream(socket.getInputStream())
-        val output = DataOutputStream(socket.getOutputStream())
+        val upstream = openAuthedUpstream()
+        val input = DataInputStream(upstream.inputStream)
+        val output = DataOutputStream(upstream.outputStream)
         try {
             writeDestinationRequest(output, CMD_CONNECT, destHost, destPort)
             readSocksReply(input, "CONNECT")
         } catch (e: Exception) {
-            runCatching { socket.close() }
+            runCatching { upstream.close() }
             throw wrapHandshake(e)
         }
         // Streaming payload — no idle read deadline on the tunnel pipe.
-        socket.soTimeout = 0
-        return socket
+        upstream.soTimeout = 0
+        return upstream
+    }
+
+    /**
+     * TCP-only convenience for callers that need [Socket] (OpenVPN protect, probes).
+     * Throws if this client is configured for unix.
+     */
+    fun connectTcpSocket(destHost: String, destPort: Int): Socket {
+        if (!unixPath.isNullOrBlank()) {
+            throw IOException("SOCKS5 unix path set — use connect() for apps SocksPort")
+        }
+        val up = connect(destHost, destPort)
+        return up.asTcpSocket()
+            ?: throw IOException("SOCKS5 expected TCP upstream")
     }
 
     /**
@@ -59,7 +86,7 @@ class Socks5Client(
      */
     fun probeAuth() {
         Timber.d("SOCKS5 auth probe")
-        openAuthedSocket().use { /* auth handshake only */ }
+        openAuthedUpstream().use { /* auth handshake only */ }
         OpTrace.debug("socks", "auth probe ok")
     }
 
@@ -75,9 +102,9 @@ class Socks5Client(
             return InetAddress.getByName(hostname)
         }
         Timber.v("SOCKS5 RESOLVE via socks host_len=%d", hostname.length)
-        openAuthedSocket().use { socket ->
-            val input = DataInputStream(socket.getInputStream())
-            val output = DataOutputStream(socket.getOutputStream())
+        openAuthedUpstream().use { upstream ->
+            val input = DataInputStream(upstream.inputStream)
+            val output = DataOutputStream(upstream.outputStream)
             try {
                 writeDestinationRequest(output, CMD_RESOLVE, hostname, destPort = 0)
                 val addr = readResolveReply(input)
@@ -89,23 +116,16 @@ class Socks5Client(
         }
     }
 
-    private fun openAuthedSocket(): Socket {
-        val socket = Socket()
-        val protectFn = protect
-        if (protectFn == null && !isLoopback(proxyHost)) {
-            runCatching { socket.close() }
-            throw IOException("VpnService.protect not wired for non-loopback SOCKS")
-        }
-        val protectedOk = protectFn?.invoke(socket) ?: true
-        if (!protectedOk && !isLoopback(proxyHost)) {
-            runCatching { socket.close() }
-            throw IOException("VpnService.protect failed for SOCKS")
-        }
-        socket.tcpNoDelay = true
-        socket.connect(InetSocketAddress(proxyHost, proxyPort), connectTimeoutMs)
-        socket.soTimeout = handshakeTimeoutMs
-        val input = DataInputStream(socket.getInputStream())
-        val output = DataOutputStream(socket.getOutputStream())
+    private fun openAuthedUpstream(): SocksUpstream {
+        val path = unixPath?.takeIf { it.isNotBlank() }
+        val upstream =
+            if (path != null) {
+                openUnix(path)
+            } else {
+                openTcp()
+            }
+        val input = DataInputStream(upstream.inputStream)
+        val output = DataOutputStream(upstream.outputStream)
 
         require(username.isNotBlank() && password.isNotBlank()) {
             "SOCKS5 username/password required for IsolateSOCKSAuth"
@@ -136,10 +156,40 @@ class Socks5Client(
                 throw IOException("SOCKS5 username/password rejected")
             }
         } catch (e: Exception) {
-            runCatching { socket.close() }
+            runCatching { upstream.close() }
             throw wrapHandshake(e)
         }
-        return socket
+        return upstream
+    }
+
+    private fun openTcp(): SocksUpstream {
+        val socket = Socket()
+        val protectFn = protect
+        if (protectFn == null && !isLoopback(proxyHost)) {
+            runCatching { socket.close() }
+            throw IOException("VpnService.protect not wired for non-loopback SOCKS")
+        }
+        val protectedOk = protectFn?.invoke(socket) ?: true
+        if (!protectedOk && !isLoopback(proxyHost)) {
+            runCatching { socket.close() }
+            throw IOException("VpnService.protect failed for SOCKS")
+        }
+        socket.tcpNoDelay = true
+        socket.connect(InetSocketAddress(proxyHost, proxyPort), connectTimeoutMs)
+        socket.soTimeout = handshakeTimeoutMs
+        return SocksUpstream.tcp(socket)
+    }
+
+    private fun openUnix(path: String): SocksUpstream {
+        val local = LocalSocket()
+        try {
+            local.connect(LocalSocketAddress(path, LocalSocketAddress.Namespace.FILESYSTEM))
+            local.soTimeout = handshakeTimeoutMs
+        } catch (e: Exception) {
+            runCatching { local.close() }
+            throw e
+        }
+        return SocksUpstream.unix(local)
     }
 
     private fun writeDestinationRequest(
@@ -265,5 +315,48 @@ class Socks5Client(
         private fun isLoopback(host: String): Boolean =
             host == "127.0.0.1" || host.equals("localhost", ignoreCase = true) ||
                 host == "::1" || host == TunnelEndpoints.LOOPBACK
+    }
+}
+
+/**
+ * Duplex after SOCKS CONNECT — TCP [Socket] or filesystem [LocalSocket] (C Tor apps unix).
+ */
+class SocksUpstream private constructor(
+    private val tcp: Socket?,
+    private val local: LocalSocket?,
+) : Closeable {
+    val inputStream: InputStream
+        get() = tcp?.getInputStream() ?: local!!.inputStream
+    val outputStream: OutputStream
+        get() = tcp?.getOutputStream() ?: local!!.outputStream
+
+    var soTimeout: Int
+        get() = tcp?.soTimeout ?: local!!.soTimeout
+        set(value) {
+            tcp?.soTimeout = value
+            local?.soTimeout = value
+        }
+
+    var tcpNoDelay: Boolean
+        get() = tcp?.tcpNoDelay ?: true
+        set(value) {
+            tcp?.tcpNoDelay = value
+        }
+
+    fun shutdownOutput() {
+        runCatching { tcp?.shutdownOutput() }
+        runCatching { local?.shutdownOutput() }
+    }
+
+    fun asTcpSocket(): Socket? = tcp
+
+    override fun close() {
+        runCatching { tcp?.close() }
+        runCatching { local?.close() }
+    }
+
+    companion object {
+        fun tcp(socket: Socket) = SocksUpstream(tcp = socket, local = null)
+        fun unix(socket: LocalSocket) = SocksUpstream(tcp = null, local = socket)
     }
 }

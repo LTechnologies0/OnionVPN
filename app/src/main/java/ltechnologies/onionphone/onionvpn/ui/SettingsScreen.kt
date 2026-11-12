@@ -267,7 +267,8 @@ fun SettingsScreen(
                 onClick = {
                     commit(local.copy(vpnAppRoutingMode = VpnAppRoutingMode.INCLUDE), restart = true)
                 },
-                enabled = controlsEnabled,
+                // Release lockdown + INCLUDE is refused at establish (W5-08 H2).
+                enabled = controlsEnabled && !local.requireOsLockdown,
                 label = { Text("Only selected") },
             )
             FilterChip(

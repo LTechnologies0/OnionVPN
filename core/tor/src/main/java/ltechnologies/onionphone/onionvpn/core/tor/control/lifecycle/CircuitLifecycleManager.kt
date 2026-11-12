@@ -539,6 +539,9 @@ class CircuitLifecycleManager(
             if (username == TunnelEndpoints.SOCKS_ISOLATION_USER) return true
             if (username == TunnelEndpoints.SOCKS_PAC_USER) return true
             if (username.startsWith("pac")) return true
+            // SoftEther control channel — long TCP must not idle-reap SessionGroup OPENVPN.
+            if (username == TunnelEndpoints.SOCKS_OPENVPN_USER) return true
+            if (username.startsWith("uopenvpn")) return true
             return false
         }
     }

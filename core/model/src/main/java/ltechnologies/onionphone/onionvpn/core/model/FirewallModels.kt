@@ -103,6 +103,20 @@ data class FirewallRule(
         }
         return true
     }
+
+    /**
+     * Corrupt / hand-edited ALLOW_LAN with empty or non-RFC1918 [destHost] would match
+     * too broadly (empty = any dest). Drop at load — never apply as Via LAN.
+     */
+    fun isPoisonLanAllow(): Boolean =
+        verdict == FirewallVerdict.ALLOW_LAN &&
+            (destHost.isBlank() || !TorNetPolicy.isLanRoutableIpv4Literal(destHost))
+
+    /**
+     * Empty [destHost] skips the host filter in [matches] → uid-wide rule (W5-04 R4).
+     * Reject at decode/upsert for every verdict.
+     */
+    fun isPoisonEmptyDest(): Boolean = destHost.isBlank()
 }
 
 /**

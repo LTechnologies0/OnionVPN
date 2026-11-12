@@ -1,5 +1,7 @@
 package ltechnologies.onionphone.onionvpn.core.tor.lifecycle
 
+import android.net.LocalSocket
+import android.net.LocalSocketAddress
 import java.io.DataInputStream
 import java.io.DataOutputStream
 import java.net.DatagramPacket
@@ -45,9 +47,29 @@ object TorReadiness {
         }
     }
 
+    /** Filesystem unix SocksPort (little-t apps SessionGroup). Throws on failure. */
+    fun assertUnixSocksReady(path: String, timeoutMs: Int = 800) {
+        Timber.v("SOCKS unix readiness probe path_len=%d timeoutMs=%d", path.length, timeoutMs)
+        try {
+            LocalSocket().use { socket ->
+                // LocalSocket has no connect timeout — rely on soTimeout for post-connect I/O.
+                socket.soTimeout = timeoutMs
+                socket.connect(
+                    LocalSocketAddress(path, LocalSocketAddress.Namespace.FILESYSTEM),
+                )
+            }
+        } catch (e: Exception) {
+            Timber.d(e, "SOCKS unix not ready")
+            throw e
+        }
+    }
+
     /** True when a SOCKS TCP connect succeeds. */
     fun isSocksReady(port: Int, timeoutMs: Int = 800): Boolean =
         runCatching { assertSocksReady(port, timeoutMs) }.isSuccess
+
+    fun isUnixSocksReady(path: String, timeoutMs: Int = 800): Boolean =
+        runCatching { assertUnixSocksReady(path, timeoutMs) }.isSuccess
 
     /**
      * Minimal DNS query to Tor DNSPort (UDP).
@@ -126,32 +148,52 @@ object TorReadiness {
      * deadlock / 180s timeout). Use [isPrimarySocksReady] for Arti.
      */
     fun assertSocksPortsReady(ports: TunnelRuntimePorts) {
+        val ovpnTor = ports.torOpenVpnIsolateSocksPort.takeIf { it > 0 }
+            ?: ports.torOpenVpnSocksPort
         OpTrace.debug(
             "tor",
             "assertSocksPortsReady socks=${ports.torSocksPort} " +
                 "dnscrypt=${ports.torDnsCryptSocksPort} probe=${ports.torProbeSocksPort} " +
-                "ovpn=${ports.torOpenVpnSocksPort}",
+                "ovpnIsolate=$ovpnTor",
         )
-        assertSocksReady(ports.torSocksPort)
+        val appsUnix = TunnelEndpoints.appsSocksUnixPath
+        if (!appsUnix.isNullOrBlank()) {
+            assertUnixSocksReady(appsUnix)
+        } else {
+            assertSocksReady(ports.torSocksPort)
+        }
         assertSocksReady(ports.torDnsCryptSocksPort)
         assertSocksReady(ports.torProbeSocksPort)
-        assertSocksReady(ports.torOpenVpnSocksPort)
+        // Little-t Tor binds OPENVPN SessionGroup on isolate; Java inject listens later.
+        assertSocksReady(ovpnTor)
     }
 
     /** @see assertSocksPortsReady */
-    fun areSocksPortsReady(ports: TunnelRuntimePorts): Boolean =
-        isSocksReady(ports.torSocksPort) &&
+    fun areSocksPortsReady(ports: TunnelRuntimePorts): Boolean {
+        val ovpnTor = ports.torOpenVpnIsolateSocksPort.takeIf { it > 0 }
+            ?: ports.torOpenVpnSocksPort
+        return (
+            TunnelEndpoints.appsSocksUnixPath?.let { isUnixSocksReady(it) }
+                ?: isSocksReady(ports.torSocksPort)
+            ) &&
             isSocksReady(ports.torDnsCryptSocksPort) &&
             isSocksReady(ports.torProbeSocksPort) &&
-            isSocksReady(ports.torOpenVpnSocksPort)
+            isSocksReady(ovpnTor)
+    }
 
     /**
      * Native Tor/Arti SOCKS only (not DNSCrypt/probe role-mux listen ports).
      * Use for Arti start/readiness/network soft recovery — [ArtiSocksRoleMux] opens the
      * other ports after [ltechnologies.onionphone.onionvpn.core.tor.arti.ArtiRuntime] returns.
      */
-    fun isPrimarySocksReady(ports: TunnelRuntimePorts): Boolean =
-        isSocksReady(ports.torSocksPort)
+    fun isPrimarySocksReady(ports: TunnelRuntimePorts): Boolean {
+        val appsUnix = TunnelEndpoints.appsSocksUnixPath
+        return if (!appsUnix.isNullOrBlank()) {
+            isUnixSocksReady(appsUnix)
+        } else {
+            isSocksReady(ports.torSocksPort)
+        }
+    }
 
     /**
      * True when apps + DNSCrypt + probe SocksPorts and DNSPort all respond.

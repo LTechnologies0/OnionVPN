@@ -22,16 +22,23 @@ internal object KotlinTorTorrc {
         nativeLibraryDir: String?,
     ): TorConfig {
         dataDirectory.mkdirs()
+        val appsUnix = TorConfigWriter.appsSocksSocketFile(dataDirectory.absolutePath)
+        runCatching { if (appsUnix.exists()) appsUnix.delete() }
+        ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints.setAppsSocksUnixPath(
+            appsUnix.absolutePath,
+        )
         val raw = TorConfigWriter.write(
             dataDirectory = dataDirectory.absolutePath,
             socksPort = ports.torSocksPort,
             dnsCryptSocksPort = ports.torDnsCryptSocksPort,
             probeSocksPort = ports.torProbeSocksPort,
-            openVpnSocksPort = ports.torOpenVpnSocksPort,
+            openVpnSocksPort = ports.torOpenVpnIsolateSocksPort
+                .takeIf { it > 0 } ?: ports.torOpenVpnSocksPort,
             httpTunnelPort = ports.torHttpTunnelPort,
             dnsPort = ports.torDnsPort,
             preferences = preferences,
             nativeLibraryDir = nativeLibraryDir,
+            appsSocksUnix = true,
         )
         val torrc = raw.lines()
             .filterNot { line ->
