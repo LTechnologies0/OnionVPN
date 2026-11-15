@@ -18,3 +18,8 @@
     public static void postEvent(java.lang.String);
     public static native <methods>;
 }
+
+# kotlin-tor (composite engine) references java.net.UnixDomainSocketAddress (API 33+).
+# Our minSdk=26 — tell R8 to ignore missing class; kotlin-tor guards usage at runtime.
+-dontwarn java.net.UnixDomainSocketAddress
+-dontwarn org.kotlintor.**
