@@ -128,6 +128,55 @@ jobs:
       - name: Analyze
         uses: github/codeql-action/analyze@v4
 
+  # Compile the kotlin-tor composite engine path (stub job above keeps testing
+  # the stubEngines source set). Mirrors the release workflow wiring.
+  build-kotlin-tor-composite:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+
+      # Pinned to the commit aligning kotlin-tor to OnionVPN's AGP 9.3.1.
+      - name: Checkout kotlin-tor composite engine
+        uses: actions/checkout@v7
+        with:
+          repository: LTechnologies0/kotlin-tor
+          ref: 7c8e23297f6ccbdcc9f60812594fa8ab1984ac49
+          path: composite/kotlin-tor
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
+        with:
+          add-job-summary: always
+
+      - uses: android-actions/setup-android@v4
+        with:
+          packages: platform-tools
+
+      - name: Create local.properties
+        run: echo "sdk.dir=${ANDROID_SDK_ROOT}" >> local.properties
+
+      - name: Ensure native binaries
+        run: |
+          chmod +x scripts/fetch-native-binaries.sh
+          if [ ! -f app/src/main/jniLibs/arm64-v8a/libtor.so ]; then
+            ./scripts/fetch-native-binaries.sh
+          fi
+
+      - name: Assemble debug with kotlin-tor composite (arm64-v8a)
+        run: >
+          ./gradlew :app:assembleDebug
+          -Ponionphone.devAbi=arm64-v8a
+          -x lint
+          --stacktrace
+          --build-cache
+
   dependency-review:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest

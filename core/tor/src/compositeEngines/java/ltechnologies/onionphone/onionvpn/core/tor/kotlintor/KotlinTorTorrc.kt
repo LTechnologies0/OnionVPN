@@ -22,11 +22,10 @@ internal object KotlinTorTorrc {
         nativeLibraryDir: String?,
     ): TorConfig {
         dataDirectory.mkdirs()
-        val appsUnix = TorConfigWriter.appsSocksSocketFile(dataDirectory.absolutePath)
-        runCatching { if (appsUnix.exists()) appsUnix.delete() }
-        ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints.setAppsSocksUnixPath(
-            appsUnix.absolutePath,
-        )
+        // kotlin-tor Socks5Server is TCP-only (ListenSpec host:port). Publishing a
+        // unix apps path would make TorReadiness / SocksUidBridge dial a socket that
+        // never exists while traffic is actually on ports.torSocksPort — hard brick.
+        ltechnologies.onionphone.onionvpn.core.model.TunnelEndpoints.setAppsSocksUnixPath(null)
         val raw = TorConfigWriter.write(
             dataDirectory = dataDirectory.absolutePath,
             socksPort = ports.torSocksPort,
@@ -38,7 +37,7 @@ internal object KotlinTorTorrc {
             dnsPort = ports.torDnsPort,
             preferences = preferences,
             nativeLibraryDir = nativeLibraryDir,
-            appsSocksUnix = true,
+            appsSocksUnix = false,
         )
         val torrc = raw.lines()
             .filterNot { line ->

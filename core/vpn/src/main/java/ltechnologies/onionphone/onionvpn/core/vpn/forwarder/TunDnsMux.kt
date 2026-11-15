@@ -249,10 +249,15 @@ class TunDnsMux(
                             } else {
                                 when (val route = FirewallBridge.engine.outboundRoute(buf, n)) {
                                     FirewallVerdict.DENY -> {
-                                        // LAN ASK/UID-miss: RST so Cake re-SYNs after Via LAN answer
-                                        // (silent drop leaves half-open until app timeout).
+                                        // LAN ASK/UID-miss: RST/ICMP so apps retry after Via LAN answer.
+                                        // Silent drop leaves half-open until app timeout.
                                         if (isRfc1918LanDestination(buf, n)) {
-                                            TcpRstUnreachable.buildForBlackholedTcp(buf, n)?.let { pkt ->
+                                            val reject = if (isUdp(buf, n)) {
+                                                IcmpUnreachable.buildForBlackholedUdp(buf, n)
+                                            } else {
+                                                TcpRstUnreachable.buildForBlackholedTcp(buf, n)
+                                            }
+                                            reject?.let { pkt ->
                                                 synchronized(tunWriteLock) {
                                                     if (running.get() && generation.get() == gen) {
                                                         localTunOut.write(pkt, 0, pkt.size)
@@ -266,8 +271,13 @@ class TunDnsMux(
                                         // SoftEther also cannot reach the user's LAN — never OVPN→LAN.
                                         if (isRfc1918LanDestination(buf, n)) {
                                             Timber.w("ALLOW_OVPN drop — LAN dest cannot use SoftEther")
-                                            // RST like DENY so apps re-SYN after Via LAN answer (B04).
-                                            TcpRstUnreachable.buildForBlackholedTcp(buf, n)?.let { pkt ->
+                                            // RST/ICMP like DENY so apps re-SYN/retry after Via LAN answer (B04).
+                                            val reject = if (isUdp(buf, n)) {
+                                                IcmpUnreachable.buildForBlackholedUdp(buf, n)
+                                            } else {
+                                                TcpRstUnreachable.buildForBlackholedTcp(buf, n)
+                                            }
+                                            reject?.let { pkt ->
                                                 synchronized(tunWriteLock) {
                                                     if (running.get() && generation.get() == gen) {
                                                         localTunOut.write(pkt, 0, pkt.size)
@@ -291,7 +301,12 @@ class TunDnsMux(
                                                 Timber.w(
                                                     "ALLOW_OVPN drop — OVPN data plane unavailable",
                                                 )
-                                                TcpRstUnreachable.buildForBlackholedTcp(buf, n)?.let { pkt ->
+                                                val reject = if (isUdp(buf, n)) {
+                                                    IcmpUnreachable.buildForBlackholedUdp(buf, n)
+                                                } else {
+                                                    TcpRstUnreachable.buildForBlackholedTcp(buf, n)
+                                                }
+                                                reject?.let { pkt ->
                                                     synchronized(tunWriteLock) {
                                                         if (running.get() && generation.get() == gen) {
                                                             localTunOut.write(pkt, 0, pkt.size)
@@ -305,6 +320,16 @@ class TunDnsMux(
                                         // Defense-in-depth: never forward non-RFC1918 as Via LAN.
                                         if (!isRfc1918LanDestination(buf, n)) {
                                             Timber.w("ALLOW_LAN drop — dest not RFC1918")
+                                        } else if (isUdp(buf, n)) {
+                                            // LAN is TCP-only via SocksUidBridge → reject UDP RFC1918.
+                                            Timber.w("ALLOW_LAN drop — UDP RFC1918 not supported")
+                                            IcmpUnreachable.buildForBlackholedUdp(buf, n)?.let { pkt ->
+                                                synchronized(tunWriteLock) {
+                                                    if (running.get() && generation.get() == gen) {
+                                                        localTunOut.write(pkt, 0, pkt.size)
+                                                    }
+                                                }
+                                            }
                                         } else {
                                             stampTcpUid(buf, n)
                                             // Onionmasq primary fd is Arti — LAN must hit
@@ -316,7 +341,12 @@ class TunDnsMux(
                                         // Never torrify RFC1918 — exits cannot reach LAN.
                                         if (isRfc1918LanDestination(buf, n)) {
                                             Timber.w("ALLOW_TOR drop — LAN dest cannot use Tor SOCKS")
-                                            TcpRstUnreachable.buildForBlackholedTcp(buf, n)?.let { pkt ->
+                                            val reject = if (isUdp(buf, n)) {
+                                                IcmpUnreachable.buildForBlackholedUdp(buf, n)
+                                            } else {
+                                                TcpRstUnreachable.buildForBlackholedTcp(buf, n)
+                                            }
+                                            reject?.let { pkt ->
                                                 synchronized(tunWriteLock) {
                                                     if (running.get() && generation.get() == gen) {
                                                         localTunOut.write(pkt, 0, pkt.size)
@@ -571,6 +601,11 @@ class TunDnsMux(
     private fun isRfc1918LanDestination(buf: ByteArray, n: Int): Boolean {
         val info = IpPacketParser.parse(buf, n) ?: return false
         return TorNetPolicy.isLanRoutableIpv4Literal(info.dstIp)
+    }
+
+    private fun isUdp(buf: ByteArray, n: Int): Boolean {
+        val info = IpPacketParser.parse(buf, n) ?: return false
+        return info.protocol == IpPacketParser.PROTO_UDP
     }
 
     /** Stamp SYN (and first-seen dest) so SocksUidBridge can IsolateSOCKSAuth after hev CONNECT. */

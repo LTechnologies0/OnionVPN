@@ -105,37 +105,19 @@ class HevSocks5TunForwarder(
                     "bridge=$bridgeHost:$bridgePort torSocks=$torSocksPort " +
                     "dnscrypt=$dnsCryptPort torDns=$torDnsPort mapdns=$useMapDns divertDns=$divertDns",
             )
-            // Prefer main_from_str (no /proc fd with password). Fall back to memfd path Start.
+            // Only FromStr path supported — no password on disk.
             val fromStrOk = hev.sockstun.TProxyService.isFromStrAvailable()
             if (!fromStrOk) {
-                val configHandle = HevConfigMaterializer.materialize(
-                    yaml = yaml,
-                    cacheDir = File(context.cacheDir, "hev"),
-                    nameHint = "hev-socks5",
+                throw TunnelFailure.ForwarderDead(
+                    "hev_fromstr_jni unavailable — hev-socks5-tunnel cannot start without FromStr"
                 )
-                hevConfigHandle = configHandle
             }
             // Start exclusive BEFORE mux — refuse must not arm TunDnsMux (W4-05).
             if (!HevTProxyGate.startExclusive(this@HevSocks5TunForwarder) {
-                    if (fromStrOk) {
-                        val rc = hev.sockstun.TProxyService.startFromStr(yaml, hevEnd.fd)
-                        if (rc != 0) {
-                            Timber.w("hev FromStr rc=%d — falling back to path Start", rc)
-                            val configHandle = HevConfigMaterializer.materialize(
-                                yaml = yaml,
-                                cacheDir = File(context.cacheDir, "hev"),
-                                nameHint = "hev-socks5",
-                            )
-                            hevConfigHandle = configHandle
-                            hev.sockstun.TProxyService.TProxyStartService(
-                                configHandle.path,
-                                hevEnd.fd,
-                            )
-                        }
-                    } else {
-                        hev.sockstun.TProxyService.TProxyStartService(
-                            hevConfigHandle!!.path,
-                            hevEnd.fd,
+                    val rc = hev.sockstun.TProxyService.startFromStr(yaml, hevEnd.fd)
+                    if (rc != 0) {
+                        throw TunnelFailure.ForwarderDead(
+                            "hev FromStr failed rc=$rc — no path fallback (pwd on disk)"
                         )
                     }
                 }

@@ -52,11 +52,12 @@ object TorReadiness {
         Timber.v("SOCKS unix readiness probe path_len=%d timeoutMs=%d", path.length, timeoutMs)
         try {
             LocalSocket().use { socket ->
-                // LocalSocket has no connect timeout — rely on soTimeout for post-connect I/O.
-                socket.soTimeout = timeoutMs
+                // Must connect before setSoTimeout — Android LocalSocket throws
+                // "socket not created" if options are set on an unbound FD (W5-unix).
                 socket.connect(
                     LocalSocketAddress(path, LocalSocketAddress.Namespace.FILESYSTEM),
                 )
+                socket.soTimeout = timeoutMs
             }
         } catch (e: Exception) {
             Timber.d(e, "SOCKS unix not ready")

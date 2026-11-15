@@ -15,8 +15,8 @@ android {
         applicationId = "ltechnologies.onionphone.onionvpn"
         minSdk = libs.versions.minSdk.get().toInt()
         targetSdk = libs.versions.targetSdk.get().toInt()
-        versionCode = 96
-        versionName = "0.3.89"
+        versionCode = 97
+        versionName = "0.3.90"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
@@ -62,6 +62,11 @@ android {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
             excludes += "META-INF/versions/9/OSGI-INF/MANIFEST.MF"
+            // BouncyCastle jars (kotlin-tor TLS provider) all ship META-INF/LICENSE.md;
+            // identical license text — safe to exclude (also covers /DEP* variants).
+            excludes += "META-INF/LICENSE*"
+            excludes += "META-INF/NOTICE*"
+            excludes += "META-INF/DEPENDENCIES"
         }
     }
 }

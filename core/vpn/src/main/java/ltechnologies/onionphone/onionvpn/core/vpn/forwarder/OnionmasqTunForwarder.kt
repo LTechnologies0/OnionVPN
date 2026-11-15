@@ -186,45 +186,28 @@ class OnionmasqTunForwarder(
                 )
                 // One process-global TProxy: Automap + ALLOW_LAN share this hev plane
                 // (cannot dual-Start). Both divert via SocksUidBridge — not OnionMasq (C2).
+                // No path fallback: startFromStr is the ONLY supported path (no password on disk).
                 val fromStrOk = hev.sockstun.TProxyService.isFromStrAvailable()
                 if (!fromStrOk) {
-                    val automapHandle = HevConfigMaterializer.materialize(
-                        yaml = automapYaml,
-                        cacheDir = java.io.File(context.cacheDir, "hev"),
-                        nameHint = "hev-onionmasq-automap",
+                    throw TunnelFailure.ForwarderDead(
+                        "hev_fromstr_jni unavailable — Automap hev cannot start without FromStr"
                     )
-                    automapHevConfigHandle = automapHandle
                 }
                 // Start Automap hev BEFORE mux — refuse must abort start (W4-05), not arm
-                // a dead DGRAM peer. Materializer kept until stop() after TProxyStop (B03).
+                // a dead DGRAM peer.
                 Timber.i(
                     "Starting Automap hev on fd=%d → SocksUidBridge :%d (shared Automap+LAN)",
                     automapHevNative.fd,
                     TunnelEndpoints.SOCKS_UID_BRIDGE_PORT,
                 )
                 if (!HevTProxyGate.startExclusive(this@OnionmasqTunForwarder) {
-                        if (fromStrOk) {
-                            val rc = hev.sockstun.TProxyService.startFromStr(
-                                automapYaml,
-                                automapHevNative.fd,
-                            )
-                            if (rc != 0) {
-                                Timber.w("Automap hev FromStr rc=%d — path fallback", rc)
-                                val automapHandle = HevConfigMaterializer.materialize(
-                                    yaml = automapYaml,
-                                    cacheDir = java.io.File(context.cacheDir, "hev"),
-                                    nameHint = "hev-onionmasq-automap",
-                                )
-                                automapHevConfigHandle = automapHandle
-                                hev.sockstun.TProxyService.TProxyStartService(
-                                    automapHandle.path,
-                                    automapHevNative.fd,
-                                )
-                            }
-                        } else {
-                            hev.sockstun.TProxyService.TProxyStartService(
-                                automapHevConfigHandle!!.path,
-                                automapHevNative.fd,
+                        val rc = hev.sockstun.TProxyService.startFromStr(
+                            automapYaml,
+                            automapHevNative.fd,
+                        )
+                        if (rc != 0) {
+                            throw TunnelFailure.ForwarderDead(
+                                "Automap hev FromStr failed rc=$rc — no path fallback (pwd on disk)"
                             )
                         }
                     }

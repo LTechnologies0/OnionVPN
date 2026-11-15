@@ -4,6 +4,25 @@ All notable changes to OnionVPN are documented here.
 
 ## [Unreleased]
 
+## [0.3.90] — 2026-11-15
+
+### Critical fixes (audit round-1, B10)
+
+- **TProxy JNI**: fail-closed initialization — silent no-op on missing `libhev-socks5-tunnel.so` / `libhev_fromstr_jni.so` is now an explicit error (`TProxyService.initError()`); callers must check `isFromStrAvailable()` before Start.
+- **kotlin-tor**: no longer publishes bogus `appsSocksUnixPath` (TCP-only engine) — prevented hard-brick if KOTLIN_TOR was selected while C Tor expects unix socket (W5-01 C2).
+- **LocalSocket readiness**: `connect()` before `setSoTimeout()` on Android `LocalSocket` (fixes "socket not created" crash on SOCKS unix probe).
+- **hev FromStr only**: removed path-based YAML fallback that wrote SOCKS session password to disk; only `hev_socks5_tunnel_main_from_str` (dlsym) is supported — password never on disk.
+- **/proc UID resolver budget**: capped all `/proc/net/{tcp,udp}{,6}` scans to 2048 lines (anti-DoS on pathological OEM stacks / Waydroid).
+- **TunDnsMux RFC1918 UDP reject**: ALLOW_TOR / ALLOW_OVPN / ALLOW_LAN / DENY verdicts on LAN UDP now return ICMP port-unreachable (was silent drop) so apps retry Via LAN promptly (B04, M4).
+- **ConnectionOwnerResolver**: SecurityException from `getConnectionOwnerUid` is now caught and falls through to `/proc` fallback (previously aborted the lookup entirely).
+- **HevTProxyGate ownership**: pre-Start `TProxyStopService()` when no prior owner cleans orphan native workers; Start/Stop serialized by token.
+
+### Build / CI
+
+- Release workflow: checkout `kotlin-tor` composite pinned to commit `7c8e232` (AGP 9.3.1 aligned; main is 9.4.1 incompatible).
+- CI workflow: new `build-kotlin-tor-composite` job compiles the composite engine path alongside the stub job.
+- `packaging.resources.excludes`: added `META-INF/LICENSE*` / `NOTICE*` / `DEPENDENCIES` to resolve BouncyCastle jar collision from kotlin-tor transitive deps.
+
 ## [0.3.89] — 2026-11-12
 
 ### Tor routing / IsolateSOCKSAuth

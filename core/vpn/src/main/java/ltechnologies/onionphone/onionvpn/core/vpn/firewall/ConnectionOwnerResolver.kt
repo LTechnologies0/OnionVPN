@@ -165,8 +165,10 @@ class ConnectionOwnerResolver(context: Context) {
                 remote = InetSocketAddress(InetAddress.getByName(info.dstIp), info.dstPort)
             } else {
                 val scratch = addressScratch.get()
-                local = socketAddress(info.srcIpInt, info.srcPort, scratch.localBytes)
-                remote = socketAddress(info.dstIpInt, info.dstPort, scratch.remoteBytes)
+                @Suppress("NULLABILITY") // ThreadLocal.withInitial guarantees non-null
+                val nonNullScratch = scratch
+                local = socketAddress(info.srcIpInt, info.srcPort, nonNullScratch.localBytes)
+                remote = socketAddress(info.dstIpInt, info.dstPort, nonNullScratch.remoteBytes)
             }
             @Suppress("NewApi")
             connectivity.getConnectionOwnerUid(protocol, local, remote)
@@ -198,7 +200,8 @@ class ConnectionOwnerResolver(context: Context) {
         val localHex = ipv4PortHex(info.srcIpInt, info.srcPort)
         val fromTcp = try {
             file.bufferedReader().useLines { lines ->
-                lines.drop(1).forEach { line ->
+                // Budget: cap /proc scan to avoid DoS on pathological systems (W5-03).
+                lines.drop(1).take(MAX_PROC_LINES).forEach { line ->
                     val parts = line.trim().split(Regex("\\s+"))
                     if (parts.size < 8) return@forEach
                     val local = parts[1]
@@ -234,7 +237,7 @@ class ConnectionOwnerResolver(context: Context) {
         val localHex = ipv4MappedV6PortHex(info.srcIpInt, info.srcPort)
         return try {
             file.bufferedReader().useLines { lines ->
-                lines.drop(1).forEach { line ->
+                lines.drop(1).take(MAX_PROC_LINES).forEach { line ->
                     val parts = line.trim().split(Regex("\\s+"))
                     if (parts.size < 8) return@forEach
                     val local = parts[1]
@@ -276,7 +279,7 @@ class ConnectionOwnerResolver(context: Context) {
         val localHex = ipv6PortHex(info.srcIp, info.srcPort)
         return try {
             file.bufferedReader().useLines { lines ->
-                lines.drop(1).forEach { line ->
+                lines.drop(1).take(MAX_PROC_LINES).forEach { line ->
                     val parts = line.trim().split(Regex("\\s+"))
                     if (parts.size < 8) return@forEach
                     val local = parts[1]
@@ -315,6 +318,8 @@ class ConnectionOwnerResolver(context: Context) {
         private const val PAC_UID_SLEEP_MS = 4L
         private const val SYN_UID_RETRY = 8
         private const val SYN_UID_PARK_NS = 2_000_000L // 2ms × 8 ≈ 16ms SYN race window
+        /** Cap /proc/net/{tcp,udp}{,6} scan — prevents DoS on pathological systems (W5-03). */
+        private const val MAX_PROC_LINES = 2048
 
         fun isValidUid(uid: Int): Boolean =
             uid != Process.INVALID_UID && uid >= 0

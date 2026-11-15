@@ -45,6 +45,16 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # Kotlin Tor engine composite (settings.gradle.kts: composite/kotlin-tor).
+      # Pinned to the commit that aligns kotlin-tor to OnionVPN's AGP 9.3.1;
+      # repin after merging it into kotlin-tor main.
+      - name: Checkout kotlin-tor composite engine
+        uses: actions/checkout@v7
+        with:
+          repository: LTechnologies0/kotlin-tor
+          ref: 7c8e23297f6ccbdcc9f60812594fa8ab1984ac49
+          path: composite/kotlin-tor
+
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
