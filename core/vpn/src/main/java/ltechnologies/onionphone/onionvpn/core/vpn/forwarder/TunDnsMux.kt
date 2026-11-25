@@ -130,6 +130,8 @@ class TunDnsMux(
     private var tunEmptyReadStreak = 0
     private var hevEmptyReadStreak = 0
 
+    val isRunning: Boolean get() = running.get()
+
     fun start() {
         if (!running.compareAndSet(false, true)) return
         val gen = generation.incrementAndGet()

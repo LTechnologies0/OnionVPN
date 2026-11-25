@@ -120,6 +120,7 @@ class HevSocks5TunForwarder(
                             "hev FromStr failed rc=$rc — no path fallback (pwd on disk)"
                         )
                     }
+                    HevTProxyGate.markNativeInitialized()
                 }
             ) {
                 throw TunnelFailure.ForwarderDead(
@@ -180,6 +181,7 @@ class HevSocks5TunForwarder(
                 Timber.w(error, "Failed to stop hev-socks5-tunnel")
             }
         }
+        HevTProxyGate.markNativeStopped()
         worker.getAndSet(null)?.cancel()
         supervisor.cancelChildren()
         uidBridge?.stop()

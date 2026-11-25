@@ -195,7 +195,12 @@ class ConnectionOwnerResolver(context: Context) {
             IpPacketParser.PROTO_UDP -> File("/proc/net/udp")
             else -> return Process.INVALID_UID
         }
-        if (!file.canRead()) return Process.INVALID_UID
+        // SELinux on Android 14+ may deny read access to /proc/net/tcp{,6} for untrusted_app.
+        // Check readability and handle permission denials gracefully.
+        if (!file.canRead()) {
+            Timber.d("proc net file not readable (SELinux?): ${file.absolutePath}")
+            return Process.INVALID_UID
+        }
         val remoteHex = ipv4PortHex(info.dstIpInt, info.dstPort)
         val localHex = ipv4PortHex(info.srcIpInt, info.srcPort)
         val fromTcp = try {
@@ -214,6 +219,10 @@ class ConnectionOwnerResolver(context: Context) {
                 }
                 Process.INVALID_UID
             }
+        } catch (error: SecurityException) {
+            // SELinux denial — treat as unreadable and fall back to API 29+ only.
+            Timber.d(error, "proc net uid lookup denied by SELinux: ${file.absolutePath}")
+            Process.INVALID_UID
         } catch (error: Exception) {
             Timber.w(error, "proc net uid lookup failed")
             Process.INVALID_UID
@@ -232,7 +241,10 @@ class ConnectionOwnerResolver(context: Context) {
             IpPacketParser.PROTO_TCP -> File("/proc/net/tcp6")
             else -> File("/proc/net/udp6")
         }
-        if (!file.canRead()) return Process.INVALID_UID
+        if (!file.canRead()) {
+            Timber.d("proc net6 mapped-v4 file not readable (SELinux?): ${file.absolutePath}")
+            return Process.INVALID_UID
+        }
         val remoteHex = ipv4MappedV6PortHex(info.dstIpInt, info.dstPort)
         val localHex = ipv4MappedV6PortHex(info.srcIpInt, info.srcPort)
         return try {
@@ -250,6 +262,9 @@ class ConnectionOwnerResolver(context: Context) {
                 }
                 Process.INVALID_UID
             }
+        } catch (error: SecurityException) {
+            Timber.d(error, "proc net6 mapped-v4 uid lookup denied by SELinux: ${file.absolutePath}")
+            Process.INVALID_UID
         } catch (error: Exception) {
             Timber.w(error, "proc net6 mapped-v4 uid lookup failed")
             Process.INVALID_UID
@@ -274,7 +289,10 @@ class ConnectionOwnerResolver(context: Context) {
             IpPacketParser.PROTO_UDP -> File("/proc/net/udp6")
             else -> return Process.INVALID_UID
         }
-        if (!file.canRead()) return Process.INVALID_UID
+        if (!file.canRead()) {
+            Timber.d("proc net6 file not readable (SELinux?): ${file.absolutePath}")
+            return Process.INVALID_UID
+        }
         val remoteHex = ipv6PortHex(info.dstIp, info.dstPort)
         val localHex = ipv6PortHex(info.srcIp, info.srcPort)
         return try {
@@ -292,6 +310,9 @@ class ConnectionOwnerResolver(context: Context) {
                 }
                 Process.INVALID_UID
             }
+        } catch (error: SecurityException) {
+            Timber.d(error, "proc net6 uid lookup denied by SELinux: ${file.absolutePath}")
+            Process.INVALID_UID
         } catch (error: Exception) {
             Timber.w(error, "proc net6 uid lookup failed")
             Process.INVALID_UID

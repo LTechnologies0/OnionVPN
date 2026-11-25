@@ -141,7 +141,7 @@ class TunnelForegroundService : Service() {
     private var torNativePackageReceiver: BroadcastReceiver? = null
     private var torNativePackageRebindJob: Job? = null
     /** Backoff retries when Always-On / Private Space unlock leaves us in Blocking. */
-    @Volatile private var alwaysOnRecoveryAttempt: Int = 0
+    private val alwaysOnRecoveryAttempt = AtomicInteger(0)
     /** When true, next [runStartSequence] keeps SESSION firewall rules (Always-On rebound). */
     @Volatile private var preserveFirewallSessionOnStart: Boolean = false
     private var blockingRecoveryJob: Job? = null
@@ -1521,6 +1521,8 @@ class TunnelForegroundService : Service() {
             dnsCryptRunning = useDnsCrypt && dnsCrypt.isRunning(),
             vpnEstablished = true,
         )
+        // Tunnel fully connected — reset HEV native failure streak.
+        ltechnologies.onionphone.onionvpn.core.vpn.forwarder.HevTProxyGate.recordSuccess()
         // Wake Tor if we previously SIGNAL DORMANT from kill-switch Blocking (C Tor only).
         maybeSignalActive()
         // HEV / classic / arti-mobile Ext only — onionmasq has no live dirtiness JNI.
@@ -1764,7 +1766,7 @@ class TunnelForegroundService : Service() {
     private fun maybeScheduleBlockingRecovery(fromAlwaysOn: Boolean) {
         // Always-On, prior recovery lane, or network flap while Blocking — all eligible.
         if (!fromAlwaysOn &&
-            alwaysOnRecoveryAttempt <= 0 &&
+            alwaysOnRecoveryAttempt.get() <= 0 &&
             !OnionVpnService.vpnAlwaysOn.value &&
             _snapshot.value.phase != TunnelPhase.Blocking
         ) {
@@ -1773,18 +1775,19 @@ class TunnelForegroundService : Service() {
         if (_snapshot.value.phase != TunnelPhase.Blocking && !fromAlwaysOn) return
         blockingRecoveryJob?.cancel()
         blockingRecoveryJob = scope.launch {
-            while (isActive && alwaysOnRecoveryAttempt < MAX_ALWAYS_ON_RECOVERY) {
-                delay(ALWAYS_ON_RECOVERY_BASE_MS * (1L shl alwaysOnRecoveryAttempt.coerceAtMost(3)))
+            while (isActive && alwaysOnRecoveryAttempt.get() < MAX_ALWAYS_ON_RECOVERY) {
+                val attempt = alwaysOnRecoveryAttempt.get()
+                delay(ALWAYS_ON_RECOVERY_BASE_MS * (1L shl attempt.coerceAtMost(3)))
                 if (_snapshot.value.phase != TunnelPhase.Blocking) return@launch
                 if (!hasValidatedNonVpnUplink()) {
                     Timber.d("Blocking recovery: waiting for VALIDATED uplink")
                     continue
                 }
                 if (tunnelJob?.isActive == true) return@launch
-                alwaysOnRecoveryAttempt++
+                val attempt = alwaysOnRecoveryAttempt.incrementAndGet()
                 Timber.i(
                     "Blocking recovery attempt %d/%d",
-                    alwaysOnRecoveryAttempt,
+                    attempt,
                     MAX_ALWAYS_ON_RECOVERY,
                 )
                 lifecycleMutex.withLock {

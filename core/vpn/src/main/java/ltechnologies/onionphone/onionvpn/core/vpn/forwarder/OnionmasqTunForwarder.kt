@@ -210,6 +210,7 @@ class OnionmasqTunForwarder(
                                 "Automap hev FromStr failed rc=$rc — no path fallback (pwd on disk)"
                             )
                         }
+                        HevTProxyGate.markNativeInitialized()
                     }
                 ) {
                     throw TunnelFailure.ForwarderDead(
@@ -339,6 +340,7 @@ class OnionmasqTunForwarder(
                 Timber.w(error, "Failed to stop Automap hev")
             }
         }
+        HevTProxyGate.markNativeStopped()
         automapHevWorker.getAndSet(null)?.cancel()
         uidBridge?.stop()
         uidBridge = null
